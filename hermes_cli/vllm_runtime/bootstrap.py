@@ -177,10 +177,10 @@ def start_managed_vllm(config: dict | None = None, *, apply_recommend: bool = Tr
     cfg = load_config() if config is None else config
     if apply_recommend:
         cfg = load_config()
-    from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
+    from hermes_cli.local_engines import stop_llama_engine
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
 
-    shutdown_local_runtime()
+    stop_llama_engine()
     require_gpu_free()
     sup = ensure_managed_engine(cfg, force=True)
     if sup is None:
