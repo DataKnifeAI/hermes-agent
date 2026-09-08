@@ -116,6 +116,54 @@ def select_backend(gpu_vendor: str | None, os_name: str | None = None) -> str:
     return "cpu"
 
 
+# Preferred first, then the rest. Metal is macOS-only and has no sibling.
+_BACKEND_FALLBACK = ("cuda", "vulkan", "hip", "cpu")
+
+
+def backend_fallback_ladder(preferred: str) -> list[str]:
+    """``preferred`` first, then cuda → vulkan → hip → cpu. Metal stays Metal."""
+    if preferred == "metal":
+        return ["metal"]
+    order: list[str] = []
+    for name in (preferred, *_BACKEND_FALLBACK):
+        if name not in order:
+            order.append(name)
+    return order
+
+
+def first_resolvable_backend(preferred: str, tag: str, os_name: str | None = None,
+                             arch: str | None = None) -> str:
+    """First backend on the documented ladder that this platform ships an asset for.
+
+    ``select_backend`` names the *preferred* engine (CUDA on NVIDIA). Linux has no
+    CUDA prebuild, so callers that install or start must walk this ladder instead
+    of treating the preferred name as already-resolvable.
+    """
+    last: BinaryResolutionError | None = None
+    for backend in backend_fallback_ladder(preferred):
+        try:
+            resolve_assets(tag, backend, os_name=os_name, arch=arch)
+            return backend
+        except BinaryResolutionError as exc:
+            last = exc
+    raise last or BinaryResolutionError(f"no installable backend from {preferred}")
+
+
+def installed_backend(tag: str, preferred: str | None = None) -> str | None:
+    """Verified backend dir under ``tag``. Prefer ``preferred``, then the fallback ladder."""
+    root = runtimes_root() / tag
+    if not root.exists():
+        return None
+    have = {p.name for p in root.iterdir()
+            if p.is_dir() and manifest_verified(p / "manifest.json")}
+    if not have:
+        return None
+    for name in backend_fallback_ladder(preferred or "cpu"):
+        if name in have:
+            return name
+    return next(iter(sorted(have)), None)
+
+
 # Per-OS (human label, {backend: asset-name templates}). Windows CUDA pairs the runtime zip with
 # its cudart zip; ubuntu ships tarballs, win ships zips.
 _ASSET_TEMPLATES = {

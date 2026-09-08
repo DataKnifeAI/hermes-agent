@@ -207,12 +207,11 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
 
     try:
         from hermes_cli.local_runtime.binaries import (
-            default_tag, ensure_runtime_installed, installed_tags, select_backend)
+            default_tag, ensure_runtime_installed, installed_backend, installed_tags,
+            select_backend)
         from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
 
         backend = section.get("backend", "auto")
-        if backend == "auto":
-            backend = select_backend(_detect_gpu_vendor())
         # Boot ladder: serve what is INSTALLED, never download here. The configured tag is
         # preferred; when it isn't installed yet, the newest installed tag serves and the status
         # endpoint reports the pending update — the download is a deliberate click in the pane,
@@ -228,6 +227,16 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
             logger.info("configured tag %s not installed; serving %s "
                         "(update is a click in Local Models)", tag, have[0])
             tag = have[0]
+        # auto prefers CUDA on NVIDIA, but Linux ships no CUDA zip — serve the installed
+        # vulkan/cpu build instead of dying in resolve_assets. An explicit backend stays
+        # explicit (source-built CUDA, a pinned cpu install).
+        if backend == "auto":
+            preferred = select_backend(_detect_gpu_vendor())
+            backend = installed_backend(tag, preferred)
+            if backend is None:
+                logger.info("local runtime enabled but no build installed; "
+                            "install happens in the Local Models pane")
+                return None
         install_dir = ensure_runtime_installed(tag, backend)
 
         mdir = models_dir()

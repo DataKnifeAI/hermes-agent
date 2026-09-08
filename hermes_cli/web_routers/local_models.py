@@ -212,7 +212,10 @@ def _runtime_target(requested: str | None = None) -> "tuple[str, str]":
     tag = section.get("tag") or binaries.default_tag()
     backend = requested or section.get("backend", "auto")
     if backend == "auto":
-        backend = binaries.select_backend(bootstrap._detect_gpu_vendor())
+        # Preferred name (CUDA on NVIDIA) may have no prebuild on this OS — walk
+        # cuda → vulkan → cpu so install/quickstart don't 400 on Linux NVIDIA.
+        backend = binaries.first_resolvable_backend(
+            binaries.select_backend(bootstrap._detect_gpu_vendor()), tag)
     return tag, backend
 
 

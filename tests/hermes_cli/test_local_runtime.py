@@ -20,6 +20,8 @@ import pytest
 from hermes_cli.local_runtime.binaries import (
     AssetPlan,
     BinaryResolutionError,
+    first_resolvable_backend,
+    installed_backend,
     resolve_assets,
     select_backend,
 )
@@ -226,6 +228,36 @@ def test_install_dir_is_profile_scoped(tmp_path, monkeypatch):
 ])
 def test_backend_selection(vendor, os_name, expected):
     assert select_backend(vendor, os_name=os_name) == expected
+
+
+def test_first_resolvable_skips_unshipped_linux_cuda():
+    """Linux NVIDIA prefers CUDA, but no prebuild exists — install/start must
+    land on vulkan (or cpu), not raise BinaryResolutionError."""
+    assert first_resolvable_backend("cuda", "b10679", os_name="ubuntu", arch="x64") == "vulkan"
+    assert first_resolvable_backend("cuda", "b10679", os_name="win", arch="x64") == "cuda"
+    assert first_resolvable_backend("cpu", "b10679", os_name="ubuntu", arch="x64") == "cpu"
+
+
+def test_installed_backend_prefers_ladder(tmp_path, monkeypatch):
+    """When CUDA isn't on disk, the installed vulkan/cpu build is the one to serve."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    from hermes_cli.local_runtime import binaries
+
+    cpu = binaries.runtimes_root() / "b10679" / "cpu"
+    cpu.mkdir(parents=True)
+    (cpu / "manifest.json").write_text(json.dumps({
+        "tag": "b10679", "backend": "cpu", "assets": {},
+        "verified_version": "version: 0.3.0-dev (build 10679)",
+    }), encoding="utf-8")
+    assert installed_backend("b10679", "cuda") == "cpu"
+
+    vulkan = binaries.runtimes_root() / "b10679" / "vulkan"
+    vulkan.mkdir(parents=True)
+    (vulkan / "manifest.json").write_text(json.dumps({
+        "tag": "b10679", "backend": "vulkan", "assets": {},
+        "verified_version": "version: 0.3.0-dev (build 10679)",
+    }), encoding="utf-8")
+    assert installed_backend("b10679", "cuda") == "vulkan"
 
 
 def test_sha256_mismatch_rejects(tmp_path, monkeypatch):
@@ -811,3 +843,55 @@ def test_bootstrap_failure_never_raises(tmp_path, monkeypatch):
         "hermes_cli.local_runtime.binaries.ensure_runtime_installed", boom)
     result = bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}})
     assert result is None  # no exception escaped
+
+
+def test_bootstrap_auto_serves_installed_cpu_when_cuda_unshipped(tmp_path, monkeypatch):
+    """Linux NVIDIA + auto must not die in resolve_assets: serve the installed
+    cpu/vulkan build. This is the Desktop 'Set up for me' failure on hosts
+    where nvidia-smi works but no Linux CUDA zip exists."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    from hermes_cli.local_runtime import bootstrap, binaries
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+    monkeypatch.setattr(bootstrap, "_SUPERVISOR", None)
+    monkeypatch.setattr(bootstrap, "_detect_gpu_vendor", lambda: "nvidia")
+
+    tag = DEFAULT_CONFIG["local_runtime"]["tag"]
+    mdir = bootstrap.models_dir()
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / "Toy-Q4_K_M.gguf").write_bytes(b"GGUF")
+    cpu = binaries.runtimes_root() / tag / "cpu"
+    cpu.mkdir(parents=True)
+    (cpu / "manifest.json").write_text(json.dumps({
+        "tag": tag, "backend": "cpu", "assets": {},
+        "verified_version": f"version: 0.3.0-dev (build {tag.lstrip('b')})",
+    }), encoding="utf-8")
+
+    seen: list[tuple[str, str]] = []
+
+    def _record(got_tag, got_backend, **_k):
+        seen.append((got_tag, got_backend))
+        return binaries.runtimes_root() / got_tag / got_backend
+
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.binaries.ensure_runtime_installed", _record)
+
+    class _Dummy:
+        base_url = "http://127.0.0.1:1/v1"
+        proc = None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.supervisor.LlamaServerSupervisor",
+        lambda *a, **k: _Dummy())
+    monkeypatch.setattr(bootstrap, "_generate_presets", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap, "_start_idle_sweeper", lambda *a, **k: None)
+
+    result = bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}})
+    assert result is not None
+    assert seen == [(tag, "cpu")]
