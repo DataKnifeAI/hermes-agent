@@ -1,0 +1,429 @@
+"""Contracts for the managed vLLM engine (Phase 1).
+
+Relationships, not snapshots: default engine merge, argv bind/tool-parser,
+VRAM → feasible, activate loopback-vs-remote, stop-other-engine ordering.
+A fake ``vllm`` executable serves ``GET /v1/models`` — no live GPU.
+"""
+
+from __future__ import annotations
+
+import json
+import socket
+import stat
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+import yaml
+
+from hermes_cli.config_defaults import DEFAULT_CONFIG
+from hermes_cli.vllm_runtime.recommend import MIN_CONTEXT, TIERS, recommend_vllm
+from hermes_cli.vllm_runtime.supervisor import serve_argv, vllm_settings
+
+
+_GIB = 1 << 30
+
+_FAKE_VLLM = textwrap.dedent("""\
+    import sys
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    port = 18435
+    host = "127.0.0.1"
+    args = sys.argv[1:]
+    if args and args[0] == "serve":
+        args = args[1:]
+    if args:
+        args = args[1:]  # model id
+    i = 0
+    while i < len(args):
+        if args[i] == "--port" and i + 1 < len(args):
+            port = int(args[i + 1]); i += 2; continue
+        if args[i] == "--host" and i + 1 < len(args):
+            host = args[i + 1]; i += 2; continue
+        i += 1
+    bind = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.split("?")[0] == "/v1/models":
+                body = b'{"object":"list","data":[{"id":"hermes3:8b"}]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+        def log_message(self, *args):
+            pass
+
+    HTTPServer((bind, port), H).serve_forever()
+""")
+
+
+def _write_fake_vllm(path: Path) -> Path:
+    path.write_text(f"#!{sys.executable}\n{_FAKE_VLLM}", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+def test_default_engine_is_llamacpp_and_missing_key_deep_merges():
+    from hermes_cli.config import _deep_merge
+
+    section = DEFAULT_CONFIG["local_runtime"]
+    assert section["engine"] == "llamacpp"
+    vllm = section["vllm"]
+    assert vllm["host"] == "127.0.0.1"
+    from hermes_cli.vllm_runtime.supervisor import DEFAULT_LISTEN_PORT, LLAMA_CPP_PORT
+
+    # 0 = pick at spawn (llama.cpp's rule). Preferred bind is not llama.cpp's
+    # port and not the ports a user's own vLLM/Ollama already occupy.
+    assert int(vllm["port"]) == 0
+    assert DEFAULT_LISTEN_PORT != LLAMA_CPP_PORT
+    assert DEFAULT_LISTEN_PORT not in (8000, 8080)
+    assert int(vllm["max_model_len"]) >= MIN_CONTEXT
+
+    merged = _deep_merge(DEFAULT_CONFIG, {"local_runtime": {"enabled": True}})
+    assert merged["local_runtime"]["engine"] == "llamacpp"
+    assert merged["local_runtime"]["vllm"]["host"] == "127.0.0.1"
+
+
+def test_serve_argv_loopback_and_hermes_tool_parser():
+    from hermes_cli.vllm_runtime.supervisor import DEFAULT_LISTEN_PORT, LLAMA_CPP_PORT
+
+    settings = vllm_settings(DEFAULT_CONFIG)
+    argv = serve_argv("/opt/venv/bin/vllm", settings)
+    assert argv[0].endswith("vllm")
+    assert argv[1] == "serve"
+    assert "--host" in argv
+    assert argv[argv.index("--host") + 1] == "127.0.0.1"
+    assert "--enable-auto-tool-choice" in argv
+    assert argv[argv.index("--tool-call-parser") + 1] == "hermes"
+    port = int(argv[argv.index("--port") + 1])
+    assert port == (int(settings["port"]) or DEFAULT_LISTEN_PORT)
+    assert port != LLAMA_CPP_PORT
+    assert port not in (8000, 8080)
+    # 1-click never binds all-interfaces unless the user set host.
+    settings["host"] = "0.0.0.0"
+    remote = serve_argv("/opt/venv/bin/vllm", settings)
+    assert remote[remote.index("--host") + 1] == "0.0.0.0"
+
+
+def test_recommend_vram_relationship_not_snapshot():
+    floor = min(t.min_vram_bytes for t in TIERS if t.feasible_at_64k)
+    tight = recommend_vllm(total_bytes=8 * _GIB)
+    assert tight.tier is not None
+    assert tight.tier.min_vram_bytes <= 8 * _GIB
+    assert tight.feasible is False
+    assert tight.max_model_len >= MIN_CONTEXT
+
+    roomy = recommend_vllm(total_bytes=24 * _GIB)
+    assert roomy.tier is not None
+    assert roomy.tier.min_vram_bytes <= 24 * _GIB
+    assert roomy.feasible is True
+    assert roomy.feasible == (24 * _GIB >= floor)
+    assert "/" in roomy.model  # Hugging Face id
+
+    none = recommend_vllm(total_bytes=0)
+    assert none.feasible is False
+    assert none.tier is None
+
+
+def test_recommend_libcuda_when_smi_missing(monkeypatch):
+    """Driver/library mismatch: nvidia-smi dead, ctypes libcuda still sees the card."""
+    import hermes_cli.local_runtime.hardware as hardware
+    from hermes_cli.vllm_runtime.recommend import probe_nvidia_vram, recommend_vllm as rec
+
+    monkeypatch.setattr(hardware, "_nvidia_vram", lambda: None)
+    monkeypatch.setattr(hardware, "_cuda_driver_pool", lambda: (24 * _GIB, False))
+    probe = probe_nvidia_vram()
+    assert probe.source == "libcuda"
+    assert probe.total_bytes == 24 * _GIB
+    result = rec(probe=probe)
+    assert result.feasible is True
+
+
+def test_switch_to_vllm_stops_llama_first(monkeypatch):
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.bootstrap.shutdown_local_runtime",
+        lambda: order.append("llama_stop"))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda config=None, force=False, **kw: order.append("vllm_start") or "sup")
+    from hermes_cli.local_engines import ensure_managed_engine
+
+    ensure_managed_engine({"local_runtime": {"enabled": True, "engine": "vllm"}}, force=True)
+    assert order == ["llama_stop", "vllm_start"]
+
+
+def test_switch_to_llamacpp_stops_vllm_first(monkeypatch):
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.shutdown_vllm_runtime",
+        lambda: order.append("vllm_stop"))
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.bootstrap.ensure_local_runtime",
+        lambda config=None, force=False: order.append("llama_start") or "sup")
+    from hermes_cli.local_engines import ensure_managed_engine
+
+    ensure_managed_engine({"local_runtime": {"enabled": True, "engine": "llamacpp"}}, force=True)
+    assert order == ["vllm_stop", "llama_start"]
+
+
+def test_activate_writes_loopback_v1_and_preserves_remote(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("cli._hermes_home", home)
+
+    from cli import save_config_value
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
+
+    (home / "config.yaml").write_text(yaml.dump({"model": {}}), encoding="utf-8")
+    url = activate_vllm_provider(load_config())
+    cfg = load_config()
+    assert cfg["model"]["provider"] == "vllm"
+    assert cfg["model"]["default"]
+    assert url.endswith("/v1")
+    host = url.split("://", 1)[-1].split(":")[0]
+    assert host in ("127.0.0.1", "localhost")
+    assert cfg["model"]["base_url"] == url
+
+    save_config_value("model.base_url", "http://gpu-box.example:8000/v1")
+    kept = activate_vllm_provider(load_config())
+    assert kept == "http://gpu-box.example:8000/v1"
+    assert load_config()["model"]["base_url"] == kept
+
+
+def test_ensure_vllm_runtime_fake_server(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+
+    fake = _write_fake_vllm(tmp_path / "fake-vllm")
+    import hermes_cli.vllm_runtime.bootstrap as boot
+
+    monkeypatch.setattr(boot, "_SUPERVISOR", None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    cfg = {
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {"host": "127.0.0.1",
+                     "model": "solidrust/Hermes-3-Llama-3.1-8B-AWQ",
+                     "served_model_name": "hermes3:8b"},
+        },
+    }
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cfg["local_runtime"]["vllm"]["port"] = port
+
+    try:
+        sup = boot.ensure_vllm_runtime(cfg, force=True, executable=fake, timeout_s=15)
+        assert sup is not None
+        assert sup.base_url.endswith("/v1")
+        assert str(port) in sup.base_url
+        state = json.loads((home / "runtimes" / "vllm" / "server.json").read_text())
+        assert state["pid"] == sup.proc.pid
+        assert state["base_url"].endswith("/v1")
+        monkeypatch.setattr("cli._hermes_home", home)
+        (home / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+        from hermes_cli.config import load_config
+
+        url = boot.activate_vllm_provider(cfg)
+        assert str(sup.port) in url
+        assert str(sup.port) in load_config()["model"]["base_url"]
+    finally:
+        boot.shutdown_vllm_runtime()
+        hermes_constants._default_hermes_root_memo = None
+
+
+def test_vllm_runtimes_are_machine_scoped(tmp_path, monkeypatch):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    import hermes_constants
+
+    hermes_constants._default_hermes_root_memo = None
+    from hermes_cli.vllm_runtime.venv import runtimes_root
+
+    assert runtimes_root() == root / "runtimes" / "vllm"
+    assert "profiles" not in runtimes_root().parts
+
+
+def test_venv_python_defaults_to_hermes_interpreter_not_a_pin():
+    from hermes_cli.vllm_runtime.venv import resolve_venv_python
+
+    with pytest.raises(RuntimeError, match="need CPython"):
+        resolve_venv_python("notapython")
+    resolved = resolve_venv_python("")
+    assert resolved
+    path = Path(resolved)
+    if path.is_file():
+        import json
+        import subprocess
+        major, minor = json.loads(subprocess.check_output(
+            [str(path), "-c", "import json,sys; print(json.dumps(list(sys.version_info[:2])))"],
+            text=True,
+        ))
+        assert (major, minor) >= (3, 12)
+    else:
+        assert resolved[0].isdigit()
+
+
+def test_ensure_venv_never_installs_into_hermes_prefix(tmp_path, monkeypatch):
+    """Wheels go under runtimes/vllm/.venv, never sys.prefix (the Hermes venv)."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(venv_mod, "resolve_venv_python", lambda pin="": str(Path(sys.executable)))
+    hermes_prefix = Path(sys.prefix).resolve()
+    calls: list[list[str]] = []
+
+    def _fake_stream(cmd, log_path):
+        calls.append(list(cmd))
+        dest = venv_mod.venv_dir()
+        bin_dir = dest / ("Scripts" if sys.platform == "win32" else "bin")
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / ("python.exe" if sys.platform == "win32" else "python")).write_text("", encoding="utf-8")
+        exe = "vllm.exe" if sys.platform == "win32" else "vllm"
+        (bin_dir / exe).write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(venv_mod, "_stream", _fake_stream)
+    monkeypatch.setattr(venv_mod, "_assert_cuda", lambda py: None)
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda py: None)
+    monkeypatch.setattr(venv_mod, "shutil", venv_mod.shutil)
+    monkeypatch.setattr(venv_mod.shutil, "which", lambda name: None)
+
+    exe = venv_mod.ensure_vllm_venv("")
+    assert hermes_prefix not in exe.resolve().parents
+    assert "runtimes" in exe.parts and "vllm" in exe.parts
+    assert calls, "expected a venv create / pip command"
+    for cmd in calls:
+        joined = " ".join(cmd)
+        assert str(hermes_prefix) not in joined or "-m venv" in joined
+        # pip/uv install target is the isolated dest, not Hermes site-packages.
+        if "pip" in cmd or (len(cmd) > 1 and cmd[1] == "pip"):
+            assert str(venv_mod.venv_dir()) in joined or str(venv_mod.venv_python()) in joined
+
+
+def test_pick_listen_port_never_shares_llamacpp_and_falls_back_when_busy():
+    from hermes_cli.vllm_runtime.supervisor import LLAMA_CPP_PORT, pick_listen_port
+
+    picked = pick_listen_port(0)
+    assert picked != LLAMA_CPP_PORT
+    assert picked not in (8000, 8080)
+    # Asking for llama.cpp's port still lands on the vLLM default or ephemeral.
+    redirected = pick_listen_port(LLAMA_CPP_PORT)
+    assert redirected != LLAMA_CPP_PORT
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        taken = busy.getsockname()[1]
+        fallback = pick_listen_port(taken)
+    assert fallback != taken
+    assert fallback != LLAMA_CPP_PORT
+
+
+def test_gpu_process_name_is_foreign_llm_not_desktop():
+    from hermes_cli.vllm_runtime.occupancy import gpu_process_is_foreign_llm
+
+    assert gpu_process_is_foreign_llm("VLLM::EngineCore", 42, set())
+    assert not gpu_process_is_foreign_llm("VLLM::EngineCore", 42, {42})
+    assert gpu_process_is_foreign_llm("llama-server", 7, set())
+    assert not gpu_process_is_foreign_llm("kwin_wayland", 1, set())
+    assert not gpu_process_is_foreign_llm("brave", 2, set())
+
+
+def test_occupancy_http_stub_mentions_stop(monkeypatch):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    from hermes_cli.vllm_runtime.occupancy import (
+        OccupyingLlmError, discover_occupying_llms, occupancy_stop_message,
+        require_gpu_free)
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.split("?")[0] == "/v1/models":
+                body = b'{"object":"list","data":[{"id":"x","owned_by":"vllm"}]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        port = httpd.server_address[1]
+        empty = discover_occupying_llms(
+            ports=(), gpu_rows=[], our_pids=set(), our_ports=set())
+        assert empty == []
+        assert occupancy_stop_message(empty) is None
+
+        hits = discover_occupying_llms(
+            ports=(port,), gpu_rows=[], our_pids=set(), our_ports=set())
+        assert hits
+        msg = occupancy_stop_message(hits)
+        assert msg is not None
+        assert "Stop it so managed vLLM" in msg
+        assert str(port) in msg
+
+        monkeypatch.setattr(
+            "hermes_cli.vllm_runtime.occupancy.discover_occupying_llms",
+            lambda **kw: hits)
+        with pytest.raises(OccupyingLlmError, match="Stop it so managed vLLM"):
+            require_gpu_free()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_start_managed_vllm_refuses_foreign_llm_after_stopping_llama(monkeypatch):
+    order: list[str] = []
+    from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
+
+    monkeypatch.setattr("cli.save_config_value", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.bootstrap.shutdown_local_runtime",
+        lambda: order.append("llama_stop"))
+
+    def _occupied():
+        order.append("occupancy")
+        raise OccupyingLlmError(
+            "Another LLM is already running (Ollama on http://127.0.0.1:11434). "
+            "Stop it so managed vLLM can use the GPU.")
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.occupancy.require_gpu_free", _occupied)
+    monkeypatch.setattr(
+        "hermes_cli.local_engines.ensure_managed_engine",
+        lambda *a, **k: order.append("start") or "sup")
+    from hermes_cli.vllm_runtime.bootstrap import start_managed_vllm
+
+    with pytest.raises(OccupyingLlmError, match="Stop it so managed vLLM"):
+        start_managed_vllm({"local_runtime": {}}, apply_recommend=False)
+    assert order == ["llama_stop", "occupancy"]
+

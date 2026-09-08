@@ -220,16 +220,16 @@ async def _lifespan(app: "FastAPI"):
     # Live auto-archive timer, independent of list requests.
     auto_archive_task = asyncio.create_task(_auto_archive_ticker_loop())
 
-    # Managed local runtime (local_runtime.enabled): bring llama-server back so a
-    # restart doesn't strand a llamacpp main model. Off-thread and best-effort;
-    # failure falls back to cloud providers like a cold start. Server only —
-    # models load on first inference (an empty router holds no VRAM).
+    # Managed local engine (local_runtime.enabled): bring the configured engine
+    # (llama.cpp default, or vLLM) back so a restart doesn't strand a local main
+    # model. Off-thread and best-effort; failure falls back to cloud providers
+    # like a cold start.
     def _boot_local_runtime():
         try:
             from hermes_cli.config import load_config
-            from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
+            from hermes_cli.local_engines import ensure_managed_engine
 
-            ensure_local_runtime(load_config())
+            ensure_managed_engine(load_config())
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning("local runtime boot failed: %s", exc)
 
@@ -247,11 +247,11 @@ async def _lifespan(app: "FastAPI"):
         selftest_task.cancel()
         auto_archive_task.cancel()
         await PTY_REGISTRY.close_all()
-        # Stop the managed llama-server with its parent (an orphan pins VRAM).
+        # Stop the managed local engine with its parent (an orphan pins VRAM).
         try:
-            from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
+            from hermes_cli.local_engines import shutdown_managed_engine
 
-            shutdown_local_runtime()
+            shutdown_managed_engine()
         except Exception:  # noqa: BLE001
             pass
         if os.getenv("HERMES_DESKTOP") == "1":

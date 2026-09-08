@@ -1,0 +1,190 @@
+"""Bootstrap for the managed vLLM engine: config -> isolated venv -> supervised serve.
+
+``ensure_vllm_runtime(config)`` is safe at session start: disabled -> no-op.
+When enabled, Hermes creates the venv and pip-installs vLLM if needed — the user
+does not run pip, uv, or a third-party installer. Failures log and return None
+so chat can fall back to configured providers.
+"""
+
+from __future__ import annotations
+
+from contextlib import suppress
+import logging
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+_SUPERVISOR = None
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def _is_loopback_url(url: str) -> bool:
+    """True when *url* is empty or a loopback OpenAI base — managed activate may overwrite."""
+    text = (url or "").strip()
+    if not text:
+        return True
+    try:
+        host = (urlparse(text).hostname or "").lower()
+    except ValueError:
+        return False
+    if host in _LOOPBACK_HOSTS:
+        return True
+    return host.startswith("127.")
+
+
+def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
+                        *, executable=None, timeout_s: int = 1800):
+    """Idempotent boot of managed vLLM. Returns the supervisor or None.
+
+    First start downloads HF weights inside ``vllm serve``, so the default
+    ready-timeout is long. Tests inject a fake executable and a short timeout.
+    """
+    global _SUPERVISOR
+    section = (config or {}).get("local_runtime") or {}
+    if not force and not section.get("enabled"):
+        return None
+    if _SUPERVISOR is not None:
+        return _SUPERVISOR
+
+    from pathlib import Path
+
+    from hermes_cli.vllm_runtime.endpoint import _state_endpoint
+    from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError, require_gpu_free
+    from hermes_cli.vllm_runtime.supervisor import VllmSupervisor, vllm_settings
+    from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
+
+    state = _state_endpoint()
+    if state is not None:
+        logger.info("managed vLLM already running (another process)")
+        return None
+
+    try:
+        require_gpu_free()
+    except OccupyingLlmError as exc:
+        logger.warning("%s", exc)
+        return None
+
+    settings = vllm_settings(config)
+    if executable is not None:
+        exe_path = Path(executable)
+    else:
+        try:
+            exe_path = ensure_vllm_venv(str(settings.get("python") or ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vLLM venv install failed: %s", exc)
+            return None
+    if not exe_path.is_file():
+        logger.warning("vLLM executable missing: %s", exe_path)
+        return None
+
+    try:
+        sup = VllmSupervisor(settings, executable=exe_path)
+        sup.start(timeout_s=timeout_s)
+        _SUPERVISOR = sup
+        return sup
+    except Exception as exc:  # noqa: BLE001 — never break session start
+        logger.warning("managed vLLM runtime unavailable: %s", exc)
+        return None
+
+
+def shutdown_vllm_runtime() -> None:
+    global _SUPERVISOR
+    if _SUPERVISOR is not None:
+        _SUPERVISOR.stop()
+        _SUPERVISOR = None
+
+
+def get_supervisor():
+    return _SUPERVISOR
+
+
+def _model_section(config: dict | None) -> dict:
+    model = (config or {}).get("model")
+    return model if isinstance(model, dict) else {}
+
+
+def activate_vllm_provider(config: dict | None = None) -> str:
+    """Point ``model.provider`` at managed (or already-remote) vLLM via the config API.
+
+    Overwrites ``model.base_url`` only when the current URL is empty or loopback.
+    A remote ``provider: vllm`` URL is left alone. Returns the URL that applies.
+    """
+    from cli import save_config_value
+    from hermes_cli.config import load_config, save_config
+    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
+
+    cfg = config if config is not None else load_config()
+    settings = vllm_settings(cfg)
+    served = str(settings.get("served_model_name") or "hermes3:8b")
+    sup = get_supervisor()
+    if sup is not None:
+        managed = sup.base_url
+    else:
+        state = resolve_vllm_endpoint()
+        managed = (state or {}).get("base_url") or openai_base_url(settings)
+    current = str(_model_section(cfg).get("base_url") or "").strip()
+    write_url = managed if _is_loopback_url(current) else current
+
+    save_config_value("model.provider", "vllm")
+    save_config_value("model.default", served)
+    if _is_loopback_url(current):
+        save_config_value("model.base_url", managed)
+
+    live = load_config()
+    providers = live.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+    entry = dict(providers.get("vllm") or {}) if isinstance(providers.get("vllm"), dict) else {}
+    entry.update({
+        "name": "vLLM",
+        "base_url": write_url.rstrip("/"),
+        "model": served,
+        "discover_models": True,
+    })
+    models = dict(entry.get("models") or {}) if isinstance(entry.get("models"), dict) else {}
+    models.setdefault(served, {})
+    entry["models"] = models
+    providers["vllm"] = entry
+    live["providers"] = providers
+    with suppress(Exception):
+        save_config(live, merge_existing=True)
+    return write_url
+
+
+def start_managed_vllm(config: dict | None = None, *, apply_recommend: bool = True):
+    """One-click: recommend (optional) → isolated venv → supervised serve → activate.
+
+    Writes config via the config API. The user does not pip, edit YAML, or run
+    a third-party installer. Raises if the GPU cannot hold the 64k floor, or if
+    another LLM is already occupying the GPU.
+    """
+    from cli import save_config_value
+    from hermes_cli.config import load_config
+    from hermes_cli.local_engines import ensure_managed_engine
+    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
+
+    if apply_recommend:
+        rec = recommend_vllm()
+        if not rec.feasible:
+            raise RuntimeError(
+                f"this GPU cannot run managed vLLM at the 64k tool-loop floor ({rec.reason})"
+            )
+        for key, value in as_vllm_config(rec).items():
+            save_config_value(f"local_runtime.vllm.{key}", value)
+    save_config_value("local_runtime.enabled", True)
+    save_config_value("local_runtime.engine", "vllm")
+    cfg = load_config() if config is None else config
+    if apply_recommend:
+        cfg = load_config()
+    from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
+    from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+
+    shutdown_local_runtime()
+    require_gpu_free()
+    sup = ensure_managed_engine(cfg, force=True)
+    if sup is None:
+        raise RuntimeError("managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+    activate_vllm_provider(load_config())
+    return sup
+
