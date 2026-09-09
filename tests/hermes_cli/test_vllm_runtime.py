@@ -131,6 +131,35 @@ def test_recommend_vram_relationship_not_snapshot():
     assert none.tier is None
 
 
+def test_recommend_catalog_vram_and_parser_relationship():
+    """Every catalog row has min-VRAM + tool-parser; recommend never picks a
+    row whose min exceeds probed total; feasible GPUs get distinct HF ids;
+    8–12 GB stay infeasible without shrinking below 64k."""
+    for tier in TIERS:
+        assert tier.min_vram_bytes > 0
+        assert tier.tool_call_parser
+        assert tier.max_model_len >= MIN_CONTEXT
+        assert "/" in tier.model
+
+    feasible = [t for t in TIERS if t.feasible_at_64k]
+    assert len({t.model for t in feasible}) == len(feasible)
+
+    for gib, should_fit in ((8, False), (12, False), (16, True), (24, True), (40, True)):
+        rec = recommend_vllm(total_bytes=gib * _GIB)
+        assert rec.max_model_len >= MIN_CONTEXT
+        if rec.tier is not None:
+            assert rec.tier.min_vram_bytes <= gib * _GIB
+        assert rec.feasible is should_fit
+        if rec.feasible:
+            assert rec.tool_call_parser
+
+    sixteen = recommend_vllm(total_bytes=16 * _GIB)
+    twenty_four = recommend_vllm(total_bytes=24 * _GIB)
+    forty = recommend_vllm(total_bytes=40 * _GIB)
+    assert sixteen.feasible and twenty_four.feasible and forty.feasible
+    assert len({sixteen.model, twenty_four.model, forty.model}) == 3
+
+
 def test_recommend_libcuda_when_smi_missing(monkeypatch):
     """Driver/library mismatch: nvidia-smi dead, ctypes libcuda still sees the card."""
     import hermes_cli.local_runtime.hardware as hardware

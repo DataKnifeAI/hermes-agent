@@ -464,6 +464,19 @@ def _llamacpp_pdef() -> Optional[ProviderDef]:
                        source="local-runtime")
 
 
+def _vllm_pdef() -> Optional[ProviderDef]:
+    """``provider: vllm`` is real when the managed (or already-running) server resolves."""
+    try:
+        from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+        endpoint = resolve_vllm_endpoint(wait_for_boot_s=0)
+    except Exception:
+        endpoint = None
+    if not endpoint:
+        return None
+    return ProviderDef(id="vllm", name="Local", transport="openai_chat", api_key_env_vars=(),
+                       base_url=endpoint["base_url"], source="local-runtime")
+
+
 def resolve_provider_full(name: str, user_providers: Optional[Dict[str, Any]] = None,
                           custom_providers: Optional[List[Dict[str, Any]]] = None) -> Optional[ProviderDef]:
     """Full resolution chain: user ``providers.<raw name>`` -> lossy-alias registry id -> built-in
@@ -494,6 +507,10 @@ def resolve_provider_full(name: str, user_providers: Optional[Dict[str, Any]] = 
         return custom_pdef
     if raw in ("llamacpp", "llama.cpp", "llama-cpp"):
         pdef = _llamacpp_pdef()
+        if pdef is not None:
+            return pdef
+    if raw == "vllm":
+        pdef = _vllm_pdef()
         if pdef is not None:
             return pdef
     try:

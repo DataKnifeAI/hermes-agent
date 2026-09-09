@@ -56,7 +56,7 @@ def cmd_local_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     llama = None
     with _suppress():
         llama = resolve_llamacpp_endpoint(cfg, wait_for_boot_s=0)
-    vllm = resolve_vllm_endpoint()
+    vllm = resolve_vllm_endpoint(wait_for_boot_s=0)
     if engine == "vllm":
         print(f"vllm: {vllm['base_url'] if vllm else 'not running'}")
         print(f"venv: {'ready' if venv_ready() else 'missing — hermes local install'}")
@@ -181,7 +181,7 @@ def cmd_local_stop(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def cmd_local_bench(args: argparse.Namespace) -> int:  # noqa: ARG001
-    from hermes_cli.vllm_runtime.bench import probe_models
+    from hermes_cli.vllm_runtime.bench import probe_models, verify_tool_calls
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
 
@@ -193,24 +193,31 @@ def cmd_local_bench(args: argparse.Namespace) -> int:  # noqa: ARG001
         if not llama:
             raise RuntimeError("managed llama.cpp is not running")
         result = probe_models(llama["base_url"])
-    else:
-        state = resolve_vllm_endpoint()
-        url = (state or {}).get("base_url") or openai_base_url(vllm_settings(cfg))
-        result = probe_models(url)
-    if not result["ok"]:
-        print(f"bench failed: {result['error']}", file=sys.stderr)
-        return 1
-    models = ", ".join(result["models"]) or "(none)"
-    print(f"ok {result['url']} models={models}")
+        if not result["ok"]:
+            print(f"bench failed: {result['error']}", file=sys.stderr)
+            return 1
+        models = ", ".join(result["models"]) or "(none)"
+        print(f"ok {result['url']} models={models}")
+        return 0
+    state = resolve_vllm_endpoint(wait_for_boot_s=0)
+    url = (state or {}).get("base_url") or openai_base_url(vllm_settings(cfg))
+    result = verify_tool_calls(url)
+    models = ", ".join(result.get("models") or []) or "(none)"
+    print(f"ok {result['url']} tool_calls={result.get('tool_calls')} models={models}")
     return 0
 
 
 def cmd_local_use(args: argparse.Namespace) -> int:  # noqa: ARG001
     cfg = _config()
     if _engine(cfg) == "vllm":
+        from hermes_cli.vllm_runtime.bench import verify_tool_calls
         from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
+        from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
 
         url = activate_vllm_provider(cfg)
+        state = resolve_vllm_endpoint(wait_for_boot_s=0)
+        if state:
+            verify_tool_calls(state["base_url"])
         print(f"provider: vllm  base_url: {url}")
         return 0
     from cli import save_config_value

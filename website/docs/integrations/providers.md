@@ -802,7 +802,16 @@ List available models with `ollama list`. Pull any model from the [Ollama librar
 
 [vLLM](https://docs.vllm.ai/) is the standard for production LLM serving. Best for: maximum throughput on GPU hardware, serving large models, continuous batching.
 
+**Managed (recommended):** on Linux NVIDIA, set **Local backend** to vLLM in
+Settings → Providers → Local Models, or run `hermes local engine vllm`
+then `hermes local install` / `start` / `use`. Hermes owns the isolated
+venv and loopback server — see [Local Models](/user-guide/local-models).
+You do not `pip install vllm` for that path.
+
+**Advanced — your own process or a remote GPU box:**
+
 ```bash
+# Only if you are operating vLLM yourself (not the managed engine).
 pip install vllm
 vllm serve meta-llama/Llama-3.1-70B-Instruct \
   --port 8000 \
@@ -812,7 +821,9 @@ vllm serve meta-llama/Llama-3.1-70B-Instruct \
   --tool-call-parser hermes
 ```
 
-Then configure Hermes:
+Then point Hermes at that OpenAI URL as a custom endpoint (or keep
+`model.provider: vllm` with a non-loopback `base_url` — activate will not
+rewrite a remote host to `127.0.0.1`):
 
 ```bash
 hermes model

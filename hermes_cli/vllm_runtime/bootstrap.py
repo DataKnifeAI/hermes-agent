@@ -2,34 +2,21 @@
 
 ``ensure_vllm_runtime(config)`` is safe at session start: disabled -> no-op.
 When enabled, Hermes creates the venv and pip-installs vLLM if needed — the user
-does not run pip, uv, or a third-party installer. Failures log and return None
-so chat can fall back to configured providers.
+does not run pip, uv, or a third-party installer. ``OccupyingLlmError`` is never
+swallowed (chat / serve must not silent-fall to a cloud provider). Other boot
+failures still log and return None.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
 import logging
-from urllib.parse import urlparse
+
+from hermes_cli.vllm_runtime.endpoint import is_loopback_url as _is_loopback_url
 
 logger = logging.getLogger(__name__)
 
 _SUPERVISOR = None
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
-
-
-def _is_loopback_url(url: str) -> bool:
-    """True when *url* is empty or a loopback OpenAI base — managed activate may overwrite."""
-    text = (url or "").strip()
-    if not text:
-        return True
-    try:
-        host = (urlparse(text).hostname or "").lower()
-    except ValueError:
-        return False
-    if host in _LOOPBACK_HOSTS:
-        return True
-    return host.startswith("127.")
 
 
 def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
@@ -58,11 +45,7 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
         logger.info("managed vLLM already running (another process)")
         return None
 
-    try:
-        require_gpu_free()
-    except OccupyingLlmError as exc:
-        logger.warning("%s", exc)
-        return None
+    require_gpu_free()
 
     settings = vllm_settings(config)
     if executable is not None:
@@ -70,6 +53,8 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
     else:
         try:
             exe_path = ensure_vllm_venv(str(settings.get("python") or ""))
+        except OccupyingLlmError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("vLLM venv install failed: %s", exc)
             return None
@@ -82,6 +67,8 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
         sup.start(timeout_s=timeout_s)
         _SUPERVISOR = sup
         return sup
+    except OccupyingLlmError:
+        raise
     except Exception as exc:  # noqa: BLE001 — never break session start
         logger.warning("managed vLLM runtime unavailable: %s", exc)
         return None
@@ -121,7 +108,7 @@ def activate_vllm_provider(config: dict | None = None) -> str:
     if sup is not None:
         managed = sup.base_url
     else:
-        state = resolve_vllm_endpoint()
+        state = resolve_vllm_endpoint(cfg, wait_for_boot_s=0)
         managed = (state or {}).get("base_url") or openai_base_url(settings)
     current = str(_model_section(cfg).get("base_url") or "").strip()
     write_url = managed if _is_loopback_url(current) else current
@@ -185,6 +172,9 @@ def start_managed_vllm(config: dict | None = None, *, apply_recommend: bool = Tr
     sup = ensure_managed_engine(cfg, force=True)
     if sup is None:
         raise RuntimeError("managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+    from hermes_cli.vllm_runtime.bench import verify_tool_calls
+
+    verify_tool_calls(sup.base_url)
     activate_vllm_provider(load_config())
     return sup
 

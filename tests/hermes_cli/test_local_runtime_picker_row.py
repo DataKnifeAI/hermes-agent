@@ -88,3 +88,30 @@ def test_explicit_only_filter_keeps_local_row_on_any_profile(hermes_home):
     kept = _filter_explicit_provider_rows([row], ctx)
     assert kept, "explicit-only filter dropped the local-runtime row"
     assert kept[0]["slug"] == "llamacpp"
+
+
+def test_vllm_engine_row_uses_served_id_not_gguf(hermes_home):
+    import yaml
+
+    (hermes_home / "config.yaml").write_text(yaml.dump({
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {"served_model_name": "hermes3:8b",
+                     "model": "solidrust/Hermes-3-Llama-3.1-8B-AWQ"},
+        },
+        "model": {"provider": "vllm"},
+    }), encoding="utf-8")
+    from hermes_cli.inventory import (
+        _filter_explicit_provider_rows, _local_runtime_row, load_picker_context,
+    )
+
+    ctx = load_picker_context()
+    row = _local_runtime_row(ctx)
+    assert row is not None
+    assert row["slug"] == "vllm"
+    assert row["authenticated"] is True
+    assert "hermes3:8b" in row["models"]
+    assert row["is_current"] is True
+    kept = _filter_explicit_provider_rows([row], ctx)
+    assert kept and kept[0]["slug"] == "vllm"

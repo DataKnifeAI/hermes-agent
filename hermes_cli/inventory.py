@@ -99,7 +99,7 @@ def build_models_payload(
     # credential), so inject the row here where every picker surface inherits it.
     local_row = _local_runtime_row(ctx)
     if local_row is not None:
-        rows = _without_slug(rows, "llamacpp") + [local_row]
+        rows = _without_slug(_without_slug(rows, "llamacpp"), "vllm") + [local_row]
         # A live session on the managed server reports provider "custom" (raw base_url label), which
         # would materialize a duplicate "Custom endpoint" row with the same staged models stealing the
         # checkmark. The Local row owns the managed server's identity — drop such custom rows.
@@ -663,10 +663,42 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
                 row["unavailable_models"] = []
 
 
+def _vllm_runtime_row(ctx: "ConfigContext") -> dict | None:
+    """Served vLLM id as a selectable Local row when that engine is configured."""
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    settings = vllm_settings(load_config())
+    served = str(settings.get("served_model_name") or settings.get("model") or "").strip()
+    if not served:
+        return None
+    current = (ctx.current_provider or "").strip().lower() == "vllm"
+    if not current:
+        try:
+            from hermes_cli.vllm_runtime.endpoint import _state_endpoint
+
+            managed = _state_endpoint()
+            current = bool(managed and (ctx.current_base_url or "").strip().rstrip("/")
+                           == str(managed.get("base_url") or "").rstrip("/"))
+        except Exception:
+            current = False
+    return _row("vllm", "Local", current, models=[served], total_models=1,
+                source="local-runtime", authenticated=True, auth_type="local", warning=None)
+
+
 def _local_runtime_row(ctx: "ConfigContext") -> dict | None:
-    """The ``llamacpp`` row from staged GGUFs (``None`` when none) — downloaded models must be selectable
-    before the server runs (selection starts it via the runtime_provider seam)."""
+    """Active-engine Local row: staged GGUFs for llama.cpp, served id for vLLM.
+
+    Downloaded / configured models must be selectable before the server runs
+    (selection starts it via the runtime_provider seam).
+    """
     try:
+        from hermes_cli.config import load_config
+        from hermes_cli.local_engines import engine_from_config
+
+        if engine_from_config(load_config()) == "vllm":
+            return _vllm_runtime_row(ctx)
+
         from hermes_cli.local_runtime.bootstrap import staged_model_ids
 
         staged = staged_model_ids()

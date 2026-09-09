@@ -49,7 +49,7 @@ def test_status_reports_vllm_not_llama_gguf(tmp_path, monkeypatch):
         "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
-        lambda: {"base_url": "http://127.0.0.1:18435/v1", "pid": 1})
+        lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 1})
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
@@ -203,6 +203,9 @@ def test_vllm_recommend_and_use_routes(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
         lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
 
     used = client.post("/api/local-models/vllm/use")
     assert used.status_code == 200

@@ -34,7 +34,7 @@ def _check_managed_local_engine(should_fix: bool, f: Finding) -> None:  # noqa: 
             if engine == "vllm":
                 f.issues.append("vLLM venv missing — run `hermes local install`")
 
-    endpoint = resolve_vllm_endpoint()
+    endpoint = resolve_vllm_endpoint(wait_for_boot_s=0)
     if endpoint:
         check_ok("/v1/models", endpoint.get("base_url", ""))
     elif engine == "vllm":

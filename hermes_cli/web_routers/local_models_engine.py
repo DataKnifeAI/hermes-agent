@@ -82,7 +82,7 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
     cfg = config or {}
     section = cfg.get("local_runtime") or {}
     settings = vllm_settings(cfg)
-    running = resolve_vllm_endpoint()
+    running = resolve_vllm_endpoint(wait_for_boot_s=0)
     served = str(settings.get("served_model_name") or "") or None
     occ = occupancy_payload()
     return {
@@ -122,6 +122,7 @@ def recommend_payload() -> dict[str, Any]:
         "tier": rec.tier.id if rec.tier is not None else None,
         "model": rec.model,
         "served_model_name": rec.served_model_name,
+        "tool_call_parser": rec.tool_call_parser,
         "max_model_len": rec.max_model_len,
         "gpu_memory_utilization": rec.gpu_memory_utilization,
         "quantization": rec.quantization,
@@ -197,7 +198,12 @@ def apply_recommend_and_install() -> None:
 
 def activate_vllm() -> dict[str, Any]:
     from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.bench import verify_tool_calls
     from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
+    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
 
     url = activate_vllm_provider(load_config())
+    state = resolve_vllm_endpoint(wait_for_boot_s=0)
+    if state:
+        verify_tool_calls(state["base_url"])
     return {"ok": True, "base_url": url}

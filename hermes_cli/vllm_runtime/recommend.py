@@ -4,6 +4,10 @@ Probes NVIDIA memory through ``local_runtime.hardware`` (nvidia-smi, then the
 CUDA driver via ctypes) so a driver/library mismatch that kills ``nvidia-smi``
 still sees the card. Host-independent math takes VRAM as data; callers that
 need a live GPU mark the test ``linux_only``.
+
+Recommend is a curated HF catalog: each row has a min-VRAM and a tool-parser.
+8–12 GB cards stay ``feasible: false`` at the 64k tool-loop floor — never a
+silent ctx shrink.
 """
 
 from __future__ import annotations
@@ -14,11 +18,12 @@ _GIB = 1 << 30
 MIN_CONTEXT = 65536  # Hermes tool-loop floor; never silently drop below this.
 _DEFAULT_MODEL = "solidrust/Hermes-3-Llama-3.1-8B-AWQ"
 _DEFAULT_SERVED = "hermes3:8b"
+_DEFAULT_PARSER = "hermes"
 
 
 @dataclass(frozen=True)
 class VllmTier:
-    """One VRAM class. ``feasible_at_64k`` is the 8B-AWQ + 64k contract, not a
+    """One VRAM class. ``feasible_at_64k`` is the catalog row's 64k contract, not a
     silent ctx shrink: 8–12 GB cards stay infeasible rather than shipping 8k."""
 
     id: str
@@ -27,19 +32,35 @@ class VllmTier:
     feasible_at_64k: bool
     quantization: str
     kv_cache_dtype: str
-    model: str = _DEFAULT_MODEL
-    served_model_name: str = _DEFAULT_SERVED
+    model: str
+    served_model_name: str
+    tool_call_parser: str = _DEFAULT_PARSER
     max_model_len: int = MIN_CONTEXT
 
 
 # Highest matching tier wins. min_vram is a floor: recommend never returns a
-# row whose min exceeds probed total.
+# row whose min exceeds probed total. Feasible rows use distinct HF ids.
 TIERS: tuple[VllmTier, ...] = (
-    VllmTier("8gb", 8 * _GIB, 0.70, False, "awq", "fp8"),
-    VllmTier("12gb", 12 * _GIB, 0.70, False, "awq", "fp8"),
-    VllmTier("16gb", 16 * _GIB, 0.75, True, "awq", "fp8"),
-    VllmTier("24gb", 24 * _GIB, 0.75, True, "awq", "fp8"),
-    VllmTier("40gb", 40 * _GIB, 0.80, True, "", ""),  # BF16 alt; no quant flag
+    VllmTier(
+        "8gb", 8 * _GIB, 0.70, False, "awq", "fp8",
+        _DEFAULT_MODEL, _DEFAULT_SERVED, _DEFAULT_PARSER,
+    ),
+    VllmTier(
+        "12gb", 12 * _GIB, 0.70, False, "awq", "fp8",
+        _DEFAULT_MODEL, _DEFAULT_SERVED, _DEFAULT_PARSER,
+    ),
+    VllmTier(
+        "16gb", 16 * _GIB, 0.75, True, "awq", "fp8",
+        _DEFAULT_MODEL, _DEFAULT_SERVED, _DEFAULT_PARSER,
+    ),
+    VllmTier(
+        "24gb", 24 * _GIB, 0.75, True, "", "",
+        "NousResearch/Hermes-3-Llama-3.1-8B", "hermes3:8b-bf16", _DEFAULT_PARSER,
+    ),
+    VllmTier(
+        "40gb", 40 * _GIB, 0.80, True, "awq", "fp8",
+        "Qwen/Qwen2.5-32B-Instruct-AWQ", "qwen2.5:32b", _DEFAULT_PARSER,
+    ),
 )
 
 
@@ -65,6 +86,10 @@ class VllmRecommendation:
     @property
     def served_model_name(self) -> str:
         return self.tier.served_model_name if self.tier else _DEFAULT_SERVED
+
+    @property
+    def tool_call_parser(self) -> str:
+        return self.tier.tool_call_parser if self.tier else _DEFAULT_PARSER
 
     @property
     def max_model_len(self) -> int:
@@ -136,4 +161,5 @@ def as_vllm_config(rec: VllmRecommendation) -> dict:
         "gpu_memory_utilization": rec.gpu_memory_utilization,
         "quantization": rec.quantization,
         "kv_cache_dtype": rec.kv_cache_dtype,
+        "tool_call_parser": rec.tool_call_parser,
     }

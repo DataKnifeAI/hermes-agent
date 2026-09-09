@@ -28,6 +28,41 @@ That's the whole flow. The server starts and stops with Hermes, restarts
 survive app restarts, and switching back to a cloud provider is one click
 in the model picker.
 
+## vLLM — the alternative engine
+
+llama.cpp is the default 1-click engine (official GGUF catalog, idle unload).
+**vLLM** is the managed alternative on Linux NVIDIA — useful when official
+llama.cpp release zips have no CUDA build for your machine.
+
+On the same **Settings → Providers → Local Models** page, set **Local
+backend** to vLLM, then **Install → Use**. Hermes creates an isolated
+venv, picks a Hugging Face id from a VRAM-tier catalog (64K tool-loop
+floor — cards that cannot hold it stay infeasible), and starts a loopback
+OpenAI server. You do not `pip install vllm` or hand-edit a serve line.
+
+Headless / CLI is the same helpers:
+
+```bash
+hermes local engine vllm
+hermes local install
+hermes local start
+hermes local use
+hermes local bench    # /v1/models + a required calculator tool-call
+hermes local stop     # frees VRAM so you can play games
+```
+
+`hermes local` and the Desktop page write `local_runtime.engine` and the
+`local_runtime.vllm` block for you. There is no `HERMES_VLLM_*` env var.
+
+Stop the managed server when you want the GPU back. Hermes never kills a
+foreign LLM (Ollama, LM Studio, a `vllm serve` you started yourself) —
+if another process is occupying the GPU, Desktop and `hermes local start`
+show that message and wait for you to stop it.
+
+A remote GPU box is the same engine with a different host: point a custom
+endpoint at that OpenAI URL. Activate will not rewrite a non-loopback
+`model.base_url` to `127.0.0.1`.
+
 ## How Hermes picks what to download
 
 Every model in the catalog is priced against **your machine** before you
@@ -111,15 +146,22 @@ documented for CLI and headless use:
 local_runtime:
   enabled: false     # true = start the managed server with Hermes.
                      # The desktop "Use" button sets this automatically.
+  engine: llamacpp   # llamacpp (default) | vllm
   backend: auto      # auto | cuda | metal | vulkan | hip | cpu
   tag: b10362        # pinned llama.cpp release; Hermes updates it with
                      # each release after re-validation
+  vllm:              # written by Desktop / `hermes local` when engine is vllm
+    model: solidrust/Hermes-3-Llama-3.1-8B-AWQ
+    served_model_name: hermes3:8b
+    max_model_len: 65536
 ```
 
 Models and runtime builds live under the Hermes home directory
-(`models/` and `runtimes/llamacpp/`). Selecting a local model as your
-main model uses the standard `model.provider: llamacpp` +
-`model.default` settings — the same shape as every other provider.
+(`models/`, `runtimes/llamacpp/`, `runtimes/vllm/`). Selecting a local
+model as your main model uses `model.provider: llamacpp` or
+`model.provider: vllm` plus `model.default` — the same shape as every
+other provider. The UI/CLI writes those keys; do not add a `.env` flag
+for the managed path.
 
 ## Requirements and limits
 
