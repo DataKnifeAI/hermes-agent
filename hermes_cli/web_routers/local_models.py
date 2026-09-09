@@ -760,7 +760,26 @@ async def local_models_quickstart(body: QuickstartBody):
     """One job: install the runtime (if missing), download this machine's build of the recommended model (if
     missing), make it the default. Each leg is the same code the individual routes run, so 'Configure' and
     quickstart can never disagree. Preflight rejects (no servable entry, engine too old) fail the POST
-    synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress."""
+    synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress.
+
+    Dispatches on ``local_runtime.engine``: vLLM is recommend → isolated venv →
+    HF weights → supervisor → provider, not the GGUF llama path.
+    """
+    if engine_mod.configured_engine() == "vllm":
+        plan = engine_mod.vllm_quickstart_plan(body.model_id)
+        if not _QUICKSTART_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Setup is already running")
+        job = _job("quickstart", plan["display_name"], model_id=plan["model"])
+
+        def _run_vllm():
+            engine_mod.run_vllm_quickstart(job, plan)
+
+        _spawn_job(job, "lr-quickstart", _run_vllm, fail_msg="quickstart failed: %s",
+                   on_exit=_QUICKSTART_LOCK.release)
+        return {"job_id": job["job_id"], "model_id": plan["model"],
+                "display_name": plan["display_name"], "needs_runtime": plan["needs_runtime"],
+                "needs_download": plan["needs_download"], "download_bytes": 0}
+
     engine_mod.refuse_llama_only()
     entry, variant = _quickstart_target(body, hardware.probe_budget(planning=True))
     tag, backend = _runtime_target()
@@ -1001,43 +1020,26 @@ async def local_models_vllm_install():
 
 @router.post("/api/local-models/vllm/use")
 async def local_models_vllm_use(body: VllmUseBody | None = None):
-    """Set the HF id (optional), download weights if they are not cached, then start.
+    """Activate a cached HF id (or start the configured one). Never downloads.
 
-    No ``model`` in the body keeps the historical start-only path (``vllm serve``
-    may still pull weights on first boot). Passing a model is download-then-load.
+    Passing ``model`` requires hub-cached weights — Download first, same as
+    llama.cpp Use. No body is start-only for whatever is already configured.
     """
     hid = ((body.model if body else None) or "").strip() or None
-    if hid:
-        engine_mod.set_vllm_model(hid)
-        if not engine_mod.repo_is_cached(hid):
-            job = _job("model-download", hid, model_id=hid)
-
-            def _run():
-                engine_mod.download_vllm_weights(hid, job)
-                engine_mod.set_vllm_model(hid)
-                engine_mod.start_active_engine()
-                engine_mod.activate_vllm()
-                _finish(job, f"{hid} is the default for new chats")
-
-            _spawn_job(job, "lr-vllm-use", _run, fail_msg="vLLM use failed: %s")
-            return {
-                "ok": True,
-                "job_id": job["job_id"],
-                "model": hid,
-                "needs_download": True,
-                "already_downloaded": False,
-            }
     try:
-        await asyncio.to_thread(engine_mod.start_active_engine)
-        result = engine_mod.activate_vllm()
+        if hid:
+            result = await asyncio.to_thread(engine_mod.use_cached_vllm, hid)
+        else:
+            await asyncio.to_thread(engine_mod.start_active_engine)
+            result = engine_mod.activate_vllm()
+            result["needs_download"] = False
+            result["already_downloaded"] = True
     except OccupyingLlmError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    result["needs_download"] = False
-    result["already_downloaded"] = True
-    if hid:
-        result["model"] = hid
     return result
 
 

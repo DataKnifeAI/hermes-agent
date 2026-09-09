@@ -181,8 +181,13 @@ def start_active_engine() -> None:
 
         sup = ensure_vllm_runtime(cfg, force=True)
         if sup is None:
-            raise RuntimeError(
-                "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+            from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+
+            # Another Hermes process already owns a healthy serve — activate
+            # it. A missing endpoint is a real boot failure.
+            if resolve_vllm_endpoint(wait_for_boot_s=0) is None:
+                raise RuntimeError(
+                    "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
         from hermes_cli.config import load_config
         from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
 
@@ -190,6 +195,68 @@ def start_active_engine() -> None:
         return
     stop_vllm_engine()
     lm._start_local_server(cfg, lm._SERVER_START_FAILED)
+
+
+def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
+    """Preflight for the vLLM one-click: recommended (or explicit) HF id + legs."""
+    from hermes_cli.vllm_runtime.recommend import recommend_vllm
+    from hermes_cli.vllm_runtime.venv import venv_ready
+
+    hid = (model_id or "").strip() or None
+    rec = recommend_vllm()
+    if hid:
+        if "/" not in hid:
+            raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
+    else:
+        if not rec.feasible or not (rec.model or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "this GPU cannot run managed vLLM at the 64k tool-loop floor — "
+                    "open Local Models to pick a smaller build"
+                ),
+            )
+        hid = rec.model
+    display = rec.served_model_name if rec.model == hid else hid.rsplit("/", 1)[-1]
+    return {
+        "model": hid,
+        "display_name": display,
+        "needs_runtime": not venv_ready(),
+        "needs_download": not repo_is_cached(hid),
+        "apply_recommend": hid == rec.model and rec.feasible,
+    }
+
+
+def run_vllm_quickstart(job: dict, plan: dict) -> None:
+    """Same four legs as llama quickstart: venv → HF weights → serve → default."""
+    from cli import save_config_value
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
+    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+    from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
+
+    from hermes_cli.web_routers import local_models as lm
+
+    hid = str(plan["model"])
+    rec = recommend_vllm()
+    if plan.get("apply_recommend") and rec.feasible:
+        for key, value in as_vllm_config(rec).items():
+            save_config_value(f"local_runtime.vllm.{key}", value)
+    else:
+        set_vllm_model(hid)
+    settings = vllm_settings(load_config())
+    lm._step(job, "installing-runtime", "Installing vLLM")
+    ensure_vllm_venv(str(settings.get("python") or ""))
+    if not repo_is_cached(hid):
+        job["done_bytes"] = 0
+        lm._step(job, "downloading", f"Downloading {hid}")
+        ensure_hf_weights(hid, job)
+    lm._step(job, "starting-server", "Starting vLLM")
+    start_active_engine()
+    lm._step(job, "setting-default", "Making it your default")
+    activate_vllm()
+    lm._finish(job, f"{plan['display_name']} is ready — new chats use it")
 
 
 def apply_recommend_and_install(job: dict | None = None) -> None:
@@ -212,6 +279,35 @@ def apply_recommend_and_install(job: dict | None = None) -> None:
             job["phase"] = "downloading"
             job["detail"] = f"Downloading {model}"
         ensure_hf_weights(model, job)
+
+
+def use_cached_vllm(hf_id: str) -> dict[str, Any]:
+    """Switch to an already-cached HF id and start/reload. Never downloads."""
+    hid = (hf_id or "").strip()
+    if not hid or "/" not in hid:
+        raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
+    if not repo_is_cached(hid):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{hid} is not downloaded — Download it first",
+        )
+    from hermes_cli.config import load_config
+    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    current = str(vllm_settings(load_config()).get("model") or "").strip()
+    running = resolve_vllm_endpoint(wait_for_boot_s=0) is not None
+    set_vllm_model(hid)
+    if running and current != hid:
+        # New weights need a new serve. Same-id reuse leaves a healthy process up.
+        stop_vllm_engine()
+    start_active_engine()
+    result = activate_vllm()
+    result["model"] = hid
+    result["needs_download"] = False
+    result["already_downloaded"] = True
+    return result
 
 
 def activate_vllm() -> dict[str, Any]:

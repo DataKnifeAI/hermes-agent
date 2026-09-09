@@ -715,6 +715,49 @@ describe('vLLM engine', () => {
     expect(screen.queryByText('Local')).toBeNull()
   })
 
+  it('Set up for me fires the engine-aware quickstart, not install-only', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue(VLLM_STATUS)
+    mocked.quickstartLocalModels.mockResolvedValue({
+      display_name: 'hermes3:8b',
+      download_bytes: 0,
+      job_id: 'vq1',
+      model_id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      needs_download: true,
+      needs_runtime: true
+    })
+    renderPane()
+
+    fireEvent.click(await screen.findByRole('button', { name: /set up for me/i }))
+    await waitFor(() => {
+      expect(mocked.quickstartLocalModels).toHaveBeenCalled()
+    })
+    expect(mocked.installVllm).not.toHaveBeenCalled()
+  })
+
+  it('pins vLLM quickstart progress while the job runs', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue(VLLM_STATUS)
+    $localRuntimeJobs.set([
+      {
+        job_id: 'vq1',
+        kind: 'quickstart',
+        target: 'hermes3:8b',
+        model_id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+        status: 'running',
+        phase: 'downloading',
+        detail: 'Downloading solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+        total_bytes: 100,
+        done_bytes: 40,
+        percent: 40,
+        error: null
+      }
+    ])
+    renderPane()
+
+    expect(await screen.findByText(/Downloading solidrust/)).toBeTruthy()
+    expect(screen.getByText('Model')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /set up for me/i })).toBeNull()
+  })
+
   it('surfaces occupancy copy on the vLLM pane', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,

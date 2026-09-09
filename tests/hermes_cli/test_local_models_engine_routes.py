@@ -81,7 +81,6 @@ def test_llama_routes_refuse_when_engine_vllm_without_gguf_io(tmp_path, monkeypa
     assert "llama.cpp" in catalog.json()["detail"]
 
     for path, body in (
-        ("/api/local-models/quickstart", {}),
         ("/api/local-models/sideload", {"path": "/tmp/x.gguf"}),
         ("/api/local-models/eject", {"model_id": "x"}),
         ("/api/local-models/download", {"model_id": "x"}),
@@ -321,7 +320,8 @@ def _fake_hub_download(hub, repo, job=None):
         job["total_bytes"] = 32
 
 
-def test_vllm_use_downloads_then_starts_when_uncached(tmp_path, monkeypatch):
+def test_vllm_use_refuses_uncached_without_downloading(tmp_path, monkeypatch):
+    """Use is llama-shaped: cached only. Download is a separate POST."""
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
     hub = tmp_path / "hf-hub"
@@ -329,40 +329,21 @@ def test_vllm_use_downloads_then_starts_when_uncached(tmp_path, monkeypatch):
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     pulled: list[str] = []
     started: list[str] = []
-
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.inventory.download_hf_repo",
         lambda repo, job=None: pulled.append(repo) or _fake_hub_download(hub, repo, job))
-    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
-    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
-
-    class _Sup:
-        base_url = "http://127.0.0.1:9/v1"
-
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
-        lambda *a, **k: started.append("start") or _Sup())
-    monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
-        lambda cfg=None: "http://127.0.0.1:9/v1")
-    monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
-        lambda *a, **k: {"ok": True, "tool_calls": True})
+        lambda *a, **k: started.append("start"))
 
     used = client.post("/api/local-models/vllm/use", json={"model": "acme/fresh-awq"})
-    assert used.status_code == 200, used.text
-    body = used.json()
-    assert body["needs_download"] is True
-    assert body["already_downloaded"] is False
-    assert body["job_id"]
-    job = _wait_job(client, body["job_id"])
-    assert job["status"] == "done", job
-    assert job["kind"] == "model-download"
-    assert pulled == ["acme/fresh-awq"]
-    assert started == ["start"]
+    assert used.status_code == 409, used.text
+    assert "Download" in used.json()["detail"]
+    assert pulled == []
+    assert started == []
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == "acme/fresh-awq"
+    assert (load_config().get("local_runtime") or {}).get("vllm", {}).get("model") != "acme/fresh-awq"
 
 
 def test_vllm_use_cached_sets_then_starts_without_download(tmp_path, monkeypatch):
@@ -426,12 +407,22 @@ def test_vllm_download_job_and_cached_noop(tmp_path, monkeypatch):
     assert skip.json()["job_id"] is None
     assert pulled == []
 
+    started: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start"))
+
     fresh = client.post("/api/local-models/vllm/download", json={"model": "acme/fresh-awq"})
     assert fresh.status_code == 200
     assert fresh.json()["already_downloaded"] is False
     job = _wait_job(client, fresh.json()["job_id"])
     assert job["status"] == "done", job
     assert pulled == ["acme/fresh-awq"]
+    assert started == []
+    from hermes_cli.config import load_config
+
+    # Prefetch only — does not become the default (llama download neither).
+    assert (load_config().get("local_runtime") or {}).get("vllm", {}).get("model") != "acme/fresh-awq"
 
 
 def test_vllm_install_downloads_recommended_weights(tmp_path, monkeypatch):
@@ -483,3 +474,157 @@ def test_vllm_search_fit_tags_never_lie(tmp_path, monkeypatch):
     assert by_repo["Qwen/Qwen3-14B-AWQ"]["recommended"] is True
     assert by_repo["someone/mystery-weights"]["fit"] == "unknown"
     assert by_repo["Qwen/Qwen3-32B-AWQ"]["fit"] == "too-big"
+
+
+def _feasible_rec(monkeypatch, *, feasible=True):
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, TIERS, VllmRecommendation
+
+    tier = next(t for t in TIERS if t.id == "24gb")
+    rec = VllmRecommendation(
+        NvidiaProbe(24 * (1 << 30), 24 * (1 << 30), "data"),
+        tier, feasible, "ok" if feasible else "vram_below_64k_floor")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    return rec
+
+
+def test_vllm_quickstart_installs_downloads_starts_activates(tmp_path, monkeypatch):
+    """Set up for me: recommend → venv → HF weights → serve → provider. No live HF."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    rec = _feasible_rec(monkeypatch)
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: False)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv",
+        lambda *a, **k: calls.append("install"))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: calls.append("download") or _fake_hub_download(hub, repo, job))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine",
+        lambda: calls.append("start"))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: calls.append("activate") or {"ok": True, "base_url": "http://127.0.0.1:9/v1"})
+
+    r = client.post("/api/local-models/quickstart", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["needs_runtime"] is True
+    assert body["needs_download"] is True
+    assert body["model_id"] == rec.model
+    job = _wait_job(client, body["job_id"])
+    assert job["status"] == "done", job
+    assert job["kind"] == "quickstart"
+    assert calls[0] == "install"
+    assert calls.index("install") < calls.index("download") < calls.index("start")
+    assert calls[-1] == "activate"
+
+
+def test_vllm_quickstart_skips_satisfied_legs(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {"model": rec.model}})
+    hub = tmp_path / "hf-hub"
+    cached = hub / ("models--" + rec.model.replace("/", "--"))
+    cached.mkdir(parents=True)
+    (cached / "weights.bin").write_bytes(b"w" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    calls: list[str] = []
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv",
+        lambda *a, **k: calls.append("install"))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: calls.append("download"))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine",
+        lambda: calls.append("start"))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: calls.append("activate") or {"ok": True, "base_url": "http://127.0.0.1:9/v1"})
+
+    r = client.post("/api/local-models/quickstart", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["needs_runtime"] is False
+    assert body["needs_download"] is False
+    job = _wait_job(client, body["job_id"])
+    assert job["status"] == "done", job
+    assert "download" not in calls
+    assert calls[-2:] == ["start", "activate"] or calls[-1] == "activate"
+
+
+def test_vllm_quickstart_refuses_when_gpu_infeasible(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    _feasible_rec(monkeypatch, feasible=False)
+    r = client.post("/api/local-models/quickstart", json={})
+    assert r.status_code == 409
+    assert "64k" in r.json()["detail"]
+
+
+def test_vllm_use_reloads_when_switching_cached_models(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {"model": "acme/old-awq"}})
+    hub = tmp_path / "hf-hub"
+    for name in ("acme--old-awq", "acme--sideload-awq"):
+        dest = hub / f"models--{name}"
+        dest.mkdir(parents=True)
+        (dest / "weights.bin").write_bytes(b"y" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:9/v1", "pid": 1})
+    monkeypatch.setattr(
+        "hermes_cli.local_engines.stop_vllm_engine",
+        lambda: order.append("stop"))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+
+    class _Sup:
+        base_url = "http://127.0.0.1:9/v1"
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: order.append("start") or _Sup())
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
+
+    used = client.post("/api/local-models/vllm/use", json={"model": "acme/sideload-awq"})
+    assert used.status_code == 200, used.text
+    assert used.json()["needs_download"] is False
+    assert "stop" in order and "start" in order
+    assert order.index("stop") < order.index("start")
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == "acme/sideload-awq"
+
+
+def test_server_start_vllm_succeeds_when_already_running(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 3})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:18435/v1")
+
+    r = client.post("/api/local-models/server", json={"action": "start"})
+    assert r.status_code == 200, r.text

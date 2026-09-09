@@ -285,22 +285,20 @@ export function LocalModelsSettings() {
   }
 
   async function handleQuickstart() {
-    if (engineOf(status) === 'vllm') {
-      try {
-        await installVllm()
-        watchLocalRuntimeJobs()
-      } catch (err) {
-        notifyError(err, copy.installFailed)
-      }
-
-      return
-    }
-
     try {
       await quickstartLocalModels()
       watchLocalRuntimeJobs()
     } catch (err) {
       notifyError(err, copy.quickstartFailed)
+    }
+  }
+
+  async function handleInstallVllm() {
+    try {
+      await installVllm()
+      watchLocalRuntimeJobs()
+    } catch (err) {
+      notifyError(err, copy.installFailed)
     }
   }
 
@@ -449,6 +447,7 @@ export function LocalModelsSettings() {
   const rJob = runningRuntimeInstall(jobs)
   const lastError = jobs.find(j => j.status === 'error')
   const vllmInstallJob = jobs.find(j => j.kind === 'vllm-install' && j.status === 'running')
+  const vllmSetupJob = runningQuickstart ?? vllmInstallJob ?? null
 
   const sortedCatalog = [...(catalog ?? [])].sort((a, b) => fitRank(a) - fitRank(b))
 
@@ -463,10 +462,20 @@ export function LocalModelsSettings() {
   const needsSetup = !status.runtime_installed || libraryEmpty
   const heroModel = catalog?.find(c => c.recommended && c.fits) ?? catalog?.find(c => c.fits) ?? null
 
-  if (engine === 'vllm' && (vllmInstallJob || (needsSetup && !configure))) {
-    const recModel = recommend?.served_model_name || recommend?.model || copy.engineVllm
+  if (engine === 'vllm' && (vllmSetupJob || (needsSetup && !configure))) {
+    const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || copy.engineVllm
+    const vllmPhase = vllmSetupJob?.phase ?? ''
+    const vllmStageIndex = ['starting-server', 'setting-default'].includes(vllmPhase)
+      ? 2
+      : vllmPhase === 'downloading'
+        ? 1
+        : 0
+    const stages = [copy.quickstartStageEngine, copy.quickstartStageModel, copy.quickstartStageFinish]
     const liveDetail =
-      vllmInstallJob?.detail ||
+      vllmSetupJob?.detail ||
+      (vllmSetupJob?.total_bytes
+        ? copy.downloadProgress(gbLabel(vllmSetupJob.done_bytes), gbLabel(vllmSetupJob.total_bytes))
+        : null) ||
       status.start_phase ||
       (recommend && !recommend.feasible ? copy.vllmNotFeasible(recommend.reason) : copy.vllmInstallDetail)
 
@@ -475,7 +484,7 @@ export function LocalModelsSettings() {
         <div className="flex min-h-[60dvh] items-center justify-center">
           <div className="w-full max-w-md text-center">
             <div className="mx-auto mb-5 flex size-14 items-center justify-center rounded-2xl bg-primary/10">
-              {vllmInstallJob ? (
+              {vllmSetupJob ? (
                 <Loader2 className="size-7 animate-spin text-primary" />
               ) : (
                 <Cpu className="size-7 text-primary" />
@@ -486,13 +495,39 @@ export function LocalModelsSettings() {
             <p className="mt-2 text-[0.8rem] leading-5 text-muted-foreground">{liveDetail}</p>
 
             <div className="mt-5 flex justify-center">
-              <EngineSelect disabled={engineBusy} engine={engine} onChange={next => void handleEngineChange(next)} />
+              <EngineSelect disabled={engineBusy || Boolean(vllmSetupJob)} engine={engine} onChange={next => void handleEngineChange(next)} />
             </div>
 
-            {vllmInstallJob ? (
-              <div className="mt-5">
-                <ProgressBar percent={vllmInstallJob.percent} />
-              </div>
+            {vllmSetupJob ? (
+              <>
+                <div className="mt-5">
+                  <ProgressBar percent={vllmSetupJob.percent} />
+                </div>
+                {vllmSetupJob.kind === 'quickstart' && (
+                  <div className="mt-5 flex items-center justify-center gap-5">
+                    {stages.map((label, i) => (
+                      <span
+                        className={cn(
+                          'inline-flex items-center gap-1.5 text-[0.72rem]',
+                          i < vllmStageIndex && 'text-(--ui-text-tertiary)',
+                          i === vllmStageIndex && 'font-medium text-foreground',
+                          i > vllmStageIndex && 'text-(--ui-text-tertiary) opacity-60'
+                        )}
+                        key={label}
+                      >
+                        {i < vllmStageIndex ? (
+                          <CheckCircle2 className="size-3.5 text-primary" />
+                        ) : i === vllmStageIndex ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <span className="size-1.5 rounded-full bg-current" />
+                        )}
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </>
             ) : (
               <div className="mt-6 flex items-center justify-center gap-3">
                 <Button onClick={() => setConfigure(true)} size="sm" variant="outline">
@@ -713,7 +748,7 @@ export function LocalModelsSettings() {
             {!status.runtime_installed && !rJob && (
               <ListRow
                 action={
-                  <Button onClick={() => void handleQuickstart()} size="sm">
+                  <Button onClick={() => void handleInstallVllm()} size="sm">
                     <Download />
                     {copy.installAction}
                   </Button>
