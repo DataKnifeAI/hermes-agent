@@ -379,6 +379,31 @@ def test_gpu_process_name_is_foreign_llm_not_desktop():
     assert not gpu_process_is_foreign_llm("brave", 2, set())
 
 
+def test_managed_serve_child_enginecore_is_not_occupancy():
+    """server.json records the serve parent; EngineCore is the GPU child."""
+    from hermes_cli.vllm_runtime.occupancy import (
+        discover_occupying_llms, expand_managed_pids, occupancy_stop_message)
+
+    parent, child = 100, 101
+    ours = expand_managed_pids({parent}, children_of=lambda pid: {child} if pid == parent else set())
+    assert child in ours
+    hits = discover_occupying_llms(
+        ports=(),
+        gpu_rows=[(child, "VLLM::EngineCore")],
+        our_pids=ours,
+        our_ports={18435},
+    )
+    assert hits == []
+    assert occupancy_stop_message(hits) is None
+    foreign = discover_occupying_llms(
+        ports=(),
+        gpu_rows=[(child, "VLLM::EngineCore")],
+        our_pids={parent},
+        our_ports={18435},
+    )
+    assert foreign and foreign[0].pid == child
+
+
 def test_occupancy_http_stub_mentions_stop(monkeypatch):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     import threading

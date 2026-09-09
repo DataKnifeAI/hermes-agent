@@ -113,6 +113,27 @@ def _port_from_state(state: dict) -> int | None:
     return None
 
 
+def descendant_pids(pid: int) -> set[int]:
+    """Children of a supervised serve pid. EngineCore (not the parent) holds VRAM."""
+    found: set[int] = set()
+    if not pid or pid <= 0:
+        return found
+    with suppress(Exception):
+        import psutil  # type: ignore
+
+        found = {int(c.pid) for c in psutil.Process(pid).children(recursive=True)}
+    return found
+
+
+def expand_managed_pids(root_pids: set[int], *, children_of=None) -> set[int]:
+    """Include serve descendants so occupancy does not flag our own EngineCore."""
+    out = set(root_pids)
+    lookup = descendant_pids if children_of is None else children_of
+    for pid in root_pids:
+        out |= set(lookup(pid) or ())
+    return out
+
+
 def _collect_managed_state(path) -> tuple[set[int], set[int]]:
     pids: set[int] = set()
     ports: set[int] = set()
@@ -144,7 +165,7 @@ def _our_managed() -> tuple[set[int], set[int]]:
         lp, lo = _collect_managed_state(llama_state())
         pids |= lp
         ports |= lo
-    return pids, ports
+    return expand_managed_pids(pids), ports
 
 
 def _http_json(url: str, timeout_s: float = 1.5):
