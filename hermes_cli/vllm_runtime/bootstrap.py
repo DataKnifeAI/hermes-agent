@@ -11,12 +11,16 @@ from __future__ import annotations
 
 from contextlib import suppress
 import logging
+import threading
 
 from hermes_cli.vllm_runtime.endpoint import is_loopback_url as _is_loopback_url
 
 logger = logging.getLogger(__name__)
 
 _SUPERVISOR = None
+# Serialize spawn. Desktop lifespan boot + Restore + on-demand kick all call
+# ensure; without this lock two ``vllm serve`` share a port and one dies SIGKILL.
+_START_LOCK = threading.Lock()
 
 
 def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
@@ -30,27 +34,47 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
     section = (config or {}).get("local_runtime") or {}
     if not force and not section.get("enabled"):
         return None
-    if _SUPERVISOR is not None:
-        return _SUPERVISOR
 
+    with _START_LOCK:
+        return _ensure_vllm_runtime_locked(
+            config, force=force, executable=executable, timeout_s=timeout_s)
+
+
+def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
+                                executable, timeout_s: int):
+    global _SUPERVISOR
     from pathlib import Path
 
     from hermes_cli.vllm_runtime.endpoint import _state_endpoint
     from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError, require_gpu_free
-    from hermes_cli.vllm_runtime.supervisor import VllmSupervisor, vllm_settings
+    from hermes_cli.vllm_runtime.supervisor import (
+        MODEL_REMOVED_MSG, VllmSupervisor, configured_cache_missing,
+        configured_model_id, configured_unservable_reason, disable_auto_start,
+        state_served_model_name, vllm_settings, write_last_error)
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
+    settings = vllm_settings(config)
+    wanted = str(settings.get("served_model_name") or "").strip()
+    if _SUPERVISOR is not None:
+        got = str(_SUPERVISOR.settings.get("served_model_name") or "").strip()
+        if not wanted or not got or wanted == got:
+            return _SUPERVISOR
+        _SUPERVISOR.stop()
+        _SUPERVISOR = None
     state = _state_endpoint()
     if state is not None:
-        logger.info("managed vLLM already running (another process)")
-        return None
+        got = state_served_model_name()
+        if not wanted or not got or wanted == got:
+            logger.info("managed vLLM already running (another process)")
+            return None
+        # Leftover Nemotron (or any other id) still resident — Restore / Use
+        # must replace it, not occupy the same GPU.
+        from hermes_cli.local_engines import stop_state_pid
+        from hermes_cli.vllm_runtime.supervisor import state_path
+
+        stop_state_pid(state_path())
 
     require_gpu_free()
-
-    settings = vllm_settings(config)
-    from hermes_cli.vllm_runtime.supervisor import (
-        MODEL_REMOVED_MSG, configured_cache_missing, configured_model_id,
-        configured_unservable_reason, disable_auto_start, write_last_error)
 
     if not configured_model_id(settings):
         logger.warning("managed vLLM has no configured model — not starting")
@@ -80,24 +104,36 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
         logger.warning("vLLM executable missing: %s", exe_path)
         return None
 
+    sup = None
     try:
         sup = VllmSupervisor(settings, executable=exe_path)
-        sup.start(timeout_s=timeout_s)
+        # Visible to stop_vllm_engine before wait_ready returns, so Restore
+        # can abort an in-flight desktop boot instead of SIGKILL via state pid.
         _SUPERVISOR = sup
+        sup.start(timeout_s=timeout_s)
         return sup
     except OccupyingLlmError:
+        if _SUPERVISOR is sup:
+            _SUPERVISOR = None
         raise
     except Exception as exc:  # noqa: BLE001 — never break session start
+        if _SUPERVISOR is sup and sup is not None:
+            with suppress(Exception):
+                sup.stop()
+            _SUPERVISOR = None
         logger.warning("managed vLLM runtime unavailable: %s", exc)
-        disable_auto_start()
+        if not (sup is not None and sup._stopping):
+            disable_auto_start()
         return None
 
 
 def shutdown_vllm_runtime() -> None:
+    """Must not take ``_START_LOCK`` — Restore stops an in-flight wait_ready."""
     global _SUPERVISOR
-    if _SUPERVISOR is not None:
-        _SUPERVISOR.stop()
-        _SUPERVISOR = None
+    sup = _SUPERVISOR
+    _SUPERVISOR = None
+    if sup is not None:
+        sup.stop()
 
 
 def get_supervisor():

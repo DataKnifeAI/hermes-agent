@@ -220,7 +220,8 @@ def start_active_engine() -> None:
         stop_llama_engine()
         from hermes_cli.vllm_runtime.supervisor import (
             MODEL_REMOVED_MSG, configured_cache_missing, configured_unservable_reason,
-            disable_auto_start, vllm_settings, write_last_error)
+            disable_auto_start, read_last_error, state_served_model_name,
+            vllm_settings, write_last_error)
 
         settings = vllm_settings(cfg)
         blocked = configured_unservable_reason(settings)
@@ -232,6 +233,10 @@ def start_active_engine() -> None:
             write_last_error(MODEL_REMOVED_MSG)
             disable_auto_start()
             raise RuntimeError(MODEL_REMOVED_MSG)
+        wanted = str(settings.get("served_model_name") or "").strip()
+        got = state_served_model_name()
+        if wanted and got and wanted != got:
+            stop_vllm_engine()
         try:
             require_gpu_free()
         except OccupyingLlmError:
@@ -242,12 +247,14 @@ def start_active_engine() -> None:
         if sup is None:
             from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
 
-            # Another Hermes process already owns a healthy serve — activate
-            # it. A missing endpoint is a real boot failure.
-            if resolve_vllm_endpoint(wait_for_boot_s=0) is None:
+            running = resolve_vllm_endpoint(wait_for_boot_s=0)
+            still = state_served_model_name()
+            leftover = bool(wanted and still and wanted != still)
+            if running is None or leftover:
                 disable_auto_start()
                 raise RuntimeError(
-                    "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+                    read_last_error()
+                    or "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
         from hermes_cli.config import load_config
         from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
 
@@ -300,12 +307,19 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
 
 
 def run_vllm_quickstart(job: dict, plan: dict) -> None:
-    """Same four legs as llama quickstart: venv → HF weights → serve → default."""
+    """Same four legs as llama quickstart: venv → HF weights → serve → default.
+
+    Restore recommended setup must not start Qwen beside leftover Nemotron:
+    occupancy (foreign), stop managed leftover, official overlay (clean argv),
+    download, then start and wait ``/v1/models``. Kick is off until start.
+    """
     from cli import save_config_value
     from hermes_cli.config import load_config
     from hermes_cli.local_engines import stop_vllm_engine
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
-    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+    from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+    from hermes_cli.vllm_runtime.supervisor import (
+        clear_last_error, disable_auto_start, read_last_error, vllm_settings)
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
     from hermes_cli.web_routers import local_models as lm
@@ -314,6 +328,13 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     hid, notice, _rec, overlay = _official_setup()
     if notice:
         job["detail"] = notice
+    # Foreign Ollama/etc. first so we do not kill our leftover then fail.
+    require_gpu_free()
+    # Stop leftover BEFORE overlay/enable. Writing Qwen while Nemotron is up
+    # lets desktop boot + kick spawn a second serve (SIGKILL / rc=-9).
+    stop_vllm_engine()
+    disable_auto_start()
+    clear_last_error()
     for key, value in overlay.items():
         save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
@@ -323,11 +344,14 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
         job["done_bytes"] = 0
         lm._step(job, "downloading", f"Downloading {hid}")
         ensure_hf_weights(hid, job)
-    # Leftover Llama/Nemotron still resident would bench as a local 400
-    # and toast as "Hugging Face rejected this repo".
-    stop_vllm_engine()
     lm._step(job, "starting-server", "Starting vLLM")
-    start_active_engine()
+    try:
+        start_active_engine()
+    except Exception:
+        err = read_last_error()
+        if err:
+            raise RuntimeError(err) from None
+        raise
     lm._step(job, "setting-default", "Making it your default")
     activate_vllm()
     done = notice or f"{overlay['served_model_name'] or hid.rsplit('/', 1)[-1]} is ready — new chats use it"

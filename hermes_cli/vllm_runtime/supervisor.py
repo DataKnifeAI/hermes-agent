@@ -66,6 +66,20 @@ def write_last_error(message: str) -> None:
     path.write_text(json.dumps({"error": message}, ensure_ascii=False), encoding="utf-8")
 
 
+def state_served_model_name() -> str:
+    """Served id recorded by the last spawn. Empty when no state file / pid."""
+    path = state_path()
+    if not path.is_file():
+        return ""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("served_model_name") or "").strip()
+
+
 def read_last_error() -> str | None:
     path = last_error_path()
     if not path.is_file():
@@ -298,7 +312,8 @@ class VllmSupervisor:
         self._write_state()
 
     def start(self, timeout_s: int = READY_TIMEOUT_S) -> None:
-        self._stopping = False
+        if self._stopping:
+            raise RuntimeError("vllm serve stopped during startup")
         hid = configured_model_id(self.settings)
         blocked = configured_unservable_reason(self.settings)
         if blocked:
@@ -313,12 +328,20 @@ class VllmSupervisor:
         try:
             self._spawn()
             self._wait_ready(timeout_s)
-        except Exception:
+        except Exception as exc:
+            # Restore/stop of an in-flight boot must not poison last_error or
+            # flip enabled=false while the replacement serve is starting.
+            if self._stopping:
+                raise
             crash = last_serve_error_line(self.log_path)
             if configured_cache_missing(self.settings):
                 write_last_error(MODEL_REMOVED_MSG)
             else:
-                write_last_error(humanize_serve_error(crash, model=hid) or str(crash or "vllm serve failed"))
+                write_last_error(
+                    humanize_serve_error(crash, model=hid)
+                    or str(exc).strip()
+                    or "vllm serve failed"
+                )
             disable_auto_start()
             raise
         self._write_state()
@@ -342,9 +365,17 @@ class VllmSupervisor:
         while the pid is alive — CUDA graph capture looks like that for minutes."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
+            if self._stopping:
+                raise RuntimeError("vllm serve stopped during startup")
             if self.proc and self.proc.poll() is not None:
+                rc = self.proc.returncode
+                hid = configured_model_id(self.settings)
+                if rc == -9:
+                    raise RuntimeError(
+                        f"vllm serve was killed (SIGKILL) starting {hid or 'the model'}"
+                    )
                 raise RuntimeError(
-                    f"vllm serve exited rc={self.proc.returncode} during startup "
+                    f"vllm serve exited rc={rc} during startup "
                     f"(log: {self.log_path})")
             try:
                 with urllib.request.urlopen(self._health_url(), timeout=3) as r:

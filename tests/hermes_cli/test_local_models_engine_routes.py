@@ -33,6 +33,10 @@ def _client(tmp_path, monkeypatch):
         "hermes_cli.vllm_runtime.inventory.gated_repo_reason", lambda hid: None)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.inventory.hf_repo_access_issue", lambda hid: None)
+    # Occupancy probes the host GPU/ports. These tests must not see a leftover
+    # Nemotron on the developer's 18435.
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
     from hermes_cli import web_server
 
     test_client = TestClient(web_server.app)
@@ -887,6 +891,124 @@ def test_vllm_quickstart_empty_body_ignores_leftover_nemotron(tmp_path, monkeypa
     from hermes_cli.config import load_config
 
     assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+
+
+def test_vllm_quickstart_stops_leftover_running_id_starts_official(tmp_path, monkeypatch):
+    """Restore recommended setup: leftover Nemotron still serving must be stopped,
+    then official recommend starts with that row's argv — not leftover flags."""
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    leftover = "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": leftover,
+        "served_model_name": "nemotron",
+        "quantization": "",
+        "max_model_len": 8192,
+        "tool_call_parser": "llama3_json",
+        "kv_cache_dtype": "fp8",
+    }})
+    hub = tmp_path / "hf-hub"
+    dest = hub / ("models--" + rec.model.replace("/", "--"))
+    dest.mkdir(parents=True)
+    (dest / "weights.bin").write_bytes(b"w" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    order: list = []
+
+    def _stop():
+        order.append("stop")
+
+    class _Sup:
+        base_url = "http://127.0.0.1:9/v1"
+
+    def _ensure(cfg=None, force=False, **k):
+        from hermes_cli.config import load_config
+        from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+        settings = vllm_settings(cfg if cfg is not None else load_config())
+        order.append(("start", settings.get("model"),
+                      settings.get("quantization"),
+                      int(settings.get("max_model_len") or 0)))
+        return _Sup()
+
+    occupied: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.occupancy.require_gpu_free",
+        lambda: occupied.append("occupancy"))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", _stop)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: order.append(("download", repo)))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: {"ok": True, "base_url": "http://127.0.0.1:9/v1"})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+
+    r = client.post("/api/local-models/quickstart", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["model_id"] == rec.model
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert occupied  # foreign occupancy before leftover stop, and again at start
+    assert order[0] == "stop"
+    starts = [step for step in order if isinstance(step, tuple) and step[0] == "start"]
+    assert len(starts) == 1
+    assert starts[0][1] == rec.model
+    assert leftover not in str(starts[0])
+    assert starts[0][2] == rec.quantization
+    assert starts[0][3] == rec.max_model_len
+    from hermes_cli.config import load_config
+
+    vllm = load_config()["local_runtime"]["vllm"]
+    assert vllm["model"] == rec.model
+    assert vllm["quantization"] == rec.quantization
+    assert int(vllm["max_model_len"]) == rec.max_model_len
+    assert vllm["served_model_name"] == rec.served_model_name
+    assert "download" not in {step[0] for step in order if isinstance(step, tuple)}
+
+
+def test_vllm_quickstart_surfaces_last_error_when_serve_dies(tmp_path, monkeypatch):
+    """If ``vllm serve`` really dies, the job error is last_error — not a generic 502."""
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {"model": rec.model}})
+    hub = tmp_path / "hf-hub"
+    dest = hub / ("models--" + rec.model.replace("/", "--"))
+    dest.mkdir(parents=True)
+    (dest / "weights.bin").write_bytes(b"w" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    from hermes_cli.vllm_runtime.supervisor import write_last_error
+
+    def _ensure(*a, **k):
+        write_last_error("vllm serve was killed (SIGKILL) starting Qwen/Qwen3-14B-AWQ")
+        return None
+
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+
+    r = client.post("/api/local-models/quickstart", json={})
+    assert r.status_code == 200, r.text
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "error", job
+    assert "SIGKILL" in (job.get("error") or "")
 
 
 def test_vllm_install_ignores_leftover_gated_id(tmp_path, monkeypatch):

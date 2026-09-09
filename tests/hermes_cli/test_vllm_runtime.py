@@ -139,6 +139,48 @@ def test_start_refuses_exl2_without_spawning(tmp_path, monkeypatch):
     assert read_last_error() == UNSERVABLE_FORMAT_MSG
 
 
+def test_start_sigkill_writes_last_error_not_generic_failed(tmp_path, monkeypatch):
+    """rc=-9 (OOM / port fight) must not collapse to ``vllm serve failed``."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    hub = tmp_path / "hub"
+    cached = hub / "models--Qwen--Qwen3-8B-AWQ"
+    cached.mkdir(parents=True)
+    (cached / "w.bin").write_bytes(b"x" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    import hermes_constants
+    from hermes_cli.vllm_runtime.supervisor import VllmSupervisor, read_last_error
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19995)
+    fake = tmp_path / "vllm"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    sup = VllmSupervisor(
+        {"model": "Qwen/Qwen3-8B-AWQ", "port": 19995, "served_model_name": "qwen3:8b"},
+        executable=fake,
+        log_path=home / "runtimes" / "vllm" / "vllm-server.log",
+    )
+
+    class _Killed:
+        returncode = -9
+
+        def poll(self):
+            return -9
+
+    def _spawn():
+        sup.proc = _Killed()
+
+    monkeypatch.setattr(sup, "_spawn", _spawn)
+    with pytest.raises(RuntimeError, match="SIGKILL"):
+        sup.start(timeout_s=1)
+    assert "SIGKILL" in (read_last_error() or "")
+    assert "vllm serve failed" not in (read_last_error() or "")
+
+
 def test_watch_stops_on_fatal_awq_config_error(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
