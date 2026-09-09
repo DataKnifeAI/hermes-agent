@@ -708,11 +708,31 @@ describe('vLLM engine', () => {
       tag: '0.27.1',
       models: []
     })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
     renderPane()
 
     expect(await screen.findByRole('button', { name: /set up for me/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /configure/i })).toBeTruthy()
-    expect(screen.queryByText('Local')).toBeNull()
+    expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
+    const download = screen.getByRole('button', { name: /download · 5\.0 GB/i })
+    expect((download as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('Set up for me fires the engine-aware quickstart, not install-only', async () => {
@@ -846,7 +866,7 @@ describe('vLLM engine', () => {
     })
 
     const tooBigDownload = screen.getByRole('button', { name: /^download$/i })
-    expect((tooBigDownload as HTMLButtonElement).disabled).toBe(true)
+    expect((tooBigDownload as HTMLButtonElement).disabled).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: /^use$/i }))
     await waitFor(() => {
@@ -972,7 +992,138 @@ describe('vLLM engine', () => {
 
     const downloads = screen.getAllByRole('button', { name: /^download$/i })
     expect(downloads.length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByRole('button', { name: /^use$/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^use$/i })).toBeNull()
+  })
+
+  it('greys out Download on a gated Hugging Face hit and does not start a pull', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({ models: [] })
+    mocked.searchVllmModels.mockResolvedValue({
+      hits: [
+        {
+          capabilities: ['instruct'],
+          downloads: 9,
+          fit: 'unknown',
+          gated: true,
+          likes: 2,
+          repo: 'google/gemma-3-27b-it',
+          updated: ''
+        }
+      ]
+    })
+    renderPane()
+    fireEvent.change(await screen.findByPlaceholderText(/search models/i), { target: { value: 'gemma' } })
+    await waitFor(() => {
+      expect(mocked.searchVllmModels).toHaveBeenCalledWith('gemma')
+    })
+
+    expect(screen.getByText('google/gemma-3-27b-it')).toBeTruthy()
+    expect(screen.getByText(/requires Hugging Face sign-in/i)).toBeTruthy()
+    const gatedDownload = screen.getByRole('button', { name: /^download$/i })
+    expect((gatedDownload as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(gatedDownload)
+    expect(mocked.downloadVllmModel).not.toHaveBeenCalled()
+  })
+
+  it('hides Use on a cached vLLM row that is too big and still offers Download on an uncached too-big row', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: true,
+          cached: true,
+          capabilities: ['bf16'],
+          display_name: 'hermes3:8b',
+          fit: 'too-big',
+          fits: false,
+          id: 'NousResearch/Hermes-3-Llama-3.1-8B',
+          recommended: false,
+          served_model_name: 'hermes3:8b',
+          size_bytes: 16 * 2 ** 30,
+          size_label: '16.0 GB'
+        },
+        {
+          active: false,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq'],
+          display_name: 'qwen3:32b',
+          fit: 'too-big',
+          fits: false,
+          id: 'Qwen/Qwen3-32B-AWQ',
+          recommended: false,
+          served_model_name: 'qwen3:32b',
+          size_bytes: 0,
+          size_label: '—'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findAllByText('Too big for this machine')).not.toHaveLength(0)
+    expect(screen.queryByRole('button', { name: /^use$/i })).toBeNull()
+    const tooBigDownload = screen.getByRole('button', { name: /^download$/i })
+    expect((tooBigDownload as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('shows Finishing download after HF bytes hit 100%, not an install hang', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq'],
+          display_name: 'hermes3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+          recommended: true,
+          served_model_name: 'hermes3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    const downloadJob = {
+      detail: 'Finishing download',
+      done_bytes: 4.1 * 2 ** 30,
+      error: null,
+      job_id: 'vd-verify',
+      kind: 'model-download' as const,
+      model_id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      percent: 100,
+      phase: 'verifying',
+      status: 'running' as const,
+      target: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      total_bytes: 4.1 * 2 ** 30
+    }
+    mocked.getLocalModelsJobs.mockResolvedValue({ jobs: [downloadJob] })
+    $localRuntimeJobs.set([downloadJob])
+    renderPane()
+
+    expect(await screen.findByText('Finishing download')).toBeTruthy()
+    expect(screen.queryByText(/installing/i)).toBeNull()
   })
 
   it('shows the llama.cpp engine-update icons for vLLM idle / available / current', async () => {
@@ -1043,7 +1194,24 @@ describe('vLLM engine', () => {
         venv_ready: true,
         last_error: 'model was removed — Download to use again'
       })
-      mocked.getVllmModels.mockResolvedValue({ models: [] })
+      mocked.getVllmModels.mockResolvedValue({
+        models: [
+          {
+            active: false,
+            added_by_you: false,
+            cached: false,
+            capabilities: ['awq'],
+            display_name: 'qwen3:8b',
+            fit: 'fits-gpu',
+            fits: true,
+            id: 'Qwen/Qwen3-8B-AWQ',
+            recommended: true,
+            served_model_name: 'qwen3:8b',
+            size_bytes: 5 * 2 ** 30,
+            size_label: '5.0 GB'
+          }
+        ]
+      })
       return { ok: true }
     })
     renderPane()
@@ -1056,6 +1224,61 @@ describe('vLLM engine', () => {
     expect(mocked.quickstartLocalModels).not.toHaveBeenCalled()
     expect(mocked.downloadVllmModel).not.toHaveBeenCalled()
     expect(await screen.findByRole('button', { name: /set up for me/i })).toBeTruthy()
+    const downloadAgain = await screen.findByRole('button', { name: /download · 5\.0 GB/i })
+    expect((downloadAgain as HTMLButtonElement).disabled).toBe(false)
     confirm.mockRestore()
+  })
+
+  it('returns to recommended setup from a filled vLLM library without deleting cache', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        },
+        {
+          active: true,
+          added_by_you: true,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'sideload',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'acme/sideload-awq',
+          recommended: false,
+          served_model_name: 'sideload',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByRole('button', { name: /recommended setup/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /set up for me/i })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /recommended setup/i }))
+
+    expect(await screen.findByRole('button', { name: /set up for me/i })).toBeTruthy()
+    expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
+    expect(mocked.deleteVllmModel).not.toHaveBeenCalled()
+    expect(mocked.quickstartLocalModels).not.toHaveBeenCalled()
   })
 })

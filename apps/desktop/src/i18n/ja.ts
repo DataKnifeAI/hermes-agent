@@ -1102,6 +1102,9 @@ export const ja = defineLocale({
       downloadBare: 'ダウンロード',
       downloadProgress: (done, total) => `ダウンロード中 ${done} / ${total}`,
       downloadDoneToast: model => `${model} の準備ができました。`,
+      recommendedSetup: 'おすすめのセットアップ',
+      recommendedSetupHint:
+        'この GPU に合うワンクリック設定に戻ります。ダウンロード済みのファイルはディスクに残ります。',
       installDoneToast: 'ローカルランタイムのインストールが完了しました。',
       useAction: '使用する',
       activePill: 'デフォルト',
@@ -1156,6 +1159,8 @@ export const ja = defineLocale({
       released: date => `${date} 公開`,
       downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: 'Hugging Face へのサインインが必要',
+      browseGatedHint: 'huggingface.co でサインインしてください — このリポジトリはゲートされています。',
+      downloadVerifying: 'ダウンロードを完了しています',
       browseNoGguf: '互換性のあるモデルファイルが見つかりません。',
       browseFitUnknown: '適合状況は不明',
       browseFitUnknownHint:

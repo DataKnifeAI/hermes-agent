@@ -15,6 +15,11 @@ def _client(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    # Default vLLM model is Qwen/Qwen3-8B-AWQ. Isolate the hub so Start/Use
+    # cannot see a hollow leftover in the developer's ~/.cache/huggingface.
+    hf_home = tmp_path / "hf-home"
+    hf_home.mkdir()
+    monkeypatch.setenv("HF_HOME", str(hf_home))
     monkeypatch.setattr("cli._hermes_home", home)
     import hermes_constants
 
@@ -33,6 +38,16 @@ def _write_engine(home, engine: str, extra=None):
         section.update(extra)
     (home / "config.yaml").write_text(
         yaml.dump({"local_runtime": section, "model": {}}), encoding="utf-8")
+
+
+def _seed_default_vllm_cache(tmp_path, monkeypatch, repo="Qwen/Qwen3-8B-AWQ"):
+    """Tiny weight file so Start sees the DEFAULT_CONFIG model as downloaded."""
+    hub = tmp_path / "hf-hub"
+    dest = hub / ("models--" + repo.replace("/", "--"))
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "model.safetensors").write_bytes(b"x" * 64)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    return hub
 
 
 def test_status_default_engine_is_llamacpp(tmp_path, monkeypatch):
@@ -121,6 +136,7 @@ def test_set_engine_persists_without_stopping_the_other(tmp_path, monkeypatch):
 def test_server_start_vllm_stops_llama_then_starts(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
+    _seed_default_vllm_cache(tmp_path, monkeypatch)
     order: list[str] = []
     monkeypatch.setattr(
         "hermes_cli.local_engines.stop_llama_engine",
@@ -147,6 +163,7 @@ def test_server_start_vllm_stops_llama_then_starts(tmp_path, monkeypatch):
 def test_server_start_occupancy_surfaces(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
+    _seed_default_vllm_cache(tmp_path, monkeypatch)
     from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
 
     monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
@@ -186,6 +203,7 @@ def test_server_stop_dispatches_to_configured_engine(tmp_path, monkeypatch):
 def test_vllm_recommend_and_use_routes(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
+    _seed_default_vllm_cache(tmp_path, monkeypatch)
     rec = client.get("/api/local-models/vllm/recommend")
     assert rec.status_code == 200
     body = rec.json()
@@ -250,6 +268,47 @@ def test_vllm_list_set_delete_and_search_contracts(tmp_path, monkeypatch):
     assert cached.is_dir()
     missing = client.delete("/api/local-models/vllm/models/no/such-model")
     assert missing.status_code == 404
+
+
+def test_delete_official_model_keeps_catalog_row(tmp_path, monkeypatch):
+    """Official ids stay listed after delete so Download can run again."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "Qwen/Qwen3-8B-AWQ"
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": hid, "served_model_name": "qwen3:8b",
+    }})
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--Qwen--Qwen3-8B-AWQ"
+    dest.mkdir(parents=True)
+    (dest / "model.safetensors").write_bytes(b"x" * 64)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, TIERS, VllmRecommendation
+
+    tier = next(t for t in TIERS if t.model == hid)
+    rec = VllmRecommendation(
+        NvidiaProbe(24 * (1 << 30), 24 * (1 << 30), "data"), tier, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+
+    before = client.get("/api/local-models/vllm/models")
+    assert before.status_code == 200
+    row = next(m for m in before.json()["models"] if m["id"] == hid)
+    assert row["cached"] is True
+
+    gone = client.delete(f"/api/local-models/vllm/models/{hid}")
+    assert gone.status_code == 200, gone.text
+    assert not dest.exists()
+
+    after = client.get("/api/local-models/vllm/models")
+    assert after.status_code == 200
+    ids = [m["id"] for m in after.json()["models"]]
+    assert hid in ids
+    row = next(m for m in after.json()["models"] if m["id"] == hid)
+    assert row["cached"] is False
+    assert row["added_by_you"] is False
 
 
 def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch):
@@ -397,6 +456,36 @@ def test_vllm_use_refuses_uncached_without_downloading(tmp_path, monkeypatch):
     from hermes_cli.config import load_config
 
     assert (load_config().get("local_runtime") or {}).get("vllm", {}).get("model") != "acme/fresh-awq"
+
+
+def test_vllm_use_refuses_too_big_cached(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, TIERS, VllmRecommendation
+
+    tier = next(t for t in TIERS if t.id == "24gb")
+    rec = VllmRecommendation(
+        NvidiaProbe(24 * (1 << 30), 24 * (1 << 30), "data"), tier, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    hid = "NousResearch/Hermes-3-Llama-3.1-8B"
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.list_cached_repos",
+        lambda: [{"id": hid, "size_bytes": 16 * (1 << 30),
+                  "size_label": "16.0 GB", "cached": True}],
+    )
+    started: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start"))
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 400, used.text
+    detail = used.json()["detail"].lower()
+    assert "too big" in detail or "gpu" in detail
+    assert started == []
+    from hermes_cli.config import load_config
+
+    assert (load_config().get("local_runtime") or {}).get("vllm", {}).get("model") != hid
 
 
 def test_vllm_use_cached_sets_then_starts_without_download(tmp_path, monkeypatch):
@@ -707,6 +796,7 @@ def test_vllm_use_reloads_when_switching_cached_models(tmp_path, monkeypatch):
 def test_server_start_vllm_succeeds_when_already_running(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
+    _seed_default_vllm_cache(tmp_path, monkeypatch)
     monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
     monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
     monkeypatch.setattr(

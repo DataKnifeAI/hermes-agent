@@ -12,17 +12,24 @@ from typing import Any
 from fastapi import HTTPException
 
 from hermes_cli.local_engines import engine_from_config
+from hermes_cli.vllm_runtime.supervisor import READY_TIMEOUT_S
 
 _LLAMA_ONLY_DETAIL = (
     "This action is for llama.cpp GGUF models. "
     "Switch the local engine to llama.cpp first."
 )
 _ENGINE_NAMES = frozenset({"llamacpp", "vllm"})
+# POST /use, /quickstart (starting-server), /server start all wait on
+# supervisor._wait_ready. Must be >= READY_TIMEOUT_S so the job does not
+# fail while CUDA graphs are still capturing.
+VLLM_START_TIMEOUT_S = READY_TIMEOUT_S
 _LOG_PHASES = (
     ("Downloading", "Downloading model weights"),
     ("download", "Downloading model weights"),
     ("Loading weights", "Loading weights"),
     ("Loading safetensors", "Loading weights"),
+    ("warmup", "Warming up GPU"),
+    ("Warming up", "Warming up GPU"),
     ("Capturing CUDA graph", "Capturing CUDA graphs"),
     ("Application startup complete", "Server ready"),
     ("Uvicorn running", "Server ready"),
@@ -199,7 +206,7 @@ def start_active_engine() -> None:
             raise
         from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
 
-        sup = ensure_vllm_runtime(cfg, force=True)
+        sup = ensure_vllm_runtime(cfg, force=True, timeout_s=VLLM_START_TIMEOUT_S)
         if sup is None:
             from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
 
@@ -318,6 +325,16 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
         write_last_error(blocked)
         disable_auto_start()
         raise HTTPException(status_code=400, detail=blocked)
+    from hermes_cli.vllm_runtime.inventory import TOO_BIG_USE_MSG, cached_repo_fit
+    from hermes_cli.vllm_runtime.recommend import recommend_vllm
+
+    rec = recommend_vllm()
+    tags = cached_repo_fit(hid, total_vram=rec.probe.total_bytes or 0)
+    if tags.get("fit") == "too-big":
+        detail = str(tags.get("fit_detail") or TOO_BIG_USE_MSG)
+        write_last_error(detail)
+        disable_auto_start()
+        raise HTTPException(status_code=400, detail=detail)
     if not repo_is_cached(hid):
         raise HTTPException(
             status_code=409,

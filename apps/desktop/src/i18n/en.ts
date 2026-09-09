@@ -1207,6 +1207,9 @@ export const en: Translations = {
         `One click makes ${model} your default for new chats. Everything runs on this machine.`,
       quickstartAction: 'Set up for me',
       quickstartConfigure: 'Configure…',
+      recommendedSetup: 'Recommended setup',
+      recommendedSetupHint:
+        'Return to one-click setup for the model that fits this GPU. Downloaded files stay on disk.',
       quickstartDoneToast: model => `${model} is set up — new chats run on this machine.`,
       quickstartFailed: 'Local model setup failed',
       quickstartStageEngine: 'Engine',
@@ -1264,6 +1267,8 @@ export const en: Translations = {
       released: date => `Released ${date}`,
       downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: 'requires Hugging Face sign-in',
+      browseGatedHint: 'Sign in on huggingface.co — this repository is gated.',
+      downloadVerifying: 'Finishing download',
       browseNoGguf: 'No compatible model files found.',
       browseFitUnknown: 'Fit unknown',
       browseFitUnknownHint:

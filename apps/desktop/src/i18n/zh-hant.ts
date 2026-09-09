@@ -1059,6 +1059,8 @@ export const zhHant = defineLocale({
       downloadBare: '下載',
       downloadProgress: (done, total) => `正在下載 ${done} / ${total}`,
       downloadDoneToast: model => `${model} 已就緒。`,
+      recommendedSetup: '建議設定',
+      recommendedSetupHint: '返回適合此 GPU 的一鍵設定。已下載的檔案仍保留在磁碟上。',
       installDoneToast: '本地執行環境已安裝就緒。',
       useAction: '使用',
       activePill: '預設',
@@ -1110,6 +1112,8 @@ export const zhHant = defineLocale({
       released: date => `${date} 發布`,
       downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: '需要登入 Hugging Face',
+      browseGatedHint: '請先在 huggingface.co 登入並申請存取 — 此倉庫已設門禁。',
+      downloadVerifying: '正在完成下載',
       browseNoGguf: '未找到相容的模型檔案。',
       browseFitUnknown: '適配情況未知',
       browseFitUnknownHint:

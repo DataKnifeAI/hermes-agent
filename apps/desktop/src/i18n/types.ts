@@ -1040,6 +1040,8 @@ export interface Translations {
       quickstartDetailReady: (model: string) => string
       quickstartAction: string
       quickstartConfigure: string
+      recommendedSetup: string
+      recommendedSetupHint: string
       quickstartDoneToast: (model: string) => string
       quickstartFailed: string
       quickstartStageEngine: string
@@ -1093,6 +1095,8 @@ export interface Translations {
       released: (date: string) => string
       downloadBytesPct: (done: string, total: string, pct: number) => string
       browseGated: string
+      browseGatedHint: string
+      downloadVerifying: string
       browseNoGguf: string
       browseFitUnknown: string
       browseFitUnknownHint: string

@@ -1370,6 +1370,8 @@ export const zh: Translations = {
       quickstartDetailReady: model => `一键将 ${model} 设为新会话的默认模型。所有内容都在本机运行。`,
       quickstartAction: '为我设置',
       quickstartConfigure: '自定义…',
+      recommendedSetup: '推荐设置',
+      recommendedSetupHint: '返回适合此 GPU 的一键设置。已下载的文件仍保留在磁盘上。',
       quickstartDoneToast: model => `${model} 已就绪——新会话将在本机运行。`,
       quickstartFailed: '本地模型设置失败',
       quickstartStageEngine: '引擎',
@@ -1443,6 +1445,8 @@ export const zh: Translations = {
       released: date => `${date} 发布`,
       downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: '需要登录 Hugging Face',
+      browseGatedHint: '请先在 huggingface.co 登录并申请访问 — 该仓库已设门禁。',
+      downloadVerifying: '正在完成下载',
       browseNoGguf: '未找到兼容的模型文件。',
       browseFitUnknown: '适配情况未知',
       browseFitUnknownHint:

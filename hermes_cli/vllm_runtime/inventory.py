@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -76,6 +77,10 @@ _HF_JSON_CACHE_TTL_S = 300
 _HF_JSON_CACHE_MAX = 128
 _HF_CARD_TIMEOUT_S = 4
 _MIN_WEIGHT_BYTES = 100 << 20  # ignore tokenizer-only / empty cache dirs
+# Hub leftovers from a gated 401 still have config/tokenizer; weights do not.
+_WEIGHT_FILE_SUFFIXES = frozenset({
+    ".safetensors", ".bin", ".pt", ".pth", ".npz", ".gguf",
+})
 _MAX_CAPS = 5
 _TOOL_TAGS = frozenset({
     "function calling", "function-calling", "function_calling",
@@ -135,6 +140,30 @@ def _human_gb(n: int | float) -> str:
     return f"{n / (1 << 30):.1f} GB"
 
 
+def _cache_has_weights(path: Path) -> bool:
+    """True when the hub dir has a real weight file, not tokenizer/README leftovers."""
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            if Path(name).suffix.lower() not in _WEIGHT_FILE_SUFFIXES:
+                continue
+            try:
+                if (Path(root) / name).stat().st_size > 0:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def repo_is_gated(payload: dict | None) -> bool:
+    """HF ``gated`` is bool | ``auto`` | ``manual`` — anything but explicit false."""
+    if not isinstance(payload, dict):
+        return False
+    gated = payload.get("gated")
+    if gated in (False, None, 0, "", "false", "False"):
+        return False
+    return bool(gated)
+
+
 def list_cached_repos() -> list[dict[str, Any]]:
     """Repos with weights already in the HF hub cache."""
     root = hf_hub_dir()
@@ -149,7 +178,7 @@ def list_cached_repos() -> list[dict[str, Any]]:
         if not child.is_dir():
             continue
         repo = _repo_from_cache_name(child.name)
-        if not repo:
+        if not repo or not _cache_has_weights(child):
             continue
         size = _dir_bytes(child)
         rows.append({
@@ -218,8 +247,9 @@ def estimate_min_vram_bytes(params_b: float, quant: str) -> int:
 
 
 def _vram_from_weight_bytes(weight: int) -> int:
-    # KV + activations at the tool-loop floor: ~25% of weights, 2 GiB minimum.
-    reserve = max(2 * (1 << 30), int(weight * 0.25))
+    # 64k KV + vLLM working set. Quantization shrinks the weight file, not the
+    # KV tensor, so a small % of disk undercounts BF16 8B and 32B-class AWQ.
+    reserve = max(8 * (1 << 30), int(weight * 0.55))
     return weight + reserve
 
 
@@ -251,13 +281,21 @@ def _quant_from_config(config: dict | None) -> str | None:
     return None
 
 
+def _awq_packed_safetensors(params: dict) -> bool:
+    """AWQ shards store packed int32 + a BF16/F16 scale — not a unique dtype."""
+    keys = {str(k).upper() for k in params}
+    return "I32" in keys and bool(keys & {"BF16", "F16"})
+
+
 def _quant_from_safetensors(safetensors: dict | None) -> str | None:
-    """Single-dtype packs only. I32+BF16 AWQ shards are not a unique dtype."""
+    """Single-dtype packs, or the I32+BF16 AWQ layout Hugging Face publishes."""
     if not isinstance(safetensors, dict):
         return None
     params = safetensors.get("parameters")
     if not isinstance(params, dict) or not params:
         return None
+    if _awq_packed_safetensors(params):
+        return "awq"
     mapped = {_SAFETENSORS_DTYPE.get(str(k).upper()) for k in params}
     mapped.discard(None)
     if len(mapped) == 1:
@@ -347,6 +385,13 @@ def _capability_tags(
 UNSERVABLE_FORMAT_MSG = (
     "vLLM cannot serve this format — Download an AWQ or FP8 instruct model"
 )
+GATED_DOWNLOAD_MSG = (
+    "This Hugging Face repo is gated — sign in at huggingface.co and request "
+    "access. Hermes will not download it unsigned."
+)
+TOO_BIG_USE_MSG = "This model is too big for this GPU at the 64k tool-loop floor"
+DOWNLOAD_VERIFY_PHASE = "verifying"
+DOWNLOAD_VERIFY_DETAIL = "Finishing download"
 
 
 def unservable_reason(hid: str, tags: list[str] | None = None) -> str | None:
@@ -367,15 +412,16 @@ def weight_bytes_from_safetensors(safetensors: dict | None, quant: str | None = 
     if isinstance(params, dict) and params:
         if not count:
             count = float(sum(v for v in params.values() if isinstance(v, (int, float))))
+        # Packed AWQ must win before unique-dtype: I32 is unmapped, so
+        # I32+BF16 would otherwise look like a BF16-only pack (~4× too large).
+        if _awq_packed_safetensors(params) and count >= 10_000_000:
+            return int(count * _QUANT_BYTES["awq"])
         mapped = {_SAFETENSORS_DTYPE.get(str(k).upper()) for k in params}
         mapped.discard(None)
         if len(mapped) == 1:
             bpp = _QUANT_BYTES.get(next(iter(mapped)))
             if bpp and count >= 10_000_000:
                 return int(count * bpp)
-        keys = {str(k).upper() for k in params}
-        if "I32" in keys and keys & {"BF16", "F16"} and count >= 10_000_000:
-            return int(count * _QUANT_BYTES["awq"])
         summed = sum(
             int(v) * _DTYPE_WIDTH.get(str(k).upper(), 0)
             for k, v in params.items() if isinstance(v, (int, float))
@@ -509,6 +555,17 @@ def classify_vllm_repo(
     }
 
 
+def cached_repo_fit(hf_id: str, *, total_vram: int = 0) -> dict[str, Any]:
+    """Fit for a hub-cached id using the same weights+64k formula as search."""
+    hid = (hf_id or "").strip()
+    disk = 0
+    for row in list_cached_repos():
+        if row["id"] == hid:
+            disk = int(row.get("size_bytes") or 0)
+            break
+    return classify_vllm_repo(hid, total_vram=total_vram, weight_bytes=disk)
+
+
 def ensure_hf_weights(repo: str, job: dict | None = None) -> dict[str, Any]:
     """Pull ``repo`` into the HF hub cache when missing. Tests patch ``download_hf_repo``."""
     hid = (repo or "").strip()
@@ -592,6 +649,10 @@ def _job_tqdm_class(job: dict):
             total = job.get("total_bytes") or 0
             if total:
                 job["done_bytes"] = min(int(job["done_bytes"]), int(total))
+                if int(job["done_bytes"]) >= int(total) and (
+                    self._unit == "B" or int(total) >= 256
+                ):
+                    _mark_finishing_download(job)
 
         def close(self):
             return None
@@ -655,9 +716,56 @@ def _hub_snapshot_download(hid: str, job: dict | None) -> None:
         snapshot_download(**kwargs)
 
 
+def _mark_finishing_download(job: dict | None) -> None:
+    """Bytes are in; snapshot_download is still hashing/moving into the hub cache."""
+    if not job or job.get("phase") in {DOWNLOAD_VERIFY_PHASE, "done", "error"}:
+        return
+    job["phase"] = DOWNLOAD_VERIFY_PHASE
+    job["detail"] = DOWNLOAD_VERIFY_DETAIL
+
+
+def _is_gated_failure(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403):
+        return True
+    code = getattr(exc, "status_code", None)
+    if code in (401, 403):
+        return True
+    blob = f"{type(exc).__name__} {exc}".lower()
+    name = type(exc).__name__.lower()
+    blob = str(exc).lower()
+    return "gated" in name or "gated" in blob or "unauthorized" in blob or "forbidden" in blob
+
+
+def _remove_fresh_cache(repo: str) -> None:
+    """Drop a hub dir we just created so a failed/gated pull cannot become a library row."""
+    try:
+        delete_cached_repo(repo)
+    except (FileNotFoundError, ValueError, OSError):
+        root = hf_hub_dir() / _cache_name(repo)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _refuse_if_gated(hid: str) -> None:
+    try:
+        info = _hf_json(
+            f"{_HF}/api/models/{urllib.parse.quote(hid, safe='')}",
+            timeout=_HF_CARD_TIMEOUT_S,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise ValueError(GATED_DOWNLOAD_MSG) from exc
+        return
+    except Exception:
+        return
+    if isinstance(info, dict) and repo_is_gated(info):
+        raise ValueError(GATED_DOWNLOAD_MSG)
+
+
 def download_hf_repo(repo: str, job: dict | None = None) -> None:
     """Write ``repo`` into the hub cache. Suite always monkeypatches this."""
     hid = (repo or "").strip()
+    existed = hid in cached_repo_ids()
+    _refuse_if_gated(hid)
     if job is not None:
         job["phase"] = "downloading"
         job["detail"] = f"Downloading {hid}"
@@ -669,7 +777,20 @@ def download_hf_repo(repo: str, job: dict | None = None) -> None:
         return
     except ImportError:
         pass
-    _download_hf_via_api(hid, job)
+    except Exception as exc:
+        if not existed:
+            _remove_fresh_cache(hid)
+        if _is_gated_failure(exc):
+            raise ValueError(GATED_DOWNLOAD_MSG) from exc
+        raise
+    try:
+        _download_hf_via_api(hid, job)
+    except Exception as exc:
+        if not existed:
+            _remove_fresh_cache(hid)
+        if _is_gated_failure(exc):
+            raise ValueError(GATED_DOWNLOAD_MSG) from exc
+        raise
 
 
 def _download_hf_via_api(repo: str, job: dict | None = None) -> None:

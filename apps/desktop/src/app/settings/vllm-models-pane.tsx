@@ -39,9 +39,17 @@ function formatReleasedMonth(raw?: null | string): string | null {
 }
 
 function downloadBarLabel(
-  job: { detail?: string; done_bytes?: number; percent?: number; total_bytes?: number },
-  copy: { downloadBytesPct: (done: string, total: string, pct: number) => string; downloadProgress: (done: string, total: string) => string }
+  job: { detail?: string; done_bytes?: number; percent?: number; phase?: string; total_bytes?: number },
+  copy: {
+    downloadBytesPct: (done: string, total: string, pct: number) => string
+    downloadProgress: (done: string, total: string) => string
+    downloadVerifying: string
+  }
 ): string {
+  if (job.phase === 'verifying') {
+    return copy.downloadVerifying
+  }
+
   const doneGb = job.done_bytes ? (job.done_bytes / (1 << 30)).toFixed(1) : '—'
   const totalGb = job.total_bytes ? (job.total_bytes / (1 << 30)).toFixed(1) : '—'
 
@@ -315,13 +323,15 @@ export function VllmModelsPane({
                         </Pill>
                       </Tip>
                     ) : model.cached ? (
-                      <Button className={busy ? '[&_svg]:animate-spin' : undefined} disabled={Boolean(setting)} onClick={() => void handleUse(model)} size="sm">
-                        {busy ? <Loader2 /> : <Check />}
-                        {copy.useAction}
-                      </Button>
+                      tooBig ? undefined : (
+                        <Button className={busy ? '[&_svg]:animate-spin' : undefined} disabled={Boolean(setting)} onClick={() => void handleUse(model)} size="sm">
+                          {busy ? <Loader2 /> : <Check />}
+                          {copy.useAction}
+                        </Button>
+                      )
                     ) : dJob ? undefined : (
                       <Button
-                        disabled={tooBig || anyDownloadRunning}
+                        disabled={anyDownloadRunning}
                         onClick={() => void handleDownload(model)}
                         size="sm"
                         variant="outline"
@@ -518,23 +528,35 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
           const dJob = runningDownloadFor(jobs, hit.repo)
           const fit = hit.fit ?? 'unknown'
           const tooBig = fit === 'too-big'
+          const gated = Boolean(hit.gated)
 
           return (
             <ListRow
               action={
                 <div className="flex items-center gap-2">
                   {hit.cached ? (
+                    tooBig ? undefined : (
+                      <Button
+                        disabled={Boolean(setting) || jobs.some(j => j.status === 'running')}
+                        onClick={() => adopt(hit.repo)}
+                        size="sm"
+                      >
+                        {setting === hit.repo ? <Loader2 className="animate-spin" /> : <CheckCircle2 />}
+                        {copy.useAction}
+                      </Button>
+                    )
+                  ) : dJob ? undefined : gated ? (
+                    <Tip label={copy.browseGatedHint}>
+                      <span className="inline-flex">
+                        <Button disabled size="sm" variant="outline">
+                          <Download />
+                          {copy.downloadBare}
+                        </Button>
+                      </span>
+                    </Tip>
+                  ) : (
                     <Button
-                      disabled={Boolean(setting) || jobs.some(j => j.status === 'running')}
-                      onClick={() => adopt(hit.repo)}
-                      size="sm"
-                    >
-                      {setting === hit.repo ? <Loader2 className="animate-spin" /> : <CheckCircle2 />}
-                      {copy.useAction}
-                    </Button>
-                  ) : dJob ? undefined : (
-                    <Button
-                      disabled={tooBig || anyDownloadRunning}
+                      disabled={anyDownloadRunning}
                       onClick={() => startDownload(hit.repo)}
                       size="sm"
                       variant="outline"

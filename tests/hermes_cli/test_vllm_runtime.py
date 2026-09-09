@@ -522,8 +522,8 @@ def test_inventory_lists_and_deletes_only_hf_cache(tmp_path, monkeypatch):
     doomed = hub / "models--org--doomed"
     kept.mkdir(parents=True)
     doomed.mkdir(parents=True)
-    (kept / "w").write_bytes(b"aa")
-    (doomed / "w").write_bytes(b"bb")
+    (kept / "weights.bin").write_bytes(b"aa")
+    (doomed / "weights.bin").write_bytes(b"bb")
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     from hermes_cli.vllm_runtime.inventory import delete_cached_repo, list_cached_repos
 

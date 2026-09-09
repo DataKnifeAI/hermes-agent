@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 _RESTART_BACKOFF_S = (1, 5, 15, 60)
 _MAX_CRASH_RESTARTS = len(_RESTART_BACKOFF_S)
+# GET /v1/models must wait through Mamba warmup + CUDA graph capture, not just
+# process spawn. Nemotron is ~98s cold; 120s left no margin. Zip/venv install
+# is a separate job and does not share this budget.
+READY_TIMEOUT_S = 180
 MODEL_REMOVED_MSG = "model was removed — Download to use again"
 LEFTOVER_AWQ_MSG = (
     "vLLM cannot start this model as AWQ — it has no AWQ config. "
@@ -293,7 +297,7 @@ class VllmSupervisor:
         logger.info("vllm serve spawned pid=%s port=%s", self.proc.pid, self.port)
         self._write_state()
 
-    def start(self, timeout_s: int = 120) -> None:
+    def start(self, timeout_s: int = READY_TIMEOUT_S) -> None:
         self._stopping = False
         hid = configured_model_id(self.settings)
         blocked = configured_unservable_reason(self.settings)
@@ -334,16 +338,20 @@ class VllmSupervisor:
         }), encoding="utf-8")
 
     def _wait_ready(self, timeout_s: int) -> None:
+        """Poll GET /v1/models until 200. Connection refused / 5xx is not failure
+        while the pid is alive — CUDA graph capture looks like that for minutes."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if self.proc and self.proc.poll() is not None:
                 raise RuntimeError(
                     f"vllm serve exited rc={self.proc.returncode} during startup "
                     f"(log: {self.log_path})")
-            with suppress(urllib.error.URLError, OSError, TimeoutError):
+            try:
                 with urllib.request.urlopen(self._health_url(), timeout=3) as r:
                     if r.status == 200:
                         return
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
+                pass
             time.sleep(0.25)
         raise TimeoutError(
             f"vllm serve not ready after {timeout_s}s (log: {self.log_path})")
@@ -405,7 +413,7 @@ class VllmSupervisor:
             self._restarts += 1
             try:
                 self._spawn()
-                self._wait_ready(120)
+                self._wait_ready(READY_TIMEOUT_S)
                 clear_last_error()
             except Exception as exc:  # noqa: BLE001
                 logger.error("vllm serve restart failed: %s", exc)

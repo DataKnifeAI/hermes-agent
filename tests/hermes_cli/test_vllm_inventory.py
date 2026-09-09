@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import urllib.error
+from io import BytesIO
+
 from hermes_cli.vllm_runtime.inventory import (
+    DOWNLOAD_VERIFY_DETAIL,
+    DOWNLOAD_VERIFY_PHASE,
+    GATED_DOWNLOAD_MSG,
+    _cache_name,
     _job_tqdm_class,
     _vram_from_weight_bytes,
     classify_vllm_repo,
@@ -10,8 +17,11 @@ from hermes_cli.vllm_runtime.inventory import (
     download_hf_repo,
     ensure_hf_weights,
     estimate_min_vram_bytes,
+    hf_hub_dir,
+    list_cached_repos,
     parse_param_billions,
     parse_quantization,
+    repo_is_cached,
     resolve_weight_bytes,
 )
 
@@ -74,7 +84,8 @@ def test_classify_bf16_from_safetensors_dtype():
         total_vram=24 * _GIB,
         safetensors={"parameters": {"BF16": 8_000_000_000}, "total": 8_000_000_000},
     )
-    assert tags["fit"] == "fits-gpu"
+    assert tags["fit"] == "too-big"
+    assert tags["fits"] is False
     assert tags["quantization"] == "bf16"
     assert "bf16" in tags["capabilities"]
     assert "instruct" in tags["capabilities"]
@@ -340,3 +351,123 @@ def test_estimate_min_vram_matches_weight_plus_kv():
         int(8 * 1_000_000_000 * 0.55))
     actual, listing = resolve_weight_bytes(hid="org/Qwen3-8B-AWQ", used_storage=5 * _GIB)
     assert actual == listing == 5 * _GIB
+
+
+def test_nous_full_precision_too_big_on_24gb():
+    """Search listing and the same bytes on disk must both refuse 8B BF16 on 24 GB."""
+    hid = "NousResearch/Hermes-3-Llama-3.1-8B"
+    st = {"parameters": {"BF16": 8_000_000_000}, "total": 8_000_000_000}
+    search = classify_vllm_repo(hid, total_vram=24 * _GIB, safetensors=st)
+    listed = classify_vllm_repo(hid, total_vram=24 * _GIB, used_storage=16 * _GIB)
+    cached = classify_vllm_repo(hid, total_vram=24 * _GIB, weight_bytes=16 * _GIB)
+    assert search["fit"] == listed["fit"] == cached["fit"] == "too-big"
+    assert search["fits"] is False
+    assert listed["min_vram_bytes"] == cached["min_vram_bytes"]
+    assert listed["min_vram_bytes"] == _vram_from_weight_bytes(16 * _GIB)
+
+
+def test_large_awq_too_big_on_24gb_without_catalog_id():
+    tags = classify_vllm_repo(
+        "org/Hermes-32B-AWQ", tags=["awq"], total_vram=24 * _GIB,
+        used_storage=18 * _GIB)
+    assert tags["fit"] == "too-big"
+    assert tags["fits"] is False
+
+
+def test_empty_or_tokenizer_cache_is_not_a_library_row(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    hollow = hub / "models--google--gemma-3-27b-it"
+    hollow.mkdir(parents=True)
+    (hollow / "README.md").write_text("gated leftover", encoding="utf-8")
+    (hollow / "config.json").write_text("{}", encoding="utf-8")
+    (hollow / "tokenizer.json").write_bytes(b"x" * 2048)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    assert list_cached_repos() == []
+    assert repo_is_cached("google/gemma-3-27b-it") is False
+    tags = classify_vllm_repo(
+        "google/gemma-3-27b-it", total_vram=24 * _GIB, weight_bytes=0)
+    assert tags["fit"] == "unknown"
+    assert tags["fits"] is None
+
+
+def test_gated_download_refuses_without_cache_dir(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    pulled: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda url, timeout=15: {"id": "google/gemma-3-27b-it", "gated": True},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hub_snapshot_download",
+        lambda hid, job=None: pulled.append(hid),
+    )
+    job = {"phase": "", "detail": "", "done_bytes": 0, "total_bytes": None}
+    try:
+        download_hf_repo("google/gemma-3-27b-it", job)
+        raise AssertionError("gated download must refuse")
+    except ValueError as exc:
+        assert "gated" in str(exc).lower()
+        assert str(exc) == GATED_DOWNLOAD_MSG
+    assert pulled == []
+    assert not (hf_hub_dir() / _cache_name("google/gemma-3-27b-it")).exists()
+    assert list_cached_repos() == []
+
+
+def test_gated_http_error_scrubs_incomplete_cache(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda url, timeout=15: {"id": "google/gemma-3-27b-it", "gated": False},
+    )
+
+    def _snap(hid, job):
+        dest = hf_hub_dir() / _cache_name(hid)
+        dest.mkdir(parents=True)
+        (dest / "README.md").write_text("no weights", encoding="utf-8")
+        raise urllib.error.HTTPError(
+            "https://huggingface.co/google/gemma-3-27b-it", 403, "Forbidden",
+            hdrs={}, fp=BytesIO())
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hub_snapshot_download", _snap)
+    try:
+        download_hf_repo("google/gemma-3-27b-it")
+        raise AssertionError("403 must refuse")
+    except ValueError as exc:
+        assert "gated" in str(exc).lower()
+    assert not (hf_hub_dir() / _cache_name("google/gemma-3-27b-it")).exists()
+    assert list_cached_repos() == []
+
+
+def test_download_job_verifying_after_bytes_complete(monkeypatch, tmp_path):
+    """100% bytes is not done — snapshot_download still hashes/moves into the hub."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda url, timeout=15: {"siblings": [
+            {"rfilename": "model.safetensors", "size": 1000},
+        ]},
+    )
+    seen: list[str] = []
+
+    def _snap(hid, job):
+        bar = _job_tqdm_class(job)(total=1000, unit="B")
+        bar.update(1000)
+        seen.append(job["phase"])
+        assert job["detail"] == DOWNLOAD_VERIFY_DETAIL
+        bar.close()
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hub_snapshot_download", _snap)
+    job = {"phase": "", "detail": "", "done_bytes": 0, "total_bytes": None}
+    download_hf_repo("org/weights", job)
+    assert seen == [DOWNLOAD_VERIFY_PHASE]
+    assert job["phase"] == DOWNLOAD_VERIFY_PHASE
+    assert job["done_bytes"] == 1000
+    assert "install" not in (job.get("detail") or "").lower()

@@ -147,6 +147,9 @@ export function LocalModelsSettings() {
   // Quickstart escape hatch: true once the user asks for the full pane
   // (model list, HF browser) instead of the one-button setup card.
   const [configure, setConfigure] = useState(false)
+  // Full-library escape back to the recommended one-click hero. View-only —
+  // does not delete hub cache.
+  const [preferSetup, setPreferSetup] = useState(false)
   const [engineBusy, setEngineBusy] = useState(false)
   const [recommend, setRecommend] = useState<VllmRecommend | null>(null)
   const [vllmModels, setVllmModels] = useState<VllmInventoryModel[] | null>(null)
@@ -199,6 +202,7 @@ export function LocalModelsSettings() {
 
     if (hadVllmLibrary.current && empty) {
       setConfigure(false)
+      setPreferSetup(false)
     }
 
     hadVllmLibrary.current = !empty
@@ -463,7 +467,7 @@ export function LocalModelsSettings() {
   const needsSetup = !status.runtime_installed || libraryEmpty
   const heroModel = catalog?.find(c => c.recommended && c.fits) ?? catalog?.find(c => c.fits) ?? null
 
-  if (engine === 'vllm' && (vllmSetupJob || (needsSetup && !configure))) {
+  if (engine === 'vllm' && (vllmSetupJob || preferSetup || (needsSetup && !configure))) {
     const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || copy.engineVllm
     const vllmPhase = vllmSetupJob?.phase ?? ''
     const vllmStageIndex = ['starting-server', 'setting-default'].includes(vllmPhase)
@@ -531,7 +535,14 @@ export function LocalModelsSettings() {
               </>
             ) : (
               <div className="mt-6 flex items-center justify-center gap-3">
-                <Button onClick={() => setConfigure(true)} size="sm" variant="outline">
+                <Button
+                  onClick={() => {
+                    setConfigure(true)
+                    setPreferSetup(false)
+                  }}
+                  size="sm"
+                  variant="outline"
+                >
                   {copy.quickstartConfigure}
                 </Button>
                 <Button onClick={() => void handleQuickstart()} size="default">
@@ -548,6 +559,7 @@ export function LocalModelsSettings() {
             )}
           </div>
         </div>
+        {!vllmSetupJob && <VllmModelsPane models={vllmModels ?? []} onChanged={refresh} />}
       </SettingsContent>
     )
   }
@@ -760,6 +772,27 @@ export function LocalModelsSettings() {
             )}
             {status.venv_path && (
               <p className="text-[0.72rem] text-muted-foreground">{copy.vllmVenvDetail(status.venv_path)}</p>
+            )}
+            {status.runtime_installed && (
+              <ListRow
+                action={
+                  <Tip label={copy.recommendedSetupHint}>
+                    <Button
+                      onClick={() => {
+                        setPreferSetup(true)
+                        setConfigure(false)
+                      }}
+                      size="sm"
+                      variant="outline"
+                    >
+                      <Zap />
+                      {copy.recommendedSetup}
+                    </Button>
+                  </Tip>
+                }
+                description={copy.recommendedSetupHint}
+                title={copy.recommendedSetup}
+              />
             )}
             {!status.runtime_installed && !rJob && (
               <ListRow
