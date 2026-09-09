@@ -1041,7 +1041,6 @@ export interface Translations {
       quickstartAction: string
       quickstartConfigure: string
       recommendedSetup: string
-      recommendedSetupHint: string
       quickstartDoneToast: (model: string) => string
       quickstartFailed: string
       quickstartStageEngine: string

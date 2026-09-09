@@ -1208,8 +1208,6 @@ export const en: Translations = {
       quickstartAction: 'Set up for me',
       quickstartConfigure: 'Configure…',
       recommendedSetup: 'Restore recommended setup',
-      recommendedSetupHint:
-        'Failsafe if local setup is empty or broken. Switch models with Use. Downloaded files stay on disk.',
       quickstartDoneToast: model => `${model} is set up — new chats run on this machine.`,
       quickstartFailed: 'Local model setup failed',
       quickstartStageEngine: 'Engine',

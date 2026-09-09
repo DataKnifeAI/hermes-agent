@@ -1015,6 +1015,23 @@ def served_name_for(hf_id: str) -> str:
     return hid.rsplit("/", 1)[-1] if hid else hid
 
 
+def running_served_model_name() -> str:
+    """Id the live server advertised after GET /v1/models 200. Empty if down.
+
+    Config ``served_model_name`` is written on Use before serve is up — do not
+    treat that as In use.
+    """
+    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.supervisor import state_served_model_name
+
+    try:
+        if resolve_vllm_endpoint(wait_for_boot_s=0) is None:
+            return ""
+        return state_served_model_name()
+    except Exception:  # noqa: BLE001 — status/catalog must not 500 on a probe
+        return ""
+
+
 def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) -> list[dict[str, Any]]:
     """Official short list + extra cached / configured HF ids. Not six defaults.
 
@@ -1029,6 +1046,7 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
     settings = vllm_settings(config)
     configured = str(settings.get("model") or "").strip()
     served = str(settings.get("served_model_name") or "").strip()
+    live_served = running_served_model_name()
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
     recommended_id = rec.tier.model if rec.feasible and rec.tier else ""
@@ -1046,15 +1064,18 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
             weight_bytes=disk, used_storage=used,
         )
         size = disk or used or int(tags.get("size_bytes") or 0)
+        advertised = served_name_for(hf_id)
         out = {
             "id": hf_id,
             "display_name": display,
-            "served_model_name": served_name_for(hf_id),
+            "served_model_name": advertised,
             "recommended": recommended,
             "cached": hf_id in cached,
             "size_bytes": size,
             "size_label": ("—" if not size else _human_gb(size)),
-            "active": bool(configured and hf_id == configured),
+            "active": bool(live_served and (
+                hf_id == live_served or advertised == live_served
+            )),
             "fits": tags["fits"],
             "fit": tags["fit"],
             "fit_detail": tags["fit_detail"],

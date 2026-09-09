@@ -1060,7 +1060,6 @@ export const zhHant = defineLocale({
       downloadProgress: (done, total) => `正在下載 ${done} / ${total}`,
       downloadDoneToast: model => `${model} 已就緒。`,
       recommendedSetup: '還原建議設定',
-      recommendedSetupHint: '設定空白或損壞時的應急選項。切換模型請用「使用」。已下載的檔案仍保留在磁碟上。',
       installDoneToast: '本地執行環境已安裝就緒。',
       useAction: '使用',
       activePill: '預設',

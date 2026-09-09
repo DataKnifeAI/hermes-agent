@@ -93,6 +93,22 @@ function vllmLibraryEmpty(status: LocalModelsStatus): boolean {
   return !(status.models ?? []).some(m => (m.size_bytes ?? 0) > 0)
 }
 
+function vllmServedIdentity(status: LocalModelsStatus): {
+  activeModelId: null | string
+  servedModelName: null | string
+} {
+  // In use = the id GET /v1/models advertised on a running serve — not
+  // config written on Use click, not the recommended catalog flag.
+  if (!status.server_running) {
+    return { activeModelId: null, servedModelName: null }
+  }
+
+  return {
+    activeModelId: status.active_model_id ?? null,
+    servedModelName: status.served_model_name ?? null
+  }
+}
+
 function EngineSelect({
   disabled,
   engine,
@@ -553,10 +569,9 @@ export function LocalModelsSettings() {
         </div>
         {!vllmSetupJob && (
           <VllmModelsPane
-            activeModelId={status.model ?? status.active_model_id}
+            {...vllmServedIdentity(status)}
             models={vllmModels ?? []}
             onChanged={refresh}
-            servedModelName={status.served_model_name}
           />
         )}
       </SettingsContent>
@@ -774,11 +789,9 @@ export function LocalModelsSettings() {
             )}
             {status.runtime_installed && (
               <div className="mt-3 flex justify-start py-2">
-                <Tip label={copy.recommendedSetupHint}>
-                  <Button onClick={() => void handleQuickstart()} size="sm" variant="ghost">
-                    {copy.recommendedSetup}
-                  </Button>
-                </Tip>
+                <Button onClick={() => void handleQuickstart()} size="sm" variant="ghost">
+                  {copy.recommendedSetup}
+                </Button>
               </div>
             )}
             {!status.runtime_installed && !rJob && (
@@ -1232,10 +1245,9 @@ export function LocalModelsSettings() {
       {engine === 'llamacpp' && <BrowseSection onChanged={refresh} />}
       {engine === 'vllm' && (
         <VllmModelsPane
-          activeModelId={status.model ?? status.active_model_id}
+          {...vllmServedIdentity(status)}
           models={vllmModels ?? []}
           onChanged={refresh}
-          servedModelName={status.served_model_name}
         />
       )}
     </SettingsContent>

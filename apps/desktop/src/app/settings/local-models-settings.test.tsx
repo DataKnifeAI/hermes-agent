@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -1266,6 +1266,11 @@ describe('vLLM engine', () => {
   it('Use switches back to a cached recommended model without running setup', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
+      model: 'acme/sideload-awq',
+      served_model_name: 'sideload',
+      active_model_id: 'sideload',
+      server_running: true,
+      server_base_url: 'http://127.0.0.1:18435/v1',
       models: [
         { id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' },
         { id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }
@@ -1326,6 +1331,11 @@ describe('vLLM engine', () => {
   it('Restore recommended setup is a quiet failsafe, not the switch-back path', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
+      model: 'acme/sideload-awq',
+      served_model_name: 'sideload',
+      active_model_id: 'sideload',
+      server_running: true,
+      server_base_url: 'http://127.0.0.1:18435/v1',
       models: [{ id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
       runtime_installed: true,
       tag: '0.10.0',
@@ -1387,9 +1397,13 @@ describe('vLLM engine', () => {
   it('shows In use on the served cached model and Use on other cached rows', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
-      model: 'acme/sideload-awq',
+      // Config still names the recommended row (written on Use click before
+      // /v1/models). Live serve is the sideload — only that row is In use.
+      model: 'Qwen/Qwen3-8B-AWQ',
       served_model_name: 'sideload',
       active_model_id: 'sideload',
+      server_running: true,
+      server_base_url: 'http://127.0.0.1:18435/v1',
       models: [
         { id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' },
         { id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }
@@ -1401,7 +1415,7 @@ describe('vLLM engine', () => {
     mocked.getVllmModels.mockResolvedValue({
       models: [
         {
-          active: false,
+          active: true,
           added_by_you: false,
           cached: true,
           capabilities: ['awq'],
@@ -1415,7 +1429,7 @@ describe('vLLM engine', () => {
           size_label: '5.0 GB'
         },
         {
-          active: true,
+          active: false,
           added_by_you: true,
           cached: true,
           capabilities: ['awq'],
@@ -1432,7 +1446,14 @@ describe('vLLM engine', () => {
     })
     renderPane()
 
-    expect(await screen.findByText('In use')).toBeTruthy()
+    const recommendedRow = (await screen.findByText('Qwen/Qwen3-8B-AWQ')).closest('[class*="@container"]')
+    const servedRow = screen.getByText('acme/sideload-awq').closest('[class*="@container"]')
+    expect(recommendedRow).toBeTruthy()
+    expect(servedRow).toBeTruthy()
+    expect(within(recommendedRow as HTMLElement).getByRole('button', { name: /^use$/i })).toBeTruthy()
+    expect(within(recommendedRow as HTMLElement).queryByText('In use')).toBeNull()
+    expect(within(servedRow as HTMLElement).getByText('In use')).toBeTruthy()
+    expect(within(servedRow as HTMLElement).queryByRole('button', { name: /^use$/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^in use$/i })).toBeNull()
     expect(screen.getAllByRole('button', { name: /^use$/i })).toHaveLength(1)
   })

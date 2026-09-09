@@ -264,6 +264,7 @@ def test_catalog_payload_created_at_and_size(monkeypatch):
     monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
     monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.list_cached_repos", lambda: [])
     monkeypatch.setattr("hermes_cli.vllm_runtime.supervisor.vllm_settings", lambda cfg=None: {})
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.running_served_model_name", lambda: "")
 
     def _fake(url, timeout=15):
         if "Qwen3-8B-AWQ" in url:
@@ -298,11 +299,45 @@ def test_catalog_omits_uncached_configured_search_hit(monkeypatch):
         "hermes_cli.vllm_runtime.supervisor.vllm_settings",
         lambda cfg=None: {"model": "google/gemma-3-27b-it", "served_model_name": "gemma"},
     )
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.running_served_model_name", lambda: "")
     rows = catalog_models({})
     ids = {r["id"] for r in rows}
     assert "google/gemma-3-27b-it" not in ids
     assert "Qwen/Qwen3-8B-AWQ" in ids
     assert all(r["id"].count("/") == 1 for r in rows)
+
+
+def test_catalog_active_is_live_served_not_configured_or_recommended(monkeypatch):
+    """In use is the running serve id, not leftover config or the Recommended badge."""
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.recommend import (
+        NvidiaProbe, VllmRecommendation, catalog_tiers,
+    )
+
+    pick = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(NvidiaProbe(24 * _GIB, 24 * _GIB, "data"), pick, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.list_cached_repos",
+        lambda: [
+            {"id": pick.model, "size_bytes": 5 * _GIB},
+            {"id": "acme/sideload-awq", "size_bytes": 5 * _GIB},
+        ],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.vllm_settings",
+        lambda cfg=None: {"model": pick.model, "served_model_name": pick.served_model_name},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "sideload-awq",
+    )
+    rows = catalog_models({})
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[pick.model]["recommended"] is True
+    assert by_id[pick.model]["active"] is False
+    assert by_id["acme/sideload-awq"]["recommended"] is False
+    assert by_id["acme/sideload-awq"]["active"] is True
 
 
 def test_fit_same_formula_search_and_cached():

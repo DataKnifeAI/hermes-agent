@@ -417,6 +417,9 @@ def test_switch_engine_then_status_still_shows_running_vllm(tmp_path, monkeypatc
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 7})
     monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "hermes3:8b")
+    monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
     stopped: list[str] = []
@@ -433,6 +436,44 @@ def test_switch_engine_then_status_still_shows_running_vllm(tmp_path, monkeypatc
     assert data["served_model_name"] == "hermes3:8b"
     assert data["server_base_url"].endswith("/v1")
     assert stopped == []
+
+
+def test_vllm_status_served_name_is_running_server_not_config(tmp_path, monkeypatch):
+    """In use identity is the live serve — not config written before /v1/models."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "nvidia/Nemotron-3-Nano-30B-A3B-BF16",
+        "served_model_name": "nemotron",
+    }})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 7})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "qwen3:8b")
+    live = client.get("/api/local-models/status").json()
+    assert live["server_running"] is True
+    assert live["served_model_name"] == "qwen3:8b"
+    assert live["active_model_id"] == "qwen3:8b"
+    assert live["model"] == "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "")
+    down = client.get("/api/local-models/status").json()
+    assert down["server_running"] is False
+    assert down["served_model_name"] is None
+    assert down["active_model_id"] is None
+    assert down["model"] == "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
 
 
 def _wait_job(client, job_id: str, timeout_s: float = 3.0) -> dict:

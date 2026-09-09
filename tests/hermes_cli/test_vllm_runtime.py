@@ -360,6 +360,8 @@ def test_catalog_models_lists_official_short_list_not_floor_marker(monkeypatch):
         "hermes_cli.vllm_runtime.inventory.list_cached_repos", lambda: [])
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.supervisor.vllm_settings", lambda cfg=None: {})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name", lambda: "")
     rows = catalog_models({})
     official_ids = {t.model for t in official}
     listed = {r["id"] for r in rows if not r.get("added_by_you")}

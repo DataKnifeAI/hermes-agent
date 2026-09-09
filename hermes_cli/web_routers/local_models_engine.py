@@ -121,7 +121,7 @@ def _vllm_log_phase() -> str | None:
 def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
     """Status for the selected vLLM engine — not llama tag / GGUF staging."""
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
-    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.inventory import catalog_models, running_served_model_name
     from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
     from hermes_cli.vllm_runtime.venv import venv_dir, venv_ready, vllm_version_fields
 
@@ -129,7 +129,8 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
     section = cfg.get("local_runtime") or {}
     settings = vllm_settings(cfg)
     running = resolve_vllm_endpoint(wait_for_boot_s=0)
-    served = str(settings.get("served_model_name") or "") or None
+    # Live serve only — config is written on Use before GET /v1/models is 200.
+    served = running_served_model_name() or None
     configured = str(settings.get("model") or "") or None
     occ = occupancy_payload()
     versions = vllm_version_fields()
@@ -144,7 +145,7 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
         "server_running": running is not None,
         "server_base_url": (running or {}).get("base_url") or (
             openai_base_url(settings) if venv_ready() else None),
-        "active_model_id": served or configured,
+        "active_model_id": served,
         "served_model_name": served,
         "model": configured,
         "start_phase": None if running else _vllm_log_phase(),

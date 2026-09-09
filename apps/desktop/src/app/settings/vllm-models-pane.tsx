@@ -95,27 +95,21 @@ function fitRank(model: VllmInventoryModel): number {
 }
 
 function isServedModel(
-  model: { active?: boolean; id: string; served_model_name?: string },
+  model: { id: string; served_model_name?: string },
   activeModelId?: null | string,
   servedModelName?: null | string
 ): boolean {
-  if (model.active) {
-    return true
-  }
-
   const keys = [activeModelId, servedModelName].filter((k): k is string => Boolean(k))
 
   return keys.some(k => k === model.id || k === model.served_model_name)
 }
 
-function InUseState({ detail, label }: { detail: string; label: string }) {
+function InUseState({ label }: { label: string }) {
   return (
-    <Tip label={detail}>
-      <Pill tone="primary">
-        <Check className="mr-1 size-3" />
-        {label}
-      </Pill>
-    </Tip>
+    <Pill tone="primary">
+      <Check className="mr-1 size-3" />
+      {label}
+    </Pill>
   )
 }
 
@@ -357,7 +351,7 @@ export function VllmModelsPane({
                         </Button>
                       )
                     ) : isServedModel(model, activeModelId, servedModelName) ? (
-                      <InUseState detail={copy.activeDetail} label={copy.inUsePill} />
+                      <InUseState label={copy.inUsePill} />
                     ) : tooBig ? undefined : (
                       <Button className={busy ? '[&_svg]:animate-spin' : undefined} disabled={Boolean(setting)} onClick={() => void handleUse(model)} size="sm">
                         {busy ? <Loader2 /> : <Check />}
@@ -569,7 +563,7 @@ function VllmBrowseSection({
                 <div className="flex items-center gap-2">
                   {hit.cached ? (
                     tooBig ? undefined : inUse ? (
-                      <InUseState detail={copy.activeDetail} label={copy.inUsePill} />
+                      <InUseState label={copy.inUsePill} />
                     ) : (
                       <Button
                         disabled={Boolean(setting) || jobs.some(j => j.status === 'running')}

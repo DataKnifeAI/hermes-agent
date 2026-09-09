@@ -1371,7 +1371,6 @@ export const zh: Translations = {
       quickstartAction: '为我设置',
       quickstartConfigure: '自定义…',
       recommendedSetup: '恢复推荐设置',
-      recommendedSetupHint: '设置空白或损坏时的应急选项。切换模型请用「使用」。已下载的文件仍保留在磁盘上。',
       quickstartDoneToast: model => `${model} 已就绪——新会话将在本机运行。`,
       quickstartFailed: '本地模型设置失败',
       quickstartStageEngine: '引擎',
