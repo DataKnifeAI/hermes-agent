@@ -36,9 +36,11 @@ llama.cpp release zips have no CUDA build for your machine.
 
 On the same **Settings → Providers → Local Models** page, set **Local
 backend** to vLLM, then **Install → Use**. Hermes creates an isolated
-venv, picks a Hugging Face id from a VRAM-tier catalog (64K tool-loop
-floor — cards that cannot hold it stay infeasible), and starts a loopback
-OpenAI server. You do not `pip install vllm` or hand-edit a serve line.
+venv, picks one hardware-fit Hugging Face id from a short official list
+(same idea as llama.cpp's recommended row; everything else is Hugging
+Face search), keeps a 64K tool-loop floor — cards that cannot hold it
+stay infeasible — and starts a loopback OpenAI server. You do not
+`pip install vllm` or hand-edit a serve line.
 
 Headless / CLI is the same helpers:
 

@@ -112,7 +112,7 @@ def test_serve_argv_loopback_and_hermes_tool_parser():
 
 
 def test_shipped_default_is_smallest_64k_feasible_id():
-    """No-probe / DEFAULT_CONFIG use the 16 GB feasible row, not 14B or Hermes-8B."""
+    """No-probe / DEFAULT_CONFIG use the smallest 64k-feasible official row."""
     feasible = [t for t in TIERS if t.feasible_at_64k]
     assert feasible
     floor = min(t.min_vram_bytes for t in feasible)
@@ -182,6 +182,56 @@ def test_recommend_catalog_vram_and_parser_relationship():
         assert "gguf" not in rec.model.lower()
         picks.append(rec.model)
     assert len(set(picks)) == len(picks)
+
+
+def test_official_catalog_is_short_feasible_list():
+    """llama.cpp-like: official rows are 64k-feasible and unique; 8–12 GB
+    stay infeasible without a sixth official id; the largest row is not
+    the 24 GB pick (Qwen3.8 analog only on 80 GB class)."""
+    from hermes_cli.vllm_runtime.recommend import catalog_tiers
+
+    official = catalog_tiers()
+    assert official
+    assert all(t.feasible_at_64k for t in official)
+    assert len({t.model for t in official}) == len(official)
+    infeasible = [t for t in TIERS if not t.feasible_at_64k]
+    assert infeasible
+    official_ids = {t.model for t in official}
+    assert {t.model for t in infeasible} <= official_ids
+
+    for gib in (8, 12):
+        rec = recommend_vllm(total_bytes=gib * _GIB)
+        assert rec.feasible is False
+        assert rec.tier is None or not rec.tier.catalog
+
+    largest = max(official, key=lambda t: t.min_vram_bytes)
+    mid = recommend_vllm(total_bytes=24 * _GIB)
+    assert mid.feasible is True
+    assert mid.model != largest.model
+    assert recommend_vllm(total_bytes=largest.min_vram_bytes).model == largest.model
+
+
+def test_catalog_models_lists_official_short_list_not_floor_marker(monkeypatch):
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.recommend import (
+        NvidiaProbe, VllmRecommendation, catalog_tiers,
+    )
+
+    official = catalog_tiers()
+    pick = next(t for t in official if t.min_vram_bytes <= 24 * _GIB)
+    rec = VllmRecommendation(
+        NvidiaProbe(24 * _GIB, 24 * _GIB, "data"), pick, True, "ok")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.list_cached_repos", lambda: [])
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.vllm_settings", lambda cfg=None: {})
+    rows = catalog_models({})
+    official_ids = {t.model for t in official}
+    listed = {r["id"] for r in rows if not r.get("added_by_you")}
+    assert listed == official_ids
+    assert sum(1 for r in rows if r.get("recommended")) == 1
 
 
 def test_recommend_libcuda_when_smi_missing(monkeypatch):

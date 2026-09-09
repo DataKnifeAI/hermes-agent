@@ -5,11 +5,12 @@ CUDA driver via ctypes) so a driver/library mismatch that kills ``nvidia-smi``
 still sees the card. Host-independent math takes VRAM as data; callers that
 need a live GPU mark the test ``linux_only``.
 
-Recommend is a curated HF catalog (llama.cpp Local Models' quality/speed/fit
-idea, retuned for vLLM): popular modern instruct checkpoints that vLLM
-actually serves — AWQ/FP8 or BF16 by VRAM tier, a real tool parser, 64k
-floor. 8–12 GB cards stay ``feasible: false`` at that floor — never a
-silent ctx shrink. No GGUF.
+Recommend is llama.cpp Local Models' idea, retuned for vLLM: a short
+official list (not six VRAM-bucket defaults), one hardware-fit
+recommended row, everything else via HF search. Official ids are modern
+instruct checkpoints vLLM actually serves — AWQ/FP8, a real tool parser,
+64k floor. 8–12 GB cards stay ``feasible: false`` at that floor — never
+a silent ctx shrink — and do not add a sixth official download. No GGUF.
 """
 
 from __future__ import annotations
@@ -23,9 +24,6 @@ MIN_CONTEXT = 65536  # Hermes tool-loop floor; never silently drop below this.
 _DEFAULT_MODEL = "Qwen/Qwen3-8B-AWQ"
 _DEFAULT_SERVED = "qwen3:8b"
 _DEFAULT_PARSER = "hermes"
-# 12 GB catalog row only — infeasible at 64k; not the shipped default.
-_12GB_MODEL = "solidrust/Hermes-3-Llama-3.1-8B-AWQ"
-_12GB_SERVED = "hermes3:8b"
 # Parsers vLLM's OpenAI-compat /v1/chat/completions actually implements.
 TOOL_PARSERS = frozenset({"hermes", "llama3_json", "qwen3_xml", "qwen3_coder", "mistral"})
 
@@ -33,7 +31,12 @@ TOOL_PARSERS = frozenset({"hermes", "llama3_json", "qwen3_xml", "qwen3_coder", "
 @dataclass(frozen=True)
 class VllmTier:
     """One VRAM class. ``feasible_at_64k`` is the catalog row's 64k contract, not a
-    silent ctx shrink: 8–12 GB cards stay infeasible rather than shipping 8k."""
+    silent ctx shrink: 8–12 GB cards stay infeasible rather than shipping 8k.
+
+    ``catalog`` rows are the official Local Models list (llama.cpp-short).
+    A non-catalog floor marker reuses the shipped default id so 8–12 GB
+    stay infeasible without advertising a unique download.
+    """
 
     id: str
     min_vram_bytes: int
@@ -45,38 +48,36 @@ class VllmTier:
     served_model_name: str
     tool_call_parser: str = _DEFAULT_PARSER
     max_model_len: int = MIN_CONTEXT
+    catalog: bool = True
 
 
-# Highest matching tier wins. min_vram is a floor: recommend never returns a
-# row whose min exceeds probed total. Feasible rows use distinct HF ids.
-# 8–12 GB stay in the catalog so the pane can name a modern instruct build,
-# but feasible_at_64k is false (KV at the tool-loop floor does not fit).
+# Official list first so classify / served-name match the 16 GB 8B floor,
+# not the 8 GB infeasible marker that reuses the same id. _pick_tier takes
+# the highest min_vram that still fits — walk order must not matter.
+# Qwen3.8-27B-FP8 is llama.cpp's top GGUF analog; FP8 + 64k KV is not a
+# Q4 file, so it is the 80 GB row only.
 TIERS: tuple[VllmTier, ...] = (
     VllmTier(
-        "8gb", 8 * _GIB, 0.70, False, "", "fp8",
-        "Qwen/Qwen3-4B-Instruct-2507", "qwen3:4b", _DEFAULT_PARSER,
-    ),
-    VllmTier(
-        "12gb", 12 * _GIB, 0.70, False, "awq", "fp8",
-        _12GB_MODEL, _12GB_SERVED, _DEFAULT_PARSER,
-    ),
-    VllmTier(
         "16gb", 16 * _GIB, 0.75, True, "awq", "fp8",
-        "Qwen/Qwen3-8B-AWQ", "qwen3:8b", _DEFAULT_PARSER,
+        "Qwen/Qwen3-8B-AWQ", "qwen3:8b",
     ),
     VllmTier(
         "24gb", 24 * _GIB, 0.75, True, "awq", "fp8",
-        "Qwen/Qwen3-14B-AWQ", "qwen3:14b", _DEFAULT_PARSER,
+        "Qwen/Qwen3-14B-AWQ", "qwen3:14b",
     ),
     VllmTier(
         "40gb", 40 * _GIB, 0.80, True, "awq", "fp8",
-        "Qwen/Qwen3-32B-AWQ", "qwen3:32b", _DEFAULT_PARSER,
+        "Qwen/Qwen3-32B-AWQ", "qwen3:32b",
     ),
     VllmTier(
         # Official FP8 checkpoint — vLLM reads quant from the repo; don't
         # also pass --quantization fp8 (that flag is for on-the-fly casts).
         "80gb", 80 * _GIB, 0.85, True, "", "fp8",
         "Qwen/Qwen3.8-27B-FP8", "qwen3.8:27b", "qwen3_coder",
+    ),
+    VllmTier(
+        "below-64k", 8 * _GIB, 0.70, False, "awq", "fp8",
+        _DEFAULT_MODEL, _DEFAULT_SERVED, catalog=False,
     ),
 )
 
@@ -144,12 +145,26 @@ def probe_nvidia_vram() -> NvidiaProbe:
     return NvidiaProbe(0, 0, "none", error="no_nvidia")
 
 
+def catalog_tiers() -> tuple[VllmTier, ...]:
+    """Official Local Models rows — the short list, not the 64k-floor marker."""
+    return tuple(t for t in TIERS if t.catalog)
+
+
+def tier_for_model(hf_id: str) -> VllmTier | None:
+    """Prefer a catalog row when the 64k-floor marker reuses the same id."""
+    hid = (hf_id or "").strip()
+    if not hid:
+        return None
+    return next((t for t in TIERS if t.catalog and t.model == hid), None) or next(
+        (t for t in TIERS if t.model == hid), None
+    )
+
+
 def _pick_tier(total_bytes: int) -> VllmTier | None:
-    chosen = None
-    for tier in TIERS:
-        if total_bytes >= tier.min_vram_bytes:
-            chosen = tier
-    return chosen
+    matching = [t for t in TIERS if total_bytes >= t.min_vram_bytes]
+    if not matching:
+        return None
+    return max(matching, key=lambda t: t.min_vram_bytes)
 
 
 def recommend_vllm(*, total_bytes: int | None = None,

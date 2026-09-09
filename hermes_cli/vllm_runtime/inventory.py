@@ -349,11 +349,11 @@ def classify_vllm_repo(
     size *and* weight bytes are missing, or quant cannot be read — never a
     green Fits badge on a guess.
     """
-    from hermes_cli.vllm_runtime.recommend import TIERS
+    from hermes_cli.vllm_runtime.recommend import tier_for_model
 
     hid = (repo or "").strip()
     tag_list = [str(t) for t in (tags or [])]
-    matched = next((t for t in TIERS if t.model == hid), None)
+    matched = tier_for_model(hid)
     quant = (
         (matched.quantization if matched and matched.quantization else None)
         or parse_quantization(hid, tag_list)
@@ -496,18 +496,18 @@ def delete_cached_repo(repo: str) -> None:
 
 
 def served_name_for(hf_id: str) -> str:
-    from hermes_cli.vllm_runtime.recommend import TIERS
+    from hermes_cli.vllm_runtime.recommend import tier_for_model
 
     hid = (hf_id or "").strip()
-    for tier in TIERS:
-        if tier.model == hid:
-            return tier.served_model_name
+    matched = tier_for_model(hid)
+    if matched is not None:
+        return matched.served_model_name
     return hid.rsplit("/", 1)[-1] if hid else hid
 
 
 def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
-    """Curated VRAM-tier rows + extra cached / configured HF ids."""
-    from hermes_cli.vllm_runtime.recommend import TIERS, recommend_vllm
+    """Official short list + extra cached / configured HF ids. Not six defaults."""
+    from hermes_cli.vllm_runtime.recommend import catalog_tiers, recommend_vllm
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
     rec = recommend_vllm()
@@ -517,7 +517,7 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
     served = str(settings.get("served_model_name") or "").strip()
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
-    recommended_id = rec.tier.model if rec.tier else ""
+    recommended_id = rec.tier.model if rec.feasible and rec.tier else ""
     vram = rec.probe.total_bytes or 0
 
     def _row(hf_id: str, *, display: str, recommended: bool, extra: dict | None = None) -> dict[str, Any]:
@@ -547,14 +547,14 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
             out.update(extra)
         return out
 
-    for tier in TIERS:
-        if tier.model in seen:
+    for tier in catalog_tiers():
+        if not tier.model or tier.model in seen:
             continue
         seen.add(tier.model)
         rows.append(_row(
             tier.model,
             display=tier.served_model_name or tier.model.rsplit("/", 1)[-1],
-            recommended=bool(rec.tier and rec.tier.model == tier.model),
+            recommended=bool(recommended_id and tier.model == recommended_id),
             extra={"added_by_you": False},
         ))
 
@@ -573,12 +573,12 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
 def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     """Persist ``local_runtime.vllm.model`` (+ served name). Does not start or stop a server."""
     from cli import save_config_value
-    from hermes_cli.vllm_runtime.recommend import TIERS, as_vllm_config, recommend_vllm
+    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm, tier_for_model
 
     hid = (hf_id or "").strip()
     if not hid or "/" not in hid:
         raise ValueError("model must be an org/name Hugging Face id")
-    matched = next((t for t in TIERS if t.model == hid), None)
+    matched = tier_for_model(hid)
     if matched is not None:
         rec = recommend_vllm()
         # Write the tier's model/parser knobs; keep the live recommend's GPU util
@@ -630,7 +630,7 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
     from hermes_cli.vllm_runtime.recommend import recommend_vllm
 
     rec = recommend_vllm()
-    recommended_id = rec.tier.model if rec.tier else ""
+    recommended_id = rec.tier.model if rec.feasible and rec.tier else ""
     vram = rec.probe.total_bytes or 0
     hits: list[dict[str, Any]] = []
     for m in raw:
