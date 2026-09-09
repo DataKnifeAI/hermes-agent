@@ -735,6 +735,40 @@ describe('vLLM engine', () => {
     expect((download as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('still offers Download on the official row when it is configured but not cached', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      runtime_installed: true,
+      venv_ready: true,
+      tag: '0.27.1',
+      models: []
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: true,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByRole('button', { name: /set up for me/i })).toBeTruthy()
+    const download = screen.getByRole('button', { name: /download · 5\.0 GB/i })
+    expect((download as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByRole('button', { name: /^use$/i })).toBeNull()
+  })
+
   it('Set up for me fires the engine-aware quickstart, not install-only', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue(VLLM_STATUS)
     mocked.quickstartLocalModels.mockResolvedValue({

@@ -356,12 +356,16 @@ def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch
     assert jobs == []
     assert started == ["stop"]
     from hermes_cli.config import load_config
-    from hermes_cli.vllm_runtime.supervisor import MODEL_REMOVED_MSG, read_last_error
+    from hermes_cli.vllm_runtime.supervisor import read_last_error
 
     cfg = load_config()
-    assert not (cfg["local_runtime"]["vllm"].get("model") or "").strip()
+    from hermes_cli.vllm_runtime.recommend import catalog_tiers
+
+    official = {t.model for t in catalog_tiers()}
+    assert cfg["local_runtime"]["vllm"]["model"] in official
+    assert cfg["local_runtime"]["vllm"]["model"] != hid
     assert cfg["local_runtime"]["enabled"] is False
-    assert read_last_error() == MODEL_REMOVED_MSG
+    assert not (read_last_error() or "")
 
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.inventory._hf_json",
@@ -753,6 +757,107 @@ def test_vllm_quickstart_refuses_when_gpu_infeasible(tmp_path, monkeypatch):
     r = client.post("/api/local-models/quickstart", json={})
     assert r.status_code == 409
     assert "64k" in r.json()["detail"]
+
+
+def test_vllm_quickstart_ignores_leftover_gated_search_hit(tmp_path, monkeypatch):
+    """Set up for me downloads the official recommend, never leftover Gemma."""
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    leftover = "google/gemma-3-27b-it"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": leftover, "served_model_name": "gemma",
+    }})
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    pulled: list[str] = []
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: pulled.append(repo) or _fake_hub_download(hub, repo, job))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: {"ok": True, "base_url": "http://127.0.0.1:9/v1"})
+
+    r = client.post("/api/local-models/quickstart", json={"model_id": leftover})
+    assert r.status_code == 200, r.text
+    assert r.json()["model_id"] == rec.model
+    assert leftover not in r.json()["model_id"]
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert pulled == [rec.model]
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+
+
+def test_delete_last_cached_resets_leftover_gemma_config(tmp_path, monkeypatch):
+    """Deleting the last hub dir must not leave gated Gemma as the configured id."""
+    client, home = _client(tmp_path, monkeypatch)
+    leftover = "google/gemma-3-27b-it"
+    cached_id = "acme/sideload-awq"
+    rec = _feasible_rec(monkeypatch)
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": leftover, "served_model_name": "gemma",
+    }})
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--acme--sideload-awq"
+    dest.mkdir(parents=True)
+    (dest / "weights.bin").write_bytes(b"x" * 64)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+
+    listed = client.get("/api/local-models/vllm/models")
+    assert listed.status_code == 200
+    ids = {m["id"] for m in listed.json()["models"]}
+    assert leftover not in ids
+    assert cached_id in ids
+
+    gone = client.delete(f"/api/local-models/vllm/models/{cached_id}")
+    assert gone.status_code == 200, gone.text
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    assert cfg["local_runtime"]["vllm"]["model"] == rec.model
+    assert leftover not in (cfg["local_runtime"]["vllm"].get("model") or "")
+    assert cfg["local_runtime"]["enabled"] is False
+    after = client.get("/api/local-models/vllm/models")
+    after_ids = {m["id"] for m in after.json()["models"]}
+    assert leftover not in after_ids
+    assert rec.model in after_ids
+
+
+def test_delete_uncached_configured_search_hit_is_not_404(tmp_path, monkeypatch):
+    """A 401 leftover in config with no hub dir must still clear."""
+    client, home = _client(tmp_path, monkeypatch)
+    leftover = "google/gemma-3-27b-it"
+    rec = _feasible_rec(monkeypatch)
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": leftover, "served_model_name": "gemma",
+    }})
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+
+    gone = client.delete(f"/api/local-models/vllm/models/{leftover}")
+    assert gone.status_code == 200, gone.text
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+    listed = client.get("/api/local-models/vllm/models")
+    ids = {m["id"] for m in listed.json()["models"]}
+    assert leftover not in ids
 
 
 def test_vllm_use_reloads_when_switching_cached_models(tmp_path, monkeypatch):

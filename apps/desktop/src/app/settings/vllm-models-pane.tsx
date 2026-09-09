@@ -315,29 +315,29 @@ export function VllmModelsPane({
               <ListRow
                 action={
                   <div className="flex items-center justify-end gap-2">
-                    {model.active ? (
+                    {!model.cached ? (
+                      dJob ? undefined : (
+                        <Button
+                          disabled={anyDownloadRunning}
+                          onClick={() => void handleDownload(model)}
+                          size="sm"
+                          variant="outline"
+                        >
+                          <Download />
+                          {downloadLabel(copy, model.size_label)}
+                        </Button>
+                      )
+                    ) : model.active ? (
                       <Tip label={copy.activeDetail}>
                         <Pill tone="primary">
                           <Check className="mr-1 size-3" />
                           {copy.activePill}
                         </Pill>
                       </Tip>
-                    ) : model.cached ? (
-                      tooBig ? undefined : (
-                        <Button className={busy ? '[&_svg]:animate-spin' : undefined} disabled={Boolean(setting)} onClick={() => void handleUse(model)} size="sm">
-                          {busy ? <Loader2 /> : <Check />}
-                          {copy.useAction}
-                        </Button>
-                      )
-                    ) : dJob ? undefined : (
-                      <Button
-                        disabled={anyDownloadRunning}
-                        onClick={() => void handleDownload(model)}
-                        size="sm"
-                        variant="outline"
-                      >
-                        <Download />
-                        {downloadLabel(copy, model.size_label)}
+                    ) : tooBig ? undefined : (
+                      <Button className={busy ? '[&_svg]:animate-spin' : undefined} disabled={Boolean(setting)} onClick={() => void handleUse(model)} size="sm">
+                        {busy ? <Loader2 /> : <Check />}
+                        {copy.useAction}
                       </Button>
                     )}
                     {model.cached && (

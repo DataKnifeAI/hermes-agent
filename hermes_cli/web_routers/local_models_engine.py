@@ -226,20 +226,23 @@ def start_active_engine() -> None:
 
 
 def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
-    """Preflight for the vLLM one-click: recommended (or explicit) HF id + legs."""
+    """Preflight for Set up for me: official ``recommend_vllm()`` id only.
+
+    ``model_id`` and leftover ``local_runtime.vllm.model`` (gated Gemma, a
+    search hit, a 401 hollow) are ignored — one-click is the VRAM-fit
+    catalog row, never resume-the-last-browse.
+    """
     from hermes_cli.vllm_runtime.recommend import recommend_vllm
     from hermes_cli.vllm_runtime.venv import venv_ready
 
-    hid = (model_id or "").strip() or None
     rec = recommend_vllm()
-    if hid:
-        if "/" not in hid:
-            raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
-    elif rec.feasible and (rec.model or "").strip():
-        hid = rec.model
-    elif rec.reason == "no_nvidia" and (rec.model or "").strip():
+    _ = model_id  # ignored — leftover Gemma / search hits must not win
+    hid = (rec.model or "").strip() or None
+    if rec.feasible and hid:
+        pass
+    elif rec.reason == "no_nvidia" and hid:
         # No probe: ship the 16 GB balanced id, not a 14B or stale Hermes-8B.
-        hid = rec.model
+        pass
     else:
         raise HTTPException(
             status_code=409,
@@ -248,13 +251,12 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
                 "open Local Models to pick a smaller build"
             ),
         )
-    display = rec.served_model_name if rec.model == hid else hid.rsplit("/", 1)[-1]
     return {
         "model": hid,
-        "display_name": display,
+        "display_name": rec.served_model_name or hid.rsplit("/", 1)[-1],
         "needs_runtime": not venv_ready(),
         "needs_download": not repo_is_cached(hid),
-        "apply_recommend": hid == rec.model and rec.feasible,
+        "apply_recommend": True,
     }
 
 
@@ -271,11 +273,12 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
 
     hid = str(plan["model"])
     rec = recommend_vllm()
-    if plan.get("apply_recommend") and rec.feasible:
-        for key, value in as_vllm_config(rec).items():
-            save_config_value(f"local_runtime.vllm.{key}", value)
-    else:
-        set_vllm_model(hid)
+    overlay = as_vllm_config(rec)
+    overlay["model"] = hid
+    if hid == rec.model:
+        overlay["served_model_name"] = rec.served_model_name
+    for key, value in overlay.items():
+        save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
     lm._step(job, "installing-runtime", "Installing vLLM")
     ensure_vllm_venv(str(settings.get("python") or ""))
@@ -299,12 +302,11 @@ def apply_recommend_and_install(job: dict | None = None) -> None:
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
     rec = recommend_vllm()
-    if rec.feasible:
-        for key, value in as_vllm_config(rec).items():
-            save_config_value(f"local_runtime.vllm.{key}", value)
+    for key, value in as_vllm_config(rec).items():
+        save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
     ensure_vllm_venv(str(settings.get("python") or ""))
-    model = str(settings.get("model") or rec.model or "").strip()
+    model = str(rec.model or "").strip()
     if model:
         if job is not None:
             job["phase"] = "downloading"
@@ -402,18 +404,32 @@ def download_vllm_weights(hf_id: str, job: dict | None = None) -> dict[str, Any]
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _write_official_vllm_model() -> str:
+    """Persist the VRAM-fit catalog row (or the shipped 16 GB id). Never a search hit."""
+    from cli import save_config_value
+    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
+
+    rec = recommend_vllm()
+    overlay = as_vllm_config(rec)
+    for key, value in overlay.items():
+        save_config_value(f"local_runtime.vllm.{key}", value)
+    return str(overlay["model"])
+
+
 def delete_vllm_model(hf_id: str) -> dict[str, Any]:
     """Remove HF cache for ``hf_id``. Never downloads, recommends, or starts serve.
 
-    If this was the configured model, stop the supervisor and drop the id so
-    an empty library shows first-time setup instead of re-pulling weights.
+    An empty library resets ``local_runtime.vllm.model`` to the official
+    recommend — leftover gated search hits (Gemma 401) must not survive a
+    clean. An uncached configured leftover deletes as 200, not 404.
     """
     from cli import save_config_value
     from hermes_cli.config import load_config
     from hermes_cli.local_engines import stop_vllm_engine
     from hermes_cli.vllm_runtime.inventory import cached_repo_ids, delete_cached_repo
     from hermes_cli.vllm_runtime.supervisor import (
-        MODEL_REMOVED_MSG, configured_model_id, vllm_settings, write_last_error)
+        MODEL_REMOVED_MSG, clear_last_error, configured_model_id, vllm_settings,
+        write_last_error)
 
     hid = (hf_id or "").strip()
     settings = vllm_settings(load_config())
@@ -422,16 +438,22 @@ def delete_vllm_model(hf_id: str) -> dict[str, Any]:
         delete_cached_repo(hid)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if was_configured:
+    except FileNotFoundError:
+        if not was_configured:
+            raise HTTPException(
+                status_code=404, detail=f"{hid} is not in the local Hugging Face cache")
+    if was_configured or not cached_repo_ids():
         stop_vllm_engine()
+    if not cached_repo_ids():
+        # Last hub dir (or leftover config with no dir): first-time setup,
+        # official default, not Gemma-from-search.
+        _write_official_vllm_model()
+        save_config_value("local_runtime.enabled", False)
+        clear_last_error()
+    elif was_configured:
         save_config_value("local_runtime.vllm.model", "")
         save_config_value("local_runtime.vllm.served_model_name", "")
         write_last_error(MODEL_REMOVED_MSG)
-        if not cached_repo_ids():
-            # Last library row: first-time setup UI, not an auto-boot of DEFAULT_CONFIG.
-            save_config_value("local_runtime.enabled", False)
     return {"ok": True}
 
 

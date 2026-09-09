@@ -238,6 +238,28 @@ def test_catalog_payload_created_at_and_size(monkeypatch):
     assert missing and all("created_at" not in r for r in missing)
 
 
+def test_catalog_omits_uncached_configured_search_hit(monkeypatch):
+    """Gated Gemma left in config.yaml is not a hollow library row."""
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.recommend import (
+        NvidiaProbe, VllmRecommendation, catalog_tiers,
+    )
+
+    pick = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(NvidiaProbe(24 * _GIB, 24 * _GIB, "data"), pick, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.list_cached_repos", lambda: [])
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.vllm_settings",
+        lambda cfg=None: {"model": "google/gemma-3-27b-it", "served_model_name": "gemma"},
+    )
+    rows = catalog_models({})
+    ids = {r["id"] for r in rows}
+    assert "google/gemma-3-27b-it" not in ids
+    assert "Qwen/Qwen3-8B-AWQ" in ids
+    assert all(r["id"].count("/") == 1 for r in rows)
+
+
 def test_fit_same_formula_search_and_cached():
     """Search listing bytes and the same bytes on disk must agree."""
     hid = "org/dolphin-8b-awq"

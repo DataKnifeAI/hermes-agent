@@ -939,7 +939,10 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
         ))
 
     extras = list(cached)
-    if configured and configured not in extras:
+    # Uncached search hits left in config (gated Gemma, 401 leftovers) are
+    # not library rows — official ids already walked above.
+    official_ids = set(official)
+    if configured and configured not in extras and configured in official_ids:
         extras.append(configured)
     for hf_id in extras:
         if hf_id in seen:
