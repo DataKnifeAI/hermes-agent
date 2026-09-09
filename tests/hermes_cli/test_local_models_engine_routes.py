@@ -918,10 +918,9 @@ def test_vllm_install_ignores_leftover_gated_id(tmp_path, monkeypatch):
     assert _load()["local_runtime"]["vllm"]["model"] == rec.model
 
 
-def test_vllm_download_leftover_gated_config_uses_official(tmp_path, monkeypatch):
-    """Download of leftover config id still pulls the official recommend."""
+def test_vllm_download_keeps_explicit_search_hit(tmp_path, monkeypatch):
+    """Download of an explicit leftover/search-hit id is Use-path, not failsafe."""
     client, home = _client(tmp_path, monkeypatch)
-    rec = _feasible_rec(monkeypatch)
     leftover = "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
     _write_engine(home, "vllm", extra={"vllm": {
         "model": leftover, "served_model_name": "nemotron",
@@ -936,11 +935,10 @@ def test_vllm_download_leftover_gated_config_uses_official(tmp_path, monkeypatch
 
     r = client.post("/api/local-models/vllm/download", json={"model": leftover})
     assert r.status_code == 200, r.text
-    assert r.json()["model"] == rec.model
-    assert leftover not in r.json()["model"]
+    assert r.json()["model"] == leftover
     job = _wait_job(client, r.json()["job_id"])
     assert job["status"] == "done", job
-    assert pulled == [rec.model]
+    assert pulled == [leftover]
 
 
 def test_vllm_quickstart_falls_back_when_official_id_401s(tmp_path, monkeypatch):

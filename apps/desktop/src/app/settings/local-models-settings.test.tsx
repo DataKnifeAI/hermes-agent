@@ -1263,7 +1263,64 @@ describe('vLLM engine', () => {
     confirm.mockRestore()
   })
 
-  it('returns to recommended setup from a filled vLLM library without deleting cache', async () => {
+  it('Use switches back to a cached recommended model without running setup', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [
+        { id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' },
+        { id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }
+      ],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        },
+        {
+          active: true,
+          added_by_you: true,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'sideload',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'acme/sideload-awq',
+          recommended: false,
+          served_model_name: 'sideload',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByRole('button', { name: /^use$/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /set up for me/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /restore recommended setup/i })).toBeTruthy()
+    expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /^use$/i }))
+    await waitFor(() => {
+      expect(mocked.useVllm).toHaveBeenCalledWith('Qwen/Qwen3-8B-AWQ')
+    })
+    expect(mocked.quickstartLocalModels).not.toHaveBeenCalled()
+  })
+
+  it('Restore recommended setup is a quiet failsafe, not the switch-back path', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
       models: [{ id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
@@ -1303,18 +1360,6 @@ describe('vLLM engine', () => {
         }
       ]
     })
-    renderPane()
-
-    expect(await screen.findByRole('button', { name: /recommended setup/i })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /set up for me/i })).toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { name: /recommended setup/i }))
-
-    expect(await screen.findByRole('button', { name: /set up for me/i })).toBeTruthy()
-    expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
-    expect(mocked.deleteVllmModel).not.toHaveBeenCalled()
-    expect(mocked.quickstartLocalModels).not.toHaveBeenCalled()
-
     mocked.quickstartLocalModels.mockResolvedValue({
       display_name: 'qwen3:8b',
       download_bytes: 0,
@@ -1323,11 +1368,16 @@ describe('vLLM engine', () => {
       needs_download: true,
       needs_runtime: false
     })
-    fireEvent.click(screen.getByRole('button', { name: /set up for me/i }))
+    renderPane()
+
+    expect(await screen.findByRole('button', { name: /download · 5\.0 GB/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /set up for me/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^use$/i })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /restore recommended setup/i }))
     await waitFor(() => {
       expect(mocked.quickstartLocalModels).toHaveBeenCalledWith()
     })
     expect(mocked.useVllm).not.toHaveBeenCalled()
-    expect(mocked.getLocalCatalog).not.toHaveBeenCalled()
+    expect(mocked.deleteVllmModel).not.toHaveBeenCalled()
   })
 })

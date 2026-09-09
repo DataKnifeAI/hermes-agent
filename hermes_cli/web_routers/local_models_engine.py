@@ -435,19 +435,13 @@ def repo_is_cached(hf_id: str) -> bool:
 
 
 def setup_download_model(requested: str | None) -> str:
-    """Download leftover gated/401 config as official recommend, not that id.
+    """Keep an explicit Download id. Empty body is failsafe → official.
 
-    An explicit catalog or search-hit id the user picked is kept. Empty body
-    or the leftover configured non-catalog id is rewritten.
+    Leftover ``local_runtime.vllm.model`` must not win on Set up for me /
+    install. A user clicking Download on a search hit keeps that id.
     """
-    from hermes_cli.config import load_config
-    from hermes_cli.vllm_runtime.recommend import official_catalog_ids
-    from hermes_cli.vllm_runtime.supervisor import configured_model_id, vllm_settings
-
     hid = (requested or "").strip()
-    leftover = configured_model_id(vllm_settings(load_config()))
-    official = official_catalog_ids()
-    if hid and not (hid == leftover and hid not in official):
+    if hid:
         return hid
     chosen, _notice, _rec, _overlay = _official_setup()
     return chosen

@@ -1102,9 +1102,9 @@ export const ja = defineLocale({
       downloadBare: 'ダウンロード',
       downloadProgress: (done, total) => `ダウンロード中 ${done} / ${total}`,
       downloadDoneToast: model => `${model} の準備ができました。`,
-      recommendedSetup: 'おすすめのセットアップ',
+      recommendedSetup: 'おすすめのセットアップを復元',
       recommendedSetupHint:
-        'この GPU に合うワンクリック設定に戻ります。ダウンロード済みのファイルはディスクに残ります。',
+        'セットアップが空または壊れているときの復旧です。モデルの切り替えは「使用する」です。ダウンロード済みのファイルはディスクに残ります。',
       installDoneToast: 'ローカルランタイムのインストールが完了しました。',
       useAction: '使用する',
       activePill: 'デフォルト',
