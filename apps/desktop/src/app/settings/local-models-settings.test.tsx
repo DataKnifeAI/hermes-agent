@@ -786,6 +786,7 @@ describe('vLLM engine', () => {
           added_by_you: false,
           cached: false,
           capabilities: ['awq', 'instruct'],
+          created_at: '2025-03-15T00:00:00.000Z',
           display_name: 'hermes3:8b',
           fit: 'fits-gpu',
           fits: true,
@@ -828,6 +829,8 @@ describe('vLLM engine', () => {
     renderPane()
 
     expect(await screen.findByText('Fits your GPU')).toBeTruthy()
+    expect(screen.getByText('Released Mar 2025')).toBeTruthy()
+    expect(screen.getByText('5.0 GB')).toBeTruthy()
     expect(screen.getByText('Too big for this machine')).toBeTruthy()
     expect(screen.getByText('Fit unknown')).toBeTruthy()
     expect(screen.getByText('Recommended')).toBeTruthy()
@@ -852,6 +855,55 @@ describe('vLLM engine', () => {
     expect(mocked.setVllmModel).not.toHaveBeenCalled()
   })
 
+  it('shows vLLM download bytes and percent on the bar', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq'],
+          display_name: 'hermes3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+          recommended: true,
+          served_model_name: 'hermes3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    const downloadJob = {
+      detail: 'Downloading solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      done_bytes: 1.2 * 2 ** 30,
+      error: null,
+      job_id: 'vd1',
+      kind: 'model-download' as const,
+      model_id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      percent: 29,
+      phase: 'downloading',
+      status: 'running' as const,
+      target: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      total_bytes: 4.1 * 2 ** 30
+    }
+    mocked.getLocalModelsJobs.mockResolvedValue({ jobs: [downloadJob] })
+    $localRuntimeJobs.set([downloadJob])
+    renderPane()
+
+    expect(await screen.findByText('Fits your GPU')).toBeTruthy()
+    expect(screen.getByText(/1\.2 \/ 4\.1 GB/)).toBeTruthy()
+    expect(screen.getByText(/29%/)).toBeTruthy()
+    expect(screen.queryByText(/Downloading solidrust/)).toBeNull()
+  })
+
   it('tags vLLM Hugging Face hits with honest fit and capabilities', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
@@ -871,6 +923,8 @@ describe('vLLM engine', () => {
           likes: 2,
           recommended: true,
           repo: 'Qwen/Qwen3-8B-AWQ',
+          created_at: '2025-03-15T00:00:00.000Z',
+          size_label: '4.4 GB',
           updated: '2026-01-01'
         },
         {
@@ -903,6 +957,8 @@ describe('vLLM engine', () => {
     })
 
     expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
+    expect(screen.getAllByText('Released Mar 2025')).toHaveLength(1)
+    expect(screen.getByText('4.4 GB')).toBeTruthy()
     expect(screen.getByText('Fits your GPU')).toBeTruthy()
     expect(screen.getByText('Fit unknown')).toBeTruthy()
     expect(screen.getByText('Too big for this machine')).toBeTruthy()

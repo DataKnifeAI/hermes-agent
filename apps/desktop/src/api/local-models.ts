@@ -186,6 +186,7 @@ export interface VllmInventoryModel {
   added_by_you?: boolean
   cached: boolean
   capabilities?: string[]
+  created_at?: string
   display_name: string
   fit?: 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
   fit_detail?: string
@@ -264,10 +265,13 @@ export interface HFSearchHit {
   gated: boolean
   cached?: boolean
   capabilities?: string[]
+  created_at?: string
   fit?: 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
   fit_detail?: string
   quantization?: string
   recommended?: boolean
+  size_bytes?: number
+  size_label?: string
 }
 
 export interface HFFileGroup {

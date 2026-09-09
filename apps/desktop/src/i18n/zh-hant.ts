@@ -1107,6 +1107,8 @@ export const zhHant = defineLocale({
       browseRefresh: '重新整理',
       browseDownloads: '次下載',
       browseLikes: '個讚',
+      released: date => `${date} 發布`,
+      downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: '需要登入 Hugging Face',
       browseNoGguf: '未找到相容的模型檔案。',
       browseFitUnknown: '適配情況未知',

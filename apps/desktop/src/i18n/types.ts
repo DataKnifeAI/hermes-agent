@@ -1090,6 +1090,8 @@ export interface Translations {
       browseRefresh: string
       browseDownloads: string
       browseLikes: string
+      released: (date: string) => string
+      downloadBytesPct: (done: string, total: string, pct: number) => string
       browseGated: string
       browseNoGguf: string
       browseFitUnknown: string

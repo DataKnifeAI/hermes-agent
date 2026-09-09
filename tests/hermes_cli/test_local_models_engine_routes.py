@@ -225,6 +225,9 @@ def test_vllm_list_set_delete_and_search_contracts(tmp_path, monkeypatch):
     (extra / "weights.bin").write_bytes(b"y" * 32)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
 
     listed = client.get("/api/local-models/vllm/models")
     assert listed.status_code == 200
@@ -528,6 +531,7 @@ def test_vllm_search_fit_tags_never_lie(tmp_path, monkeypatch):
     assert search.status_code == 200
     assert seen_urls and "expand=safetensors" in seen_urls[0]
     assert "expand=cardData" in seen_urls[0]
+    assert "expand=createdAt" in seen_urls[0]
     by_repo = {h["repo"]: h for h in search.json()["hits"]}
     assert by_repo["Qwen/Qwen3-8B-AWQ"]["fit"] == "fits-gpu"
     assert "awq" in by_repo["Qwen/Qwen3-8B-AWQ"]["capabilities"]

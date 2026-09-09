@@ -1440,6 +1440,8 @@ export const zh: Translations = {
       browseRefresh: '刷新',
       browseDownloads: '次下载',
       browseLikes: '个赞',
+      released: date => `${date} 发布`,
+      downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: '需要登录 Hugging Face',
       browseNoGguf: '未找到兼容的模型文件。',
       browseFitUnknown: '适配情况未知',

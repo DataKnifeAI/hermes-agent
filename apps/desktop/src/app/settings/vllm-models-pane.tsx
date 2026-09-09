@@ -20,6 +20,42 @@ import { ListRow, Pill, SettingsSection } from './primitives'
 
 type FitKind = 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
 
+const RELEASED_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const
+
+function formatReleasedMonth(raw?: null | string): string | null {
+  if (!raw) {
+    return null
+  }
+
+  const match = raw.trim().match(/^(\d{4})-(\d{2})/)
+
+  if (!match) {
+    return null
+  }
+
+  const month = RELEASED_MONTHS[Number(match[2]) - 1]
+
+  return month ? `${month} ${match[1]}` : null
+}
+
+function downloadBarLabel(
+  job: { detail?: string; done_bytes?: number; percent?: number; total_bytes?: number },
+  copy: { downloadBytesPct: (done: string, total: string, pct: number) => string; downloadProgress: (done: string, total: string) => string }
+): string {
+  const doneGb = job.done_bytes ? (job.done_bytes / (1 << 30)).toFixed(1) : '—'
+  const totalGb = job.total_bytes ? (job.total_bytes / (1 << 30)).toFixed(1) : '—'
+
+  if (job.total_bytes || job.done_bytes) {
+    if (typeof job.percent === 'number') {
+      return copy.downloadBytesPct?.(doneGb, `${totalGb} GB`, job.percent) ?? `${doneGb} / ${totalGb} GB · ${job.percent}%`
+    }
+
+    return copy.downloadProgress(`${doneGb} GB`, `${totalGb} GB`)
+  }
+
+  return job.detail || copy.downloadProgress(`${doneGb} GB`, `${totalGb} GB`)
+}
+
 function fitOf(model: { fit?: FitKind; fits?: boolean | null }): FitKind {
   if (model.fit) {
     return model.fit
@@ -91,6 +127,25 @@ function capabilityLabel(
   }
 
   return cap.toUpperCase()
+}
+
+function ModelMetaLines({
+  createdAt,
+  released,
+  sizeLabel
+}: {
+  createdAt?: string
+  released: (date: string) => string
+  sizeLabel?: string
+}) {
+  const releasedText = formatReleasedMonth(createdAt)
+
+  return (
+    <>
+      {releasedText && <span className="mt-1 block text-muted-foreground">{released(releasedText)}</span>}
+      {sizeLabel && sizeLabel !== '—' && <span className="mt-1 block text-muted-foreground">{sizeLabel}</span>}
+    </>
+  )
 }
 
 function VllmModelTags({
@@ -299,12 +354,7 @@ export function VllmModelsPane({
                           style={{ width: `${Math.max(2, Math.min(100, dJob.percent ?? 2))}%` }}
                         />
                       </div>
-                      <p className="text-[0.68rem] text-muted-foreground">
-                        {dJob.detail || copy.downloadProgress(
-                          dJob.done_bytes ? `${(dJob.done_bytes / (1 << 30)).toFixed(1)} GB` : '—',
-                          dJob.total_bytes ? `${(dJob.total_bytes / (1 << 30)).toFixed(1)} GB` : '—'
-                        )}
-                      </p>
+                      <p className="text-[0.68rem] text-muted-foreground">{downloadBarLabel(dJob, copy)}</p>
                     </div>
                   ) : undefined
                 }
@@ -312,9 +362,7 @@ export function VllmModelsPane({
                   <>
                     <span className="font-mono text-[0.72rem]">{model.id}</span>
                     {model.added_by_you && <span className="mt-1 block">{copy.addedByYou}</span>}
-                    {model.size_label && model.size_label !== '—' && (
-                      <span className="mt-1 block text-muted-foreground">{model.size_label}</span>
-                    )}
+                    <ModelMetaLines createdAt={model.created_at} released={copy.released} sizeLabel={model.size_label} />
                     <VllmModelTags
                       cached={model.cached}
                       capabilities={model.capabilities}
@@ -506,6 +554,7 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
                         style={{ width: `${Math.max(2, Math.min(100, dJob.percent ?? 2))}%` }}
                       />
                     </div>
+                    <p className="text-[0.68rem] text-muted-foreground">{downloadBarLabel(dJob, copy)}</p>
                   </div>
                 ) : undefined
               }
@@ -517,6 +566,7 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
                     {Intl.NumberFormat().format(hit.likes)} {copy.browseLikes}
                     {hit.gated ? ` · ${copy.browseGated}` : ''}
                   </span>
+                  <ModelMetaLines createdAt={hit.created_at} released={copy.released} sizeLabel={hit.size_label} />
                   <VllmModelTags
                     cached={hit.cached}
                     capabilities={hit.capabilities}

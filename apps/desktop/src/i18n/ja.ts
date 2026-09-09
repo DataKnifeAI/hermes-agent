@@ -1153,6 +1153,8 @@ export const ja = defineLocale({
       browseRefresh: '更新',
       browseDownloads: 'ダウンロード',
       browseLikes: 'いいね',
+      released: date => `${date} 公開`,
+      downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: 'Hugging Face へのサインインが必要',
       browseNoGguf: '互換性のあるモデルファイルが見つかりません。',
       browseFitUnknown: '適合状況は不明',

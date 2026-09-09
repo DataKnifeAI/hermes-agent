@@ -1261,6 +1261,8 @@ export const en: Translations = {
       browseRefresh: 'Refresh',
       browseDownloads: 'downloads',
       browseLikes: 'likes',
+      released: date => `Released ${date}`,
+      downloadBytesPct: (done, total, pct) => `${done} / ${total} · ${pct}%`,
       browseGated: 'requires Hugging Face sign-in',
       browseNoGguf: 'No compatible model files found.',
       browseFitUnknown: 'Fit unknown',

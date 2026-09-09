@@ -341,7 +341,7 @@ def activate_vllm() -> dict[str, Any]:
 def vllm_models_payload(config: dict | None = None) -> dict[str, Any]:
     from hermes_cli.vllm_runtime.inventory import catalog_models
 
-    return {"models": catalog_models(config)}
+    return {"models": catalog_models(config, with_hf_meta=True)}
 
 
 def set_vllm_model(hf_id: str) -> dict[str, Any]:

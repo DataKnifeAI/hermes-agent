@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -57,12 +58,23 @@ _SAFETENSORS_DTYPE = {
     "I8": "int8",
     "U8": "int8",
 }
+_DTYPE_WIDTH = {
+    "BF16": 2, "F16": 2, "F32": 4, "F64": 8,
+    "F8": 1, "F8_E4M3": 1, "F8_E5M2": 1,
+    "I8": 1, "U8": 1, "I32": 4, "I64": 8, "BOOL": 1,
+}
 # List/search ``expand`` — usedStorage is model_info-only and 400s the list API.
+# createdAt is first publish (“released”); lastModified is last push — do not
+# substitute one for the other.
 _HF_SEARCH_EXPAND = (
     "safetensors", "cardData", "config", "tags",
-    "downloads", "likes", "lastModified", "gated",
+    "downloads", "likes", "lastModified", "createdAt", "gated",
     "pipeline_tag", "library_name",
 )
+_HF_JSON_CACHE: dict[str, tuple[float, object]] = {}
+_HF_JSON_CACHE_TTL_S = 300
+_HF_JSON_CACHE_MAX = 128
+_HF_CARD_TIMEOUT_S = 4
 _MIN_WEIGHT_BYTES = 100 << 20  # ignore tokenizer-only / empty cache dirs
 _MAX_CAPS = 5
 _TOOL_TAGS = frozenset({
@@ -331,6 +343,90 @@ def _capability_tags(
     return caps[:_MAX_CAPS]
 
 
+def unservable_reason(hid: str, tags: list[str] | None = None) -> str | None:
+    """vLLM cannot load GGUF or EXL2 — say so instead of a lying Fits badge."""
+    blob = f"{hid} {' '.join(tags or [])}".lower()
+    if "gguf" in blob:
+        return "vLLM cannot serve GGUF — use llama.cpp or a safetensors build"
+    if "exl2" in blob or "exllamav2" in blob:
+        return "vLLM cannot serve EXL2 packs — use AWQ, GPTQ, or FP8/BF16 safetensors"
+    return None
+
+
+def weight_bytes_from_safetensors(safetensors: dict | None, quant: str | None = None) -> int:
+    """Published weight file bytes from the safetensors index — not param count as GB."""
+    if not isinstance(safetensors, dict):
+        return 0
+    params = safetensors.get("parameters")
+    total = safetensors.get("total")
+    count = float(total) if isinstance(total, (int, float)) and total >= 10_000_000 else 0.0
+    if isinstance(params, dict) and params:
+        if not count:
+            count = float(sum(v for v in params.values() if isinstance(v, (int, float))))
+        mapped = {_SAFETENSORS_DTYPE.get(str(k).upper()) for k in params}
+        mapped.discard(None)
+        if len(mapped) == 1:
+            bpp = _QUANT_BYTES.get(next(iter(mapped)))
+            if bpp and count >= 10_000_000:
+                return int(count * bpp)
+        keys = {str(k).upper() for k in params}
+        if "I32" in keys and keys & {"BF16", "F16"} and count >= 10_000_000:
+            return int(count * _QUANT_BYTES["awq"])
+        summed = sum(
+            int(v) * _DTYPE_WIDTH.get(str(k).upper(), 0)
+            for k, v in params.items() if isinstance(v, (int, float))
+        )
+        if summed >= _MIN_WEIGHT_BYTES:
+            return summed
+    if count >= 10_000_000 and quant in _QUANT_BYTES:
+        return int(count * _QUANT_BYTES[quant])
+    return 0
+
+
+def resolve_weight_bytes(
+    *,
+    hid: str,
+    tags: list[str] | None = None,
+    card_data: dict | None = None,
+    config: dict | None = None,
+    safetensors: dict | None = None,
+    disk_bytes: int = 0,
+    used_storage: int = 0,
+    quant: str | None = None,
+) -> tuple[int, int]:
+    """``(actual, listing)`` weight file bytes. VRAM is ``actual`` plus 64k KV.
+
+    Listing prefers usedStorage, then safetensors file bytes, then params ×
+    quant only when the quant is on the repo id / config / index — a loose
+    tag plus an ``8B`` token is not enough to badge Fits.
+    """
+    tag_list = [str(t) for t in (tags or [])]
+    st_bytes = weight_bytes_from_safetensors(safetensors, quant)
+    used = int(used_storage or 0)
+    listing = 0
+    if used >= _MIN_WEIGHT_BYTES:
+        listing = used
+    elif st_bytes >= _MIN_WEIGHT_BYTES:
+        listing = st_bytes
+    else:
+        strong_quant = (
+            parse_quantization(hid, None)
+            or _quant_from_config(config)
+            or _quant_from_safetensors(safetensors)
+        )
+        params = (
+            param_billions_from_safetensors(safetensors)
+            or parse_param_billions(hid)
+            or parse_param_billions(" ".join(tag_list))
+            or parse_param_billions(_base_model_blob(card_data))
+        )
+        if params is not None and strong_quant in _QUANT_BYTES:
+            listing = int(params * 1_000_000_000 * _QUANT_BYTES[strong_quant])
+    disk = int(disk_bytes or 0)
+    actual = disk if disk >= _MIN_WEIGHT_BYTES else listing
+    return actual, listing
+
+
 def classify_vllm_repo(
     repo: str,
     *,
@@ -341,13 +437,14 @@ def classify_vllm_repo(
     card_data: dict | None = None,
     config: dict | None = None,
     weight_bytes: int = 0,
+    used_storage: int = 0,
     pipeline_tag: str = "",
 ) -> dict[str, Any]:
     """Fit / capability tags for a catalog row or HF search hit.
 
-    ``fit`` is ``fits-gpu``, ``too-big``, or ``unknown``. Unknown when param
-    size *and* weight bytes are missing, or quant cannot be read — never a
-    green Fits badge on a guess.
+    ``fit`` is ``fits-gpu``, ``too-big``, or ``unknown``. Search and cache
+    both use weight-file bytes + 64k KV (``_vram_from_weight_bytes``) —
+    never raw GB on disk as VRAM, never an ``8B`` token over a larger pack.
     """
     from hermes_cli.vllm_runtime.recommend import tier_for_model
 
@@ -360,26 +457,38 @@ def classify_vllm_repo(
         or _quant_from_config(config)
         or _quant_from_safetensors(safetensors)
     )
-    params_b = (
-        param_billions_from_safetensors(safetensors)
-        or parse_param_billions(hid)
-        or parse_param_billions(" ".join(tag_list))
-        or parse_param_billions(_base_model_blob(card_data))
+    disk = int(weight_bytes or 0)
+    actual, listing = resolve_weight_bytes(
+        hid=hid, tags=tag_list, card_data=card_data, config=config,
+        safetensors=safetensors, disk_bytes=disk, used_storage=int(used_storage or 0),
+        quant=quant,
     )
+    blocked = unservable_reason(hid, tag_list)
     min_vram = 0
     fit = "unknown"
-    if matched is not None:
+    detail = ""
+    if blocked and matched is None:
+        detail = blocked
+    elif matched is not None:
         min_vram = matched.min_vram_bytes
         if total_vram > 0:
             fit = "fits-gpu" if total_vram >= min_vram else "too-big"
-    elif params_b is not None and quant is not None:
-        min_vram = estimate_min_vram_bytes(params_b, quant)
+        detail = f"Needs ~{_human_gb(min_vram)} GPU memory" if min_vram else ""
+    elif actual >= _MIN_WEIGHT_BYTES:
+        min_vram = _vram_from_weight_bytes(actual)
         if total_vram > 0:
             fit = "fits-gpu" if total_vram >= min_vram else "too-big"
-    elif int(weight_bytes or 0) >= _MIN_WEIGHT_BYTES:
-        min_vram = _vram_from_weight_bytes(int(weight_bytes))
-        if total_vram > 0:
-            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
+        detail = f"Needs ~{_human_gb(min_vram)} GPU memory" if min_vram else ""
+        if (
+            fit == "too-big"
+            and disk >= _MIN_WEIGHT_BYTES
+            and listing >= _MIN_WEIGHT_BYTES
+            and disk > int(listing * 1.15)
+        ):
+            detail += (
+                f" — downloaded weights are {_human_gb(disk)}, "
+                f"larger than the {_human_gb(listing)} Hugging Face listing"
+            )
     capabilities = _capability_tags(
         hid=hid, tag_list=tag_list, quant=quant, matched=matched,
         config=config, pipeline_tag=pipeline_tag or "",
@@ -391,10 +500,8 @@ def classify_vllm_repo(
         "quantization": quant or "",
         "capabilities": capabilities,
         "recommended": bool(recommended_id and hid == recommended_id),
-        "fit_detail": (
-            f"Needs ~{_human_gb(min_vram)} GPU memory"
-            if min_vram else ""
-        ),
+        "fit_detail": detail,
+        "size_bytes": actual,
     }
 
 
@@ -409,19 +516,107 @@ def ensure_hf_weights(repo: str, job: dict | None = None) -> dict[str, Any]:
     return {"id": hid, "already_downloaded": False}
 
 
+def _job_tqdm_class(job: dict):
+    """tqdm stand-in so ``snapshot_download`` writes done_bytes, not just a phase."""
+
+    class _JobTqdm:
+        def __init__(self, *args, **kwargs):
+            iterable = args[0] if args else kwargs.get("iterable")
+            self._iter = iter(iterable) if iterable is not None else None
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            item = next(self._iter)
+            self.update(1)
+            return item
+
+        def update(self, n=1):
+            try:
+                step = int(n or 0)
+            except (TypeError, ValueError):
+                step = 0
+            if step <= 0:
+                return
+            job["done_bytes"] = int(job.get("done_bytes") or 0) + step
+            total = job.get("total_bytes") or 0
+            if total:
+                job["done_bytes"] = min(int(job["done_bytes"]), int(total))
+
+        def close(self):
+            return None
+
+        def clear(self):
+            return None
+
+        def refresh(self):
+            return None
+
+        def set_description(self, *args, **kwargs):
+            return None
+
+        def set_postfix(self, *args, **kwargs):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    return _JobTqdm
+
+
+def _prime_job_bytes(repo: str, job: dict) -> None:
+    """Denominator from HF siblings so the bar is not a phase-only string."""
+    try:
+        info = _hf_json(
+            f"{_HF}/api/models/{urllib.parse.quote(repo, safe='')}?blobs=true",
+            timeout=_HF_CARD_TIMEOUT_S,
+        )
+    except Exception:
+        return
+    if not isinstance(info, dict):
+        return
+    siblings = [s for s in (info.get("siblings") or []) if isinstance(s, dict) and s.get("rfilename")]
+    files = [
+        s for s in siblings
+        if Path(str(s["rfilename"])).suffix.lower() not in _SKIP_DOWNLOAD_SUFFIX
+    ]
+    total = sum(int(s.get("size") or 0) for s in files)
+    if total:
+        job["total_bytes"] = total
+        job["done_bytes"] = int(job.get("done_bytes") or 0)
+
+
+def _hub_snapshot_download(hid: str, job: dict | None) -> None:
+    from huggingface_hub import snapshot_download
+
+    kwargs: dict[str, Any] = {"repo_id": hid, "cache_dir": str(hf_hub_dir())}
+    if job is not None:
+        kwargs["tqdm_class"] = _job_tqdm_class(job)
+    try:
+        snapshot_download(**kwargs)
+    except TypeError:
+        kwargs.pop("tqdm_class", None)
+        snapshot_download(**kwargs)
+
+
 def download_hf_repo(repo: str, job: dict | None = None) -> None:
     """Write ``repo`` into the hub cache. Suite always monkeypatches this."""
     hid = (repo or "").strip()
     if job is not None:
         job["phase"] = "downloading"
         job["detail"] = f"Downloading {hid}"
+        _prime_job_bytes(hid, job)
     try:
-        from huggingface_hub import snapshot_download
-    except ImportError:
-        snapshot_download = None
-    if snapshot_download is not None:
-        snapshot_download(repo_id=hid, cache_dir=str(hf_hub_dir()))
+        _hub_snapshot_download(hid, job)
+        if job is not None and job.get("total_bytes"):
+            job["done_bytes"] = job["total_bytes"]
         return
+    except ImportError:
+        pass
     _download_hf_via_api(hid, job)
 
 
@@ -505,8 +700,12 @@ def served_name_for(hf_id: str) -> str:
     return hid.rsplit("/", 1)[-1] if hid else hid
 
 
-def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
-    """Official short list + extra cached / configured HF ids. Not six defaults."""
+def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) -> list[dict[str, Any]]:
+    """Official short list + extra cached / configured HF ids. Not six defaults.
+
+    ``with_hf_meta`` pulls HF ``createdAt`` (first publish) for official rows —
+    status polls skip this; the models list does not.
+    """
     from hermes_cli.vllm_runtime.recommend import catalog_tiers, recommend_vllm
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
@@ -519,14 +718,19 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     recommended_id = rec.tier.model if rec.feasible and rec.tier else ""
     vram = rec.probe.total_bytes or 0
+    official = [t.model for t in catalog_tiers() if t.model]
+    listing = hf_listing_meta(official) if with_hf_meta else {}
 
     def _row(hf_id: str, *, display: str, recommended: bool, extra: dict | None = None) -> dict[str, Any]:
         hit = cached.get(hf_id) or {}
-        size = int(hit.get("size_bytes") or 0)
+        disk = int(hit.get("size_bytes") or 0)
+        meta = listing.get(hf_id) or {}
+        used = int(meta.get("size_bytes") or 0)
         tags = classify_vllm_repo(
             hf_id, total_vram=vram, recommended_id=recommended_id,
-            weight_bytes=size,
+            weight_bytes=disk, used_storage=used,
         )
+        size = disk or used or int(tags.get("size_bytes") or 0)
         out = {
             "id": hf_id,
             "display_name": display,
@@ -534,7 +738,7 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
             "recommended": recommended,
             "cached": hf_id in cached,
             "size_bytes": size,
-            "size_label": hit.get("size_label") or ("—" if not size else _human_gb(size)),
+            "size_label": ("—" if not size else _human_gb(size)),
             "active": bool(configured and hf_id == configured),
             "fits": tags["fits"],
             "fit": tags["fit"],
@@ -543,6 +747,9 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
             "quantization": tags["quantization"],
             "capabilities": tags["capabilities"],
         }
+        created = meta.get("created_at")
+        if created:
+            out["created_at"] = created
         if extra:
             out.update(extra)
         return out
@@ -605,10 +812,73 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     return {"ok": True, "model": hid, "served_model_name": served_name_for(hid)}
 
 
-def _hf_json(url: str) -> object:
+def created_at_from_hf(payload: dict | None) -> str | None:
+    """HF ``createdAt`` (first publish / released). Never ``lastModified``."""
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("createdAt")
+    if raw in (None, ""):
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _used_storage_bytes(payload: dict | None) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    used = int(payload.get("usedStorage") or 0)
+    if used >= _MIN_WEIGHT_BYTES:
+        return used
+    siblings = payload.get("siblings")
+    if not isinstance(siblings, list):
+        return 0
+    total = 0
+    for sib in siblings:
+        if not isinstance(sib, dict) or not sib.get("rfilename"):
+            continue
+        if Path(str(sib["rfilename"])).suffix.lower() in _SKIP_DOWNLOAD_SUFFIX:
+            continue
+        total += int(sib.get("size") or 0)
+    return total if total >= _MIN_WEIGHT_BYTES else 0
+
+
+def hf_listing_meta(repos: list[str]) -> dict[str, dict[str, Any]]:
+    """``createdAt`` + download size for official catalog ids. Fail-soft."""
+    out: dict[str, dict[str, Any]] = {}
+    for repo in dict.fromkeys(r.strip() for r in repos if r and r.strip()):
+        try:
+            info = _hf_json(
+                f"{_HF}/api/models/{urllib.parse.quote(repo, safe='')}",
+                timeout=_HF_CARD_TIMEOUT_S,
+            )
+        except Exception:
+            continue
+        if not isinstance(info, dict):
+            continue
+        rec: dict[str, Any] = {}
+        created = created_at_from_hf(info)
+        if created:
+            rec["created_at"] = created
+        size = _used_storage_bytes(info)
+        if size:
+            rec["size_bytes"] = size
+        if rec:
+            out[repo] = rec
+    return out
+
+
+def _hf_json(url: str, timeout: float = _TIMEOUT_S) -> object:
+    now = time.monotonic()
+    hit = _HF_JSON_CACHE.get(url)
+    if hit and now - hit[0] < _HF_JSON_CACHE_TTL_S:
+        return hit[1]
     req = urllib.request.Request(url, headers={"User-Agent": "hermes-local-models"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as r:
-        return json.load(r)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.load(r)
+    if len(_HF_JSON_CACHE) >= _HF_JSON_CACHE_MAX:
+        _HF_JSON_CACHE.pop(min(_HF_JSON_CACHE, key=lambda k: _HF_JSON_CACHE[k][0]))
+    _HF_JSON_CACHE[url] = (now, data)
+    return data
 
 
 def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -626,7 +896,7 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
     raw = _hf_json(url)
     if not isinstance(raw, list):
         return []
-    cached = cached_repo_ids()
+    cached_rows = {r["id"]: r for r in list_cached_repos()}
     from hermes_cli.vllm_runtime.recommend import recommend_vllm
 
     rec = recommend_vllm()
@@ -647,6 +917,8 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
             continue
         safetensors = m.get("safetensors") if isinstance(m.get("safetensors"), dict) else None
         config = m.get("config") if isinstance(m.get("config"), dict) else None
+        disk = int((cached_rows.get(repo) or {}).get("size_bytes") or 0)
+        used = int(m.get("usedStorage") or 0)
         classified = classify_vllm_repo(
             repo,
             tags=tags,
@@ -655,20 +927,28 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
             safetensors=safetensors,
             card_data=card,
             config=config,
-            weight_bytes=int(m.get("usedStorage") or 0),
+            weight_bytes=disk,
+            used_storage=used,
             pipeline_tag=str(m.get("pipeline_tag") or ""),
         )
-        hits.append({
+        size = disk or used or int(classified.get("size_bytes") or 0)
+        hit = {
             "repo": repo,
             "downloads": int(m.get("downloads") or 0),
             "likes": int(m.get("likes") or 0),
             "updated": str(m.get("lastModified") or ""),
             "gated": bool(m.get("gated")),
-            "cached": repo in cached,
+            "cached": repo in cached_rows,
             "fit": classified["fit"],
             "recommended": classified["recommended"],
             "capabilities": classified["capabilities"],
             "quantization": classified["quantization"],
             "fit_detail": classified["fit_detail"],
-        })
+            "size_bytes": size,
+            "size_label": _human_gb(size) if size else "",
+        }
+        created = created_at_from_hf(m)
+        if created:
+            hit["created_at"] = created
+        hits.append(hit)
     return hits
