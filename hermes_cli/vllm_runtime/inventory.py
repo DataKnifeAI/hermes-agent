@@ -402,6 +402,15 @@ def unservable_reason(hid: str, tags: list[str] | None = None) -> str | None:
     return None
 
 
+def gated_repo_reason(hid: str) -> str | None:
+    """HF gated / 401 / 403 — Use and Download share this copy."""
+    try:
+        _refuse_if_gated(hid)
+    except ValueError as exc:
+        return str(exc) or GATED_DOWNLOAD_MSG
+    return None
+
+
 def weight_bytes_from_safetensors(safetensors: dict | None, quant: str | None = None) -> int:
     """Published weight file bytes from the safetensors index — not param count as GB."""
     if not isinstance(safetensors, dict):

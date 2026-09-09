@@ -14,7 +14,7 @@ import {
 import { useI18n } from '@/i18n'
 import { Check, CheckCircle2, Cpu, Download, Loader2, Search, Trash2 } from '@/lib/icons'
 import { $localRuntimeJobs, runningDownloadFor, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
-import { notify, notifyError } from '@/store/notifications'
+import { notify, notifyError, readableError } from '@/store/notifications'
 
 import { ListRow, Pill, SettingsSection } from './primitives'
 
@@ -434,7 +434,7 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
         })
         .catch((e: Error) => {
           if (searchSeq.current === seq) {
-            setError(e.message)
+            setError(readableError(e, copy.browseTitle).message)
           }
         })
         .finally(() => {

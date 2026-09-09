@@ -319,10 +319,10 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
     hid = (hf_id or "").strip()
     if not hid or "/" not in hid:
         raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
-    from hermes_cli.vllm_runtime.inventory import unservable_reason
+    from hermes_cli.vllm_runtime.inventory import gated_repo_reason, unservable_reason
     from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
 
-    blocked = unservable_reason(hid)
+    blocked = unservable_reason(hid) or gated_repo_reason(hid)
     if blocked:
         write_last_error(blocked)
         disable_auto_start()

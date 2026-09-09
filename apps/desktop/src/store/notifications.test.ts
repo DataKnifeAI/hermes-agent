@@ -68,3 +68,23 @@ test('code-skew 503 unwraps to a restart-required summary, not raw IPC JSON', ()
   expect(lastMessage()).not.toMatch(/hermes:api/)
   expect(lastMessage()).not.toMatch(/systemctl/)
 })
+
+test('vLLM 400 JSON detail is the toast, not a raw Bad Request', () => {
+  notifyError(
+    new Error(
+      'Error invoking remote method \'hermes:api\': Error: 400: {"detail":"This Hugging Face repo is gated — sign in at huggingface.co and request access. Hermes will not download it unsigned."}'
+    ),
+    'Could not set this as the local model'
+  )
+
+  expect(lastMessage()).toMatch(/gated/i)
+  expect(lastMessage()).not.toMatch(/Bad Request/i)
+  expect(lastMessage()).not.toMatch(/hermes:api/)
+})
+
+test('empty-body 400 Bad Request uses the fallback, not statusText', () => {
+  notifyError(new Error('400: Bad Request'), 'Local model setup failed')
+
+  expect(lastMessage()).toBe('Local model setup failed')
+  expect(lastMessage()).not.toMatch(/400/)
+})

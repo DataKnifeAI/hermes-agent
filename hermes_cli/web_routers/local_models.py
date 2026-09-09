@@ -110,9 +110,15 @@ def _k_label(tokens: int) -> str:
 
 @contextlib.contextmanager
 def _http_error(status: int, prefix: str = ""):
-    """Map any exception to ``HTTPException(status, f"{prefix}{exc}")``."""
+    """Map unexpected exceptions to ``HTTPException(status, f"{prefix}{exc}")``.
+
+    ``HTTPException`` (llama-only 400, gated 400) must keep its own status
+    and detail — wrapping it produced a raw ``400: Bad Request`` toast.
+    """
     try:
         yield
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status, detail=f"{prefix}{exc}") from exc
 

@@ -1314,5 +1314,20 @@ describe('vLLM engine', () => {
     expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
     expect(mocked.deleteVllmModel).not.toHaveBeenCalled()
     expect(mocked.quickstartLocalModels).not.toHaveBeenCalled()
+
+    mocked.quickstartLocalModels.mockResolvedValue({
+      display_name: 'qwen3:8b',
+      download_bytes: 0,
+      job_id: 'vq-reset',
+      model_id: 'Qwen/Qwen3-8B-AWQ',
+      needs_download: true,
+      needs_runtime: false
+    })
+    fireEvent.click(screen.getByRole('button', { name: /set up for me/i }))
+    await waitFor(() => {
+      expect(mocked.quickstartLocalModels).toHaveBeenCalledWith()
+    })
+    expect(mocked.useVllm).not.toHaveBeenCalled()
+    expect(mocked.getLocalCatalog).not.toHaveBeenCalled()
   })
 })

@@ -25,6 +25,9 @@ def _client(tmp_path, monkeypatch):
 
     hermes_constants._default_hermes_root_memo = None
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    # Use/quickstart must not dial huggingface.co from the suite.
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.gated_repo_reason", lambda hid: None)
     from hermes_cli import web_server
 
     test_client = TestClient(web_server.app)
@@ -95,10 +98,15 @@ def test_llama_routes_refuse_when_engine_vllm_without_gguf_io(tmp_path, monkeypa
     assert catalog.status_code == 400
     assert "llama.cpp" in catalog.json()["detail"]
 
+    search = client.get("/api/local-models/search", params={"q": "qwen"})
+    assert search.status_code == 400
+    assert "llama.cpp" in search.json()["detail"]
+
     for path, body in (
         ("/api/local-models/sideload", {"path": "/tmp/x.gguf"}),
         ("/api/local-models/eject", {"model_id": "x"}),
         ("/api/local-models/download", {"model_id": "x"}),
+        ("/api/local-models/activate", {"model_id": "x"}),
         ("/api/local-models/runtime/install", {}),
     ):
         r = client.post(path, json=body)
@@ -832,6 +840,114 @@ def test_delete_last_cached_resets_leftover_gemma_config(tmp_path, monkeypatch):
     after_ids = {m["id"] for m in after.json()["models"]}
     assert leftover not in after_ids
     assert rec.model in after_ids
+
+
+def test_vllm_quickstart_empty_body_ignores_leftover_nemotron(tmp_path, monkeypatch):
+    """Set up for me (null/empty body) still plans the official recommend."""
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    leftover = "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": leftover, "served_model_name": "nemotron",
+    }})
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    pulled: list[str] = []
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: pulled.append(repo) or _fake_hub_download(hub, repo, job))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: {"ok": True, "base_url": "http://127.0.0.1:9/v1"})
+
+    for body in ({}, {"model_id": None}):
+        r = client.post("/api/local-models/quickstart", json=body)
+        assert r.status_code == 200, r.text
+        assert r.json()["model_id"] == rec.model
+        assert leftover not in r.json()["model_id"]
+        job = _wait_job(client, r.json()["job_id"])
+        assert job["status"] == "done", job
+
+    assert rec.model in pulled
+    assert leftover not in pulled
+    llama = client.get("/api/local-models/catalog")
+    assert llama.status_code == 400
+    assert "llama.cpp" in llama.json()["detail"]
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+
+
+def test_vllm_use_official_cached_after_leftover_search_hit(tmp_path, monkeypatch):
+    """Use Qwen3-8B-AWQ must 200 even when config still holds a search hit."""
+    client, home = _client(tmp_path, monkeypatch)
+    leftover = "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
+    catalog = "Qwen/Qwen3-8B-AWQ"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": leftover, "served_model_name": "nemotron", "quantization": "awq",
+    }})
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--Qwen--Qwen3-8B-AWQ"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"q" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.gated_repo_reason", lambda hid: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+
+    class _Sup:
+        base_url = "http://127.0.0.1:9/v1"
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: _Sup())
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
+
+    used = client.post("/api/local-models/vllm/use", json={"model": catalog})
+    assert used.status_code == 200, used.text
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == catalog
+
+
+def test_vllm_use_gated_repo_is_plain_language_400(tmp_path, monkeypatch):
+    """Use on a gated Gemma must not toast a raw Bad Request."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "google/gemma-3-27b-it"
+    _write_engine(home, "vllm")
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--google--gemma-3-27b-it"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"g" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    from hermes_cli.vllm_runtime.inventory import GATED_DOWNLOAD_MSG
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.gated_repo_reason",
+        lambda repo: GATED_DOWNLOAD_MSG)
+    started: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start"))
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 400, used.text
+    assert "gated" in used.json()["detail"].lower()
+    assert "Bad Request" not in used.json()["detail"]
+    assert started == []
 
 
 def test_delete_uncached_configured_search_hit_is_not_404(tmp_path, monkeypatch):
