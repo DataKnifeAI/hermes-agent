@@ -24,6 +24,9 @@ MIN_CONTEXT = 65536  # Hermes tool-loop floor; never silently drop below this.
 _DEFAULT_MODEL = "Qwen/Qwen3-8B-AWQ"
 _DEFAULT_SERVED = "qwen3:8b"
 _DEFAULT_PARSER = "hermes"
+# Last-rung public AWQ when every official catalog id 401s/403s/gates.
+_PUBLIC_FALLBACK = "Qwen/Qwen2.5-7B-Instruct-AWQ"
+_PUBLIC_FALLBACK_SERVED = "qwen2.5:7b"
 # Parsers vLLM's OpenAI-compat /v1/chat/completions actually implements.
 TOOL_PARSERS = frozenset({"hermes", "llama3_json", "qwen3_xml", "qwen3_coder", "mistral"})
 
@@ -195,3 +198,61 @@ def as_vllm_config(rec: VllmRecommendation) -> dict:
         "kv_cache_dtype": rec.kv_cache_dtype,
         "tool_call_parser": rec.tool_call_parser,
     }
+
+
+def official_catalog_ids() -> frozenset[str]:
+    return frozenset(t.model for t in catalog_tiers() if t.model) | {
+        _DEFAULT_MODEL, _PUBLIC_FALLBACK,
+    }
+
+
+def overlay_for_setup(hid: str, rec: VllmRecommendation) -> dict:
+    """Recommend overlay with *hid* (official row or public fallback) as the model."""
+    overlay = as_vllm_config(rec)
+    overlay["model"] = hid
+    matched = tier_for_model(hid)
+    if matched is not None:
+        overlay["served_model_name"] = matched.served_model_name
+        overlay["quantization"] = matched.quantization
+        overlay["tool_call_parser"] = matched.tool_call_parser
+        overlay["gpu_memory_utilization"] = matched.gpu_memory_utilization
+        overlay["kv_cache_dtype"] = matched.kv_cache_dtype
+        overlay["max_model_len"] = matched.max_model_len
+    elif hid == _PUBLIC_FALLBACK:
+        overlay["served_model_name"] = _PUBLIC_FALLBACK_SERVED
+        overlay["quantization"] = "awq"
+        overlay["tool_call_parser"] = _DEFAULT_PARSER
+    else:
+        overlay["served_model_name"] = hid.rsplit("/", 1)[-1]
+    return overlay
+
+
+def resolve_public_setup(rec: VllmRecommendation | None = None) -> tuple[str, str | None, VllmRecommendation]:
+    """VRAM-fit official id, or a known-public fallback if Hub rejects that row.
+
+    Leftover ``local_runtime.vllm.model`` is never consulted. Offline / probe
+    failure keeps the official id (fail open) so tests and air-gapped boxes
+    still plan Qwen3-8B-AWQ.
+    """
+    picked = rec or recommend_vllm()
+    wanted = (picked.model or "").strip() or _DEFAULT_MODEL
+    from hermes_cli.vllm_runtime.inventory import hf_repo_access_issue
+
+    candidates: list[str] = []
+    for hid in (wanted, *(t.model for t in catalog_tiers()), _PUBLIC_FALLBACK):
+        if hid and hid not in candidates:
+            candidates.append(hid)
+    first_issue = None
+    for hid in candidates:
+        issue = hf_repo_access_issue(hid)
+        if issue is None:
+            notice = None
+            if hid != wanted and first_issue:
+                notice = (
+                    f"{wanted} is not publicly downloadable ({first_issue}). "
+                    f"Using {hid} instead."
+                )
+            return hid, notice, picked
+        if first_issue is None:
+            first_issue = issue
+    return wanted, first_issue, picked

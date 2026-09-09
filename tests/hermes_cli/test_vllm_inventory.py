@@ -75,8 +75,23 @@ def test_hf_http_400_is_plain_language_not_urllib_string():
     assert status == 400
     assert detail == HF_BAD_REQUEST_MSG
     assert "Bad Request" not in detail
-    wrapped = hf_http_status_and_detail(RuntimeError("HTTP Error 400: Bad Request"))
+    wrapped = hf_http_status_and_detail(
+        RuntimeError("HTTP Error 400: Bad Request for url: https://huggingface.co/api/models/x"))
     assert wrapped == (400, HF_BAD_REQUEST_MSG)
+
+
+def test_local_vllm_400_is_not_hf_rejection():
+    """Leftover-server tool-call 400 must not toast as Hugging Face rejected."""
+    from hermes_cli.vllm_runtime.inventory import job_failure_detail
+
+    local = urllib.error.HTTPError(
+        "http://127.0.0.1:40689/v1/chat/completions", 400, "Bad Request",
+        hdrs=None, fp=BytesIO())
+    assert hf_http_status_and_detail(local) is None
+    assert hf_http_status_and_detail(RuntimeError("HTTP Error 400: Bad Request")) is None
+    detail = job_failure_detail(RuntimeError("HTTP Error 400: Bad Request"))
+    assert "Hugging Face" not in detail
+    assert "Bad Request" not in detail
 
 
 def test_classify_uses_tier_floor_not_a_guess():

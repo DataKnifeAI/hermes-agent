@@ -31,6 +31,8 @@ def _client(tmp_path, monkeypatch):
     # Use/quickstart must not dial huggingface.co from the suite.
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.inventory.gated_repo_reason", lambda hid: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.hf_repo_access_issue", lambda hid: None)
     from hermes_cli import web_server
 
     test_client = TestClient(web_server.app)
@@ -885,6 +887,133 @@ def test_vllm_quickstart_empty_body_ignores_leftover_nemotron(tmp_path, monkeypa
     from hermes_cli.config import load_config
 
     assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+
+
+def test_vllm_install_ignores_leftover_gated_id(tmp_path, monkeypatch):
+    """Install job downloads official recommend, never leftover Nemotron 401."""
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    leftover = "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": leftover, "served_model_name": "nemotron",
+    }})
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    pulled: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: pulled.append(repo))
+
+    r = client.post("/api/local-models/vllm/install")
+    assert r.status_code == 200
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert pulled == [rec.model]
+    assert leftover not in pulled
+    from hermes_cli.config import load_config as _load
+
+    assert _load()["local_runtime"]["vllm"]["model"] == rec.model
+
+
+def test_vllm_download_leftover_gated_config_uses_official(tmp_path, monkeypatch):
+    """Download of leftover config id still pulls the official recommend."""
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    leftover = "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": leftover, "served_model_name": "nemotron",
+    }})
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    pulled: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: pulled.append(repo) or _fake_hub_download(hub, repo, job))
+
+    r = client.post("/api/local-models/vllm/download", json={"model": leftover})
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == rec.model
+    assert leftover not in r.json()["model"]
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert pulled == [rec.model]
+
+
+def test_vllm_quickstart_falls_back_when_official_id_401s(tmp_path, monkeypatch):
+    """If recommend's HF id is gated/401, Set up for me uses the next public official row."""
+    client, home = _client(tmp_path, monkeypatch)
+    rec = _feasible_rec(monkeypatch)
+    leftover = "google/gemma-3-27b-it"
+    _write_engine(home, "vllm", extra={"vllm": {"model": leftover}})
+    from hermes_cli.vllm_runtime.inventory import GATED_DOWNLOAD_MSG
+    from hermes_cli.vllm_runtime.recommend import catalog_tiers
+
+    fallback = next(t.model for t in catalog_tiers() if t.model != rec.model)
+
+    def _issue(hid):
+        if hid == rec.model:
+            return GATED_DOWNLOAD_MSG
+        return None
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.hf_repo_access_issue", _issue)
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    pulled: list[str] = []
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: pulled.append(repo) or _fake_hub_download(hub, repo, job))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: {"ok": True, "base_url": "http://127.0.0.1:9/v1"})
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+
+    r = client.post("/api/local-models/quickstart", json={"model_id": leftover})
+    assert r.status_code == 200, r.text
+    assert r.json()["model_id"] == fallback
+    assert leftover not in r.json()["model_id"]
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    assert pulled == [fallback]
+    assert rec.model not in pulled
+    assert "not publicly downloadable" in (job.get("detail") or "")
+
+
+def test_vllm_use_local_400_is_not_502_or_hf_reject(tmp_path, monkeypatch):
+    """Local vLLM 400 must stay 400 with a human string — never 502 nested Bad Request."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "Qwen/Qwen3-8B-AWQ"
+    _write_engine(home, "vllm")
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--Qwen--Qwen3-8B-AWQ"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"q" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+
+    def _boom(_repo):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:40689/v1/chat/completions", 400, "Bad Request",
+            hdrs=None, fp=BytesIO())
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.gated_repo_reason", _boom)
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 400, used.text
+    detail = used.json()["detail"]
+    assert "502" not in used.text
+    assert "Hugging Face" not in detail
+    assert "Bad Request" not in detail
 
 
 def test_vllm_use_official_cached_after_leftover_search_hit(tmp_path, monkeypatch):

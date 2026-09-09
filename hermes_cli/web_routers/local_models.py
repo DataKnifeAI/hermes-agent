@@ -186,11 +186,10 @@ def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *, fail
         except Exception as exc:  # noqa: BLE001
             if fail_msg:
                 logger.warning(fail_msg, exc)
-            from hermes_cli.vllm_runtime.inventory import hf_http_status_and_detail
+            from hermes_cli.vllm_runtime.inventory import job_failure_detail
 
-            mapped = hf_http_status_and_detail(exc)
             job["status"] = "error"
-            job["error"] = mapped[1] if mapped else str(exc)
+            job["error"] = job_failure_detail(exc)
         finally:
             if on_exit is not None:
                 on_exit()
@@ -1054,7 +1053,7 @@ async def local_models_vllm_use(body: VllmUseBody | None = None):
 @router.post("/api/local-models/vllm/download")
 async def local_models_vllm_download(body: VllmModelBody):
     """Prefetch HF weights into the hub cache. Same ``model-download`` job the pane polls."""
-    hid = (body.model or "").strip()
+    hid = engine_mod.setup_download_model((body.model or "").strip())
     if not hid or "/" not in hid:
         raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
     if engine_mod.repo_is_cached(hid):

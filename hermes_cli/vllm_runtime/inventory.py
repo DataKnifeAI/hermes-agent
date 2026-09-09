@@ -406,11 +406,29 @@ _HTTP_ERROR_RE = re.compile(r"HTTP Error (\d{3})", re.I)
 _CLIENT_ERROR_RE = re.compile(r"\b([45]\d{2}) Client Error", re.I)
 
 
-def hf_http_status_and_detail(exc: BaseException) -> tuple[int, str] | None:
-    """Map urllib / huggingface_hub HTTP errors to ``(FastAPI status, detail)``.
+def _hf_origin(exc: BaseException, blob: str) -> bool:
+    """True when *exc* is a Hugging Face Hub failure, not local vLLM 4xx."""
+    url = str(getattr(exc, "url", "") or "")
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        url = url or str(getattr(resp, "url", "") or "")
+    req = getattr(exc, "request", None)
+    if req is not None:
+        url = url or str(getattr(req, "url", "") or req)
+    hay = f"{url} {blob} {type(exc).__name__}".lower()
+    return (
+        "huggingface.co" in hay
+        or "hf.co" in hay
+        or "hfhub" in hay
+        or "huggingface" in type(exc).__name__.lower()
+    )
 
-    Never returns the useless ``HTTP Error 400: Bad Request`` string. Client
-    4xx stay 4xx (gated / missing / invalid). Hub 5xx become 502.
+
+def hf_http_status_and_detail(exc: BaseException) -> tuple[int, str] | None:
+    """Map Hugging Face Hub HTTP errors to ``(FastAPI status, human detail)``.
+
+    Local vLLM 400s (leftover weights, tool-call bench) are not HF rejections
+    and must not become ``HTTP Error 400: Bad Request`` nested under 502.
     """
     code = None
     blob = str(exc) or ""
@@ -428,6 +446,8 @@ def hf_http_status_and_detail(exc: BaseException) -> tuple[int, str] | None:
             code = int(match.group(1))
     if code is None:
         return None
+    if not _hf_origin(exc, blob):
+        return None
     lower = blob.lower()
     if code in (401, 403) or "gated" in lower:
         return 400, GATED_DOWNLOAD_MSG
@@ -437,6 +457,40 @@ def hf_http_status_and_detail(exc: BaseException) -> tuple[int, str] | None:
         return 400, HF_BAD_REQUEST_MSG
     if code >= 500:
         return 502, f"Hugging Face is unavailable (HTTP {code})"
+    return None
+
+
+def job_failure_detail(exc: BaseException) -> str:
+    """Job / toast copy: HF 4xx as gated/missing/rejected; never urllib's Bad Request."""
+    mapped = hf_http_status_and_detail(exc)
+    if mapped:
+        return mapped[1]
+    blob = str(exc).strip() or type(exc).__name__
+    match = _HTTP_ERROR_RE.search(blob)
+    if match:
+        code = int(match.group(1))
+        if 400 <= code < 500:
+            return "the local server rejected the request"
+    return blob
+
+
+def hf_repo_access_issue(hid: str) -> str | None:
+    """Human reason if Hub will refuse *hid*. None = public, unknown, or offline."""
+    repo = (hid or "").strip()
+    if not repo or "/" not in repo:
+        return MISSING_REPO_MSG
+    try:
+        info = _hf_json(
+            f"{_HF}/api/models/{urllib.parse.quote(repo, safe='')}",
+            timeout=_HF_CARD_TIMEOUT_S,
+        )
+    except urllib.error.HTTPError as exc:
+        mapped = hf_http_status_and_detail(exc)
+        return mapped[1] if mapped else HF_BAD_REQUEST_MSG
+    except Exception:
+        return None
+    if isinstance(info, dict) and repo_is_gated(info):
+        return GATED_DOWNLOAD_MSG
     return None
 
 

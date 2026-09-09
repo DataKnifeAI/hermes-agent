@@ -44,7 +44,7 @@ _CLIENT_HINTS = (
 
 def raise_engine_http(exc: BaseException) -> None:
     """Re-raise ``exc`` as FastAPI. Never map a client 4xx onto 502."""
-    from hermes_cli.vllm_runtime.inventory import hf_http_status_and_detail
+    from hermes_cli.vllm_runtime.inventory import hf_http_status_and_detail, job_failure_detail
     from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
     from hermes_cli.vllm_runtime.supervisor import LEFTOVER_AWQ_MSG
 
@@ -55,7 +55,12 @@ def raise_engine_http(exc: BaseException) -> None:
     mapped = hf_http_status_and_detail(exc)
     if mapped:
         raise HTTPException(status_code=mapped[0], detail=mapped[1]) from exc
-    text = str(exc).strip() or "local engine failed"
+    text = job_failure_detail(exc)
+    code = getattr(exc, "code", None)
+    if code is None:
+        code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and 400 <= code < 500:
+        raise HTTPException(status_code=400, detail=text) from exc
     if isinstance(exc, ValueError) or any(hint in text.lower() for hint in _CLIENT_HINTS):
         raise HTTPException(status_code=400, detail=text) from exc
     if LEFTOVER_AWQ_MSG.lower() in text.lower():
@@ -252,6 +257,14 @@ def start_active_engine() -> None:
     lm._start_local_server(cfg, lm._SERVER_START_FAILED)
 
 
+def _official_setup(rec=None):
+    """VRAM-fit public catalog row. Never leftover ``local_runtime.vllm.model``."""
+    from hermes_cli.vllm_runtime.recommend import overlay_for_setup, resolve_public_setup
+
+    hid, notice, picked = resolve_public_setup(rec)
+    return hid, notice, picked, overlay_for_setup(hid, picked)
+
+
 def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
     """Preflight for Set up for me: official ``recommend_vllm()`` id only.
 
@@ -259,12 +272,10 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
     search hit, a 401 hollow) are ignored — one-click is the VRAM-fit
     catalog row, never resume-the-last-browse.
     """
-    from hermes_cli.vllm_runtime.recommend import recommend_vllm
     from hermes_cli.vllm_runtime.venv import venv_ready
 
-    rec = recommend_vllm()
     _ = model_id  # ignored — leftover Gemma / search hits must not win
-    hid = (rec.model or "").strip() or None
+    hid, notice, rec, overlay = _official_setup()
     if rec.feasible and hid:
         pass
     elif rec.reason == "no_nvidia" and hid:
@@ -280,10 +291,11 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
         )
     return {
         "model": hid,
-        "display_name": rec.served_model_name or hid.rsplit("/", 1)[-1],
+        "display_name": overlay["served_model_name"] or hid.rsplit("/", 1)[-1],
         "needs_runtime": not venv_ready(),
         "needs_download": not repo_is_cached(hid),
         "apply_recommend": True,
+        "notice": notice,
     }
 
 
@@ -291,19 +303,17 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     """Same four legs as llama quickstart: venv → HF weights → serve → default."""
     from cli import save_config_value
     from hermes_cli.config import load_config
+    from hermes_cli.local_engines import stop_vllm_engine
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
-    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
     from hermes_cli.web_routers import local_models as lm
 
-    hid = str(plan["model"])
-    rec = recommend_vllm()
-    overlay = as_vllm_config(rec)
-    overlay["model"] = hid
-    if hid == rec.model:
-        overlay["served_model_name"] = rec.served_model_name
+    # Re-resolve at run time — leftover config / a stale plan.model must not win.
+    hid, notice, _rec, overlay = _official_setup()
+    if notice:
+        job["detail"] = notice
     for key, value in overlay.items():
         save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
@@ -313,32 +323,34 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
         job["done_bytes"] = 0
         lm._step(job, "downloading", f"Downloading {hid}")
         ensure_hf_weights(hid, job)
+    # Leftover Llama/Nemotron still resident would bench as a local 400
+    # and toast as "Hugging Face rejected this repo".
+    stop_vllm_engine()
     lm._step(job, "starting-server", "Starting vLLM")
     start_active_engine()
     lm._step(job, "setting-default", "Making it your default")
     activate_vllm()
-    lm._finish(job, f"{plan['display_name']} is ready — new chats use it")
+    done = notice or f"{overlay['served_model_name'] or hid.rsplit('/', 1)[-1]} is ready — new chats use it"
+    lm._finish(job, done)
 
 
 def apply_recommend_and_install(job: dict | None = None) -> None:
     from cli import save_config_value
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
-    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
-    rec = recommend_vllm()
-    for key, value in as_vllm_config(rec).items():
+    hid, notice, _rec, overlay = _official_setup()
+    for key, value in overlay.items():
         save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
     ensure_vllm_venv(str(settings.get("python") or ""))
-    model = str(rec.model or "").strip()
-    if model:
+    if hid:
         if job is not None:
             job["phase"] = "downloading"
-            job["detail"] = f"Downloading {model}"
-        ensure_hf_weights(model, job)
+            job["detail"] = notice or f"Downloading {hid}"
+        ensure_hf_weights(hid, job)
 
 
 def use_cached_vllm(hf_id: str) -> dict[str, Any]:
@@ -422,11 +434,31 @@ def repo_is_cached(hf_id: str) -> bool:
     return _cached(hf_id)
 
 
+def setup_download_model(requested: str | None) -> str:
+    """Download leftover gated/401 config as official recommend, not that id.
+
+    An explicit catalog or search-hit id the user picked is kept. Empty body
+    or the leftover configured non-catalog id is rewritten.
+    """
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.recommend import official_catalog_ids
+    from hermes_cli.vllm_runtime.supervisor import configured_model_id, vllm_settings
+
+    hid = (requested or "").strip()
+    leftover = configured_model_id(vllm_settings(load_config()))
+    official = official_catalog_ids()
+    if hid and not (hid == leftover and hid not in official):
+        return hid
+    chosen, _notice, _rec, _overlay = _official_setup()
+    return chosen
+
+
 def download_vllm_weights(hf_id: str, job: dict | None = None) -> dict[str, Any]:
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
 
+    hid = setup_download_model(hf_id)
     try:
-        return ensure_hf_weights(hf_id, job)
+        return ensure_hf_weights(hid, job)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -434,13 +466,11 @@ def download_vllm_weights(hf_id: str, job: dict | None = None) -> dict[str, Any]
 def _write_official_vllm_model() -> str:
     """Persist the VRAM-fit catalog row (or the shipped 16 GB id). Never a search hit."""
     from cli import save_config_value
-    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
 
-    rec = recommend_vllm()
-    overlay = as_vllm_config(rec)
+    hid, _notice, _rec, overlay = _official_setup()
     for key, value in overlay.items():
         save_config_value(f"local_runtime.vllm.{key}", value)
-    return str(overlay["model"])
+    return hid
 
 
 def delete_vllm_model(hf_id: str) -> dict[str, Any]:
