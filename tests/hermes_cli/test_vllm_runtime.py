@@ -846,3 +846,107 @@ def test_start_managed_vllm_refuses_foreign_llm_after_stopping_llama(monkeypatch
         start_managed_vllm({"local_runtime": {}}, apply_recommend=False)
     assert order == ["llama_stop", "occupancy"]
 
+
+def _alive_supervisor(tmp_path, monkeypatch, port=19980):
+    from hermes_cli.vllm_runtime.supervisor import VllmSupervisor
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: port)
+    sup = VllmSupervisor(
+        {"model": "acme/wait-awq", "port": port},
+        executable=tmp_path / "vllm",
+        log_path=tmp_path / "vllm-server.log",
+    )
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    sup.proc = _Alive()
+    return sup
+
+
+def test_wait_ready_keeps_polling_while_proc_alive_until_200(tmp_path, monkeypatch):
+    """Connection refused / 503 is not failure while the pid is still starting."""
+    import urllib.error
+    from io import BytesIO
+
+    sup = _alive_supervisor(tmp_path, monkeypatch)
+    hits = {"n": 0}
+
+    class _Ok:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"data":[]}'
+
+    def fake_urlopen(url, timeout=3):
+        hits["n"] += 1
+        if hits["n"] == 1:
+            raise urllib.error.URLError("connection refused")
+        if hits["n"] == 2:
+            raise urllib.error.HTTPError(url, 503, "warming", hdrs=None, fp=BytesIO())
+        return _Ok()
+
+    now = [0.0]
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    monkeypatch.setattr("time.sleep", lambda s: now.__setitem__(0, now[0] + s))
+
+    sup._wait_ready(5)
+    assert hits["n"] == 3
+
+
+def test_wait_ready_does_not_fail_while_alive_until_deadline(tmp_path, monkeypatch):
+    import urllib.error
+
+    sup = _alive_supervisor(tmp_path, monkeypatch, port=19981)
+
+    def fake_urlopen(url, timeout=3):
+        raise urllib.error.URLError("connection refused")
+
+    now = [0.0]
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    monkeypatch.setattr("time.sleep", lambda s: now.__setitem__(0, now[0] + 0.5))
+
+    with pytest.raises(TimeoutError, match="not ready"):
+        sup._wait_ready(1)
+    assert sup.proc.poll() is None
+
+
+def test_wait_ready_fails_immediately_when_proc_exits(tmp_path, monkeypatch):
+    from hermes_cli.vllm_runtime.supervisor import VllmSupervisor
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19982)
+    sup = VllmSupervisor(
+        {"model": "acme/dead-awq", "port": 19982},
+        executable=tmp_path / "vllm",
+        log_path=tmp_path / "vllm-server.log",
+    )
+
+    class _Dead:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    sup.proc = _Dead()
+    opened = {"n": 0}
+
+    def fake_urlopen(url, timeout=3):
+        opened["n"] += 1
+        raise AssertionError("must not probe /v1/models after the pid died")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(RuntimeError, match="exited rc=1"):
+        sup._wait_ready(30)
+    assert opened["n"] == 0
+

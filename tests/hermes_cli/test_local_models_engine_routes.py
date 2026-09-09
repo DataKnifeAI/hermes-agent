@@ -148,9 +148,10 @@ def test_server_start_vllm_stops_llama_then_starts(tmp_path, monkeypatch):
     class _Sup:
         base_url = "http://127.0.0.1:9/v1"
 
+    captured = {}
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
-        lambda *a, **k: order.append("start_vllm") or _Sup())
+        lambda *a, **k: captured.update(k) or order.append("start_vllm") or _Sup())
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
         lambda cfg=None: "http://127.0.0.1:9/v1")
@@ -158,6 +159,9 @@ def test_server_start_vllm_stops_llama_then_starts(tmp_path, monkeypatch):
     r = client.post("/api/local-models/server", json={"action": "start"})
     assert r.status_code == 200, r.text
     assert order == ["stop_llama", "occupancy", "start_vllm"]
+    from hermes_cli.web_routers.local_models_engine import VLLM_START_TIMEOUT_S
+
+    assert captured.get("timeout_s") == VLLM_START_TIMEOUT_S
 
 
 def test_server_start_occupancy_surfaces(tmp_path, monkeypatch):
@@ -923,3 +927,36 @@ def test_apply_search_hit_clears_leftover_awq(tmp_path, monkeypatch):
     vllm = load_config()["local_runtime"]["vllm"]
     assert vllm["model"] == "dphn/dolphin-2.9.1-llama-3-8b"
     assert not (vllm.get("quantization") or "").strip()
+
+
+def test_vllm_job_timeout_covers_supervisor_ready_wait():
+    """Use / quickstart / server-start must not 60–90s-fail while CUDA graphs capture."""
+    from hermes_cli.vllm_runtime.supervisor import READY_TIMEOUT_S
+    from hermes_cli.web_routers.local_models_engine import VLLM_START_TIMEOUT_S
+
+    assert VLLM_START_TIMEOUT_S >= READY_TIMEOUT_S
+    assert READY_TIMEOUT_S >= 180
+
+
+def test_vllm_log_phase_sniffs_warmup_and_cuda_graphs(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    log = home / "runtimes" / "vllm" / "vllm-server.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("Loading weights took 12s\nWarming up Mamba kernels\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+
+    data = client.get("/api/local-models/status").json()
+    assert data["start_phase"] == "Warming up GPU"
+
+    log.write_text(
+        "Warming up Mamba kernels\nCapturing CUDA graphs (decode, 32)\n", encoding="utf-8")
+    data = client.get("/api/local-models/status").json()
+    assert data["start_phase"] == "Capturing CUDA graphs"
