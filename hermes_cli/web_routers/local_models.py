@@ -853,6 +853,8 @@ async def local_models_server(body: ServerActionBody):
         await asyncio.to_thread(_SERVER_ACTIONS[action])
     except OccupyingLlmError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True, "action": action}

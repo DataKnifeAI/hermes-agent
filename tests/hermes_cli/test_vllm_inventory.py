@@ -274,7 +274,12 @@ def test_exl2_is_not_fits():
         "org/Dolphin-8B-exl2", tags=["exl2"], total_vram=24 * _GIB,
         used_storage=5 * _GIB)
     assert tags["fit"] == "unknown"
-    assert "EXL2" in tags["fit_detail"]
+    assert "cannot serve" in (tags["fit_detail"] or "").lower()
+    from hermes_cli.vllm_runtime.inventory import UNSERVABLE_FORMAT_MSG, unservable_reason
+
+    assert unservable_reason("org/Dolphin-8B-exl2") == UNSERVABLE_FORMAT_MSG
+    assert unservable_reason("someone/Qwen-GGUF") == UNSERVABLE_FORMAT_MSG
+    assert unservable_reason("dphn/dolphin-2.9.1-llama-3-8b") is None
 
 
 def test_download_job_reports_bytes(monkeypatch, tmp_path):

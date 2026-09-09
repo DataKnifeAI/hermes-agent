@@ -50,13 +50,20 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
     settings = vllm_settings(config)
     from hermes_cli.vllm_runtime.supervisor import (
         MODEL_REMOVED_MSG, configured_cache_missing, configured_model_id,
-        write_last_error)
+        configured_unservable_reason, disable_auto_start, write_last_error)
 
     if not configured_model_id(settings):
         logger.warning("managed vLLM has no configured model — not starting")
         return None
+    blocked = configured_unservable_reason(settings)
+    if blocked:
+        write_last_error(blocked)
+        disable_auto_start()
+        logger.warning("%s", blocked)
+        return None
     if configured_cache_missing(settings):
         write_last_error(MODEL_REMOVED_MSG)
+        disable_auto_start()
         logger.warning("%s", MODEL_REMOVED_MSG)
         return None
     if executable is not None:
@@ -82,6 +89,7 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
         raise
     except Exception as exc:  # noqa: BLE001 — never break session start
         logger.warning("managed vLLM runtime unavailable: %s", exc)
+        disable_auto_start()
         return None
 
 

@@ -343,13 +343,17 @@ def _capability_tags(
     return caps[:_MAX_CAPS]
 
 
+# Shared with Start/Use so the pane and the supervisor say the same thing.
+UNSERVABLE_FORMAT_MSG = (
+    "vLLM cannot serve this format — Download an AWQ or FP8 instruct model"
+)
+
+
 def unservable_reason(hid: str, tags: list[str] | None = None) -> str | None:
     """vLLM cannot load GGUF or EXL2 — say so instead of a lying Fits badge."""
     blob = f"{hid} {' '.join(tags or [])}".lower()
-    if "gguf" in blob:
-        return "vLLM cannot serve GGUF — use llama.cpp or a safetensors build"
-    if "exl2" in blob or "exllamav2" in blob:
-        return "vLLM cannot serve EXL2 packs — use AWQ, GPTQ, or FP8/BF16 safetensors"
+    if "gguf" in blob or "exl2" in blob or "exllamav2" in blob:
+        return UNSERVABLE_FORMAT_MSG
     return None
 
 
@@ -510,6 +514,9 @@ def ensure_hf_weights(repo: str, job: dict | None = None) -> dict[str, Any]:
     hid = (repo or "").strip()
     if not hid or "/" not in hid:
         raise ValueError("model must be an org/name Hugging Face id")
+    blocked = unservable_reason(hid)
+    if blocked:
+        raise ValueError(blocked)
     if hid in cached_repo_ids():
         return {"id": hid, "already_downloaded": True}
     download_hf_repo(hid, job)
@@ -785,6 +792,9 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     hid = (hf_id or "").strip()
     if not hid or "/" not in hid:
         raise ValueError("model must be an org/name Hugging Face id")
+    blocked = unservable_reason(hid)
+    if blocked:
+        raise ValueError(blocked)
     matched = tier_for_model(hid)
     if matched is not None:
         rec = recommend_vllm()
@@ -809,6 +819,13 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     else:
         save_config_value("local_runtime.vllm.model", hid)
         save_config_value("local_runtime.vllm.served_model_name", served_name_for(hid))
+        # Recommend writes --quantization awq. A search hit that is not AWQ
+        # (Dolphin BF16, etc.) then dies with "Cannot find the config file for awq".
+        parsed = parse_quantization(hid)
+        save_config_value(
+            "local_runtime.vllm.quantization",
+            parsed if parsed in {"awq", "gptq"} else "",
+        )
     return {"ok": True, "model": hid, "served_model_name": served_name_for(hid)}
 
 
@@ -907,13 +924,13 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
         if not isinstance(m, dict):
             continue
         repo = str(m.get("id") or "").strip()
-        if not repo or "gguf" in repo.lower():
+        if not repo or unservable_reason(repo):
             continue
         tags = [str(t).lower() for t in (m.get("tags") or [])] if isinstance(m.get("tags"), list) else []
         card = m.get("cardData") if isinstance(m.get("cardData"), dict) else {}
         extra = card.get("tags") if isinstance(card.get("tags"), list) else []
         tags.extend(str(t).lower() for t in extra)
-        if any("gguf" in t for t in tags):
+        if unservable_reason(repo, tags):
             continue
         safetensors = m.get("safetensors") if isinstance(m.get("safetensors"), dict) else None
         config = m.get("config") if isinstance(m.get("config"), dict) else None

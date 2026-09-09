@@ -179,16 +179,24 @@ def start_active_engine() -> None:
     cfg = lm._set_runtime_enabled(True)
     if configured_engine(cfg) == "vllm":
         stop_llama_engine()
+        from hermes_cli.vllm_runtime.supervisor import (
+            MODEL_REMOVED_MSG, configured_cache_missing, configured_unservable_reason,
+            disable_auto_start, vllm_settings, write_last_error)
+
+        settings = vllm_settings(cfg)
+        blocked = configured_unservable_reason(settings)
+        if blocked:
+            write_last_error(blocked)
+            disable_auto_start()
+            raise HTTPException(status_code=400, detail=blocked)
+        if configured_cache_missing(settings):
+            write_last_error(MODEL_REMOVED_MSG)
+            disable_auto_start()
+            raise RuntimeError(MODEL_REMOVED_MSG)
         try:
             require_gpu_free()
         except OccupyingLlmError:
             raise
-        from hermes_cli.vllm_runtime.supervisor import (
-            MODEL_REMOVED_MSG, configured_cache_missing, vllm_settings, write_last_error)
-
-        if configured_cache_missing(vllm_settings(cfg)):
-            write_last_error(MODEL_REMOVED_MSG)
-            raise RuntimeError(MODEL_REMOVED_MSG)
         from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
 
         sup = ensure_vllm_runtime(cfg, force=True)
@@ -198,6 +206,7 @@ def start_active_engine() -> None:
             # Another Hermes process already owns a healthy serve — activate
             # it. A missing endpoint is a real boot failure.
             if resolve_vllm_endpoint(wait_for_boot_s=0) is None:
+                disable_auto_start()
                 raise RuntimeError(
                     "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
         from hermes_cli.config import load_config
@@ -301,6 +310,14 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
     hid = (hf_id or "").strip()
     if not hid or "/" not in hid:
         raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
+    from hermes_cli.vllm_runtime.inventory import unservable_reason
+    from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
+
+    blocked = unservable_reason(hid)
+    if blocked:
+        write_last_error(blocked)
+        disable_auto_start()
+        raise HTTPException(status_code=400, detail=blocked)
     if not repo_is_cached(hid):
         raise HTTPException(
             status_code=409,

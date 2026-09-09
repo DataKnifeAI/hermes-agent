@@ -721,3 +721,115 @@ def test_server_start_vllm_succeeds_when_already_running(tmp_path, monkeypatch):
 
     r = client.post("/api/local-models/server", json={"action": "start"})
     assert r.status_code == 200, r.text
+
+
+def test_vllm_use_and_start_refuse_exl2_without_spawning(tmp_path, monkeypatch):
+    """EXL2 must not kick a serve loop — Use/Start refuse and leave Download/Delete free."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "org/Dolphin-8B-exl2"
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": hid, "served_model_name": "dolphin-exl2", "quantization": "awq",
+    }})
+    hub = tmp_path / "hf-hub"
+    cached = hub / "models--org--Dolphin-8B-exl2"
+    cached.mkdir(parents=True)
+    (cached / "w.bin").write_bytes(b"y" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    started: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start"))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 400, used.text
+    assert "cannot serve this format" in used.json()["detail"]
+    assert started == []
+
+    started.clear()
+    boot = client.post("/api/local-models/server", json={"action": "start"})
+    assert boot.status_code == 400, boot.text
+    assert "cannot serve this format" in boot.json()["detail"]
+    assert started == []
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import read_last_error
+
+    assert load_config()["local_runtime"]["enabled"] is False
+    assert "cannot serve this format" in (read_last_error() or "")
+
+
+def test_failed_start_then_delete_and_use_catalog(tmp_path, monkeypatch):
+    """After a doomed start, Delete + Use Qwen3-8B-AWQ must work without a CLI."""
+    client, home = _client(tmp_path, monkeypatch)
+    doomed = "dphn/dolphin-2.9.1-llama-3-8b"
+    catalog = "Qwen/Qwen3-8B-AWQ"
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": doomed, "served_model_name": "dolphin", "quantization": "awq",
+    }})
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--dphn--dolphin-2.9.1-llama-3-8b"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"x" * 64)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+
+    failed = client.post("/api/local-models/server", json={"action": "start"})
+    assert failed.status_code == 502, failed.text
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["enabled"] is False
+
+    gone = client.delete(f"/api/local-models/vllm/models/{doomed}")
+    assert gone.status_code == 200, gone.text
+    assert not dest.exists()
+
+    qwen = hub / "models--Qwen--Qwen3-8B-AWQ"
+    qwen.mkdir(parents=True)
+    (qwen / "w.bin").write_bytes(b"q" * 32)
+    started: list[str] = []
+
+    class _Sup:
+        base_url = "http://127.0.0.1:9/v1"
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start") or _Sup())
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
+
+    used = client.post("/api/local-models/vllm/use", json={"model": catalog})
+    assert used.status_code == 200, used.text
+    assert started == ["start"]
+    cfg = load_config()
+    assert cfg["local_runtime"]["vllm"]["model"] == catalog
+    assert cfg["local_runtime"]["vllm"].get("quantization") == "awq"
+
+
+def test_apply_search_hit_clears_leftover_awq(tmp_path, monkeypatch):
+    """Using Dolphin after a Qwen3-AWQ recommend must not keep --quantization awq."""
+    _, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "Qwen/Qwen3-8B-AWQ",
+        "quantization": "awq",
+        "kv_cache_dtype": "fp8",
+    }})
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.inventory import apply_vllm_model
+
+    apply_vllm_model("dphn/dolphin-2.9.1-llama-3-8b")
+    vllm = load_config()["local_runtime"]["vllm"]
+    assert vllm["model"] == "dphn/dolphin-2.9.1-llama-3-8b"
+    assert not (vllm.get("quantization") or "").strip()

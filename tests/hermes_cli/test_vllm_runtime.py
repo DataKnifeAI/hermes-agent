@@ -90,6 +90,97 @@ def test_default_engine_is_llamacpp_and_missing_key_deep_merges():
     assert merged["local_runtime"]["vllm"]["host"] == "127.0.0.1"
 
 
+def test_serve_argv_drops_leftover_awq_on_non_awq_id():
+    """Recommend leftover ``awq`` must not ride along onto Dolphin BF16."""
+    argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": "dphn/dolphin-2.9.1-llama-3-8b",
+        "quantization": "awq",
+        "port": 18435,
+    })
+    assert "--quantization" not in argv
+    kept = serve_argv("/opt/venv/bin/vllm", {
+        "model": "Qwen/Qwen3-8B-AWQ",
+        "quantization": "awq",
+        "port": 18435,
+    })
+    assert kept[kept.index("--quantization") + 1] == "awq"
+
+
+def test_start_refuses_exl2_without_spawning(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    hub = tmp_path / "hub"
+    cached = hub / "models--org--Dolphin-8B-exl2"
+    cached.mkdir(parents=True)
+    (cached / "w.bin").write_bytes(b"x" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    import hermes_constants
+    from hermes_cli.vllm_runtime.inventory import UNSERVABLE_FORMAT_MSG
+    from hermes_cli.vllm_runtime.supervisor import VllmSupervisor, read_last_error
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19997)
+    fake = tmp_path / "vllm"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    spawned: list[str] = []
+    sup = VllmSupervisor(
+        {"model": "org/Dolphin-8B-exl2", "port": 19997},
+        executable=fake,
+        log_path=home / "runtimes" / "vllm" / "vllm-server.log",
+    )
+    monkeypatch.setattr(sup, "_spawn", lambda: spawned.append("spawn"))
+    with pytest.raises(RuntimeError, match="cannot serve"):
+        sup.start(timeout_s=1)
+    assert spawned == []
+    assert read_last_error() == UNSERVABLE_FORMAT_MSG
+
+
+def test_watch_stops_on_fatal_awq_config_error(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("local_runtime:\n  enabled: true\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    hub = tmp_path / "hub"
+    cached = hub / "models--dphn--dolphin-2.9.1-llama-3-8b"
+    cached.mkdir(parents=True)
+    (cached / "w.bin").write_bytes(b"x" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    import hermes_constants
+    from hermes_cli.vllm_runtime.supervisor import (
+        LEFTOVER_AWQ_MSG, VllmSupervisor, read_last_error)
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19996)
+    log_path = home / "runtimes" / "vllm" / "vllm-server.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text(
+        "Value error, Cannot find the config file for awq [type=value_error]\n",
+        encoding="utf-8")
+    spawned: list[str] = []
+    sup = VllmSupervisor(
+        {"model": "dphn/dolphin-2.9.1-llama-3-8b", "port": 19996, "quantization": "awq"},
+        executable=tmp_path / "vllm",
+        log_path=log_path,
+    )
+    monkeypatch.setattr(sup, "_spawn", lambda: spawned.append("spawn"))
+
+    class _Dead:
+        def poll(self):
+            return 1
+
+    sup.proc = _Dead()
+    sup._watch()
+    assert spawned == []
+    assert sup._stopping is True
+    assert read_last_error() == LEFTOVER_AWQ_MSG
+
+
 def test_serve_argv_loopback_and_hermes_tool_parser():
     from hermes_cli.vllm_runtime.supervisor import DEFAULT_LISTEN_PORT, LLAMA_CPP_PORT
 

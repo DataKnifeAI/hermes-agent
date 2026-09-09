@@ -25,7 +25,20 @@ from hermes_cli.vllm_runtime.venv import runtimes_root, vllm_executable
 logger = logging.getLogger(__name__)
 
 _RESTART_BACKOFF_S = (1, 5, 15, 60)
+_MAX_CRASH_RESTARTS = len(_RESTART_BACKOFF_S)
 MODEL_REMOVED_MSG = "model was removed — Download to use again"
+LEFTOVER_AWQ_MSG = (
+    "vLLM cannot start this model as AWQ — it has no AWQ config. "
+    "Stop, then Use an AWQ or FP8 instruct model"
+)
+_FATAL_CRASH_NEEDLES = (
+    "cannot find the config file",
+    "unknown quantization method",
+    "is not a supported model",
+    "exl2",
+    "exllamav2",
+    "gguf",
+)
 # llama.cpp's managed listen port — never share it. Sessions persist base_url per
 # engine; TIME_WAIT after a switch would also collide. Same reason llama.cpp
 # avoids 8000/8080.
@@ -65,6 +78,55 @@ def read_last_error() -> str | None:
 
 def clear_last_error() -> None:
     last_error_path().unlink(missing_ok=True)
+
+
+def disable_auto_start() -> None:
+    """A failed start must not leave ``enabled`` kicking boot forever."""
+    with suppress(Exception):
+        from cli import save_config_value
+
+        save_config_value("local_runtime.enabled", False)
+
+
+def configured_unservable_reason(settings: dict | None) -> str | None:
+    hid = configured_model_id(settings)
+    if not hid:
+        return None
+    from hermes_cli.vllm_runtime.inventory import unservable_reason
+
+    return unservable_reason(hid)
+
+
+def serve_quantization(settings: dict) -> str:
+    """Drop leftover ``--quantization`` when the HF id does not claim that method.
+
+    Recommend writes ``awq``. Using a BF16 search hit (Dolphin) then passes
+    ``--quantization awq`` and vLLM dies looking for an AWQ config file.
+    """
+    quant = str(settings.get("quantization") or "").strip()
+    if not quant:
+        return ""
+    from hermes_cli.vllm_runtime.inventory import parse_quantization
+
+    parsed = parse_quantization(configured_model_id(settings))
+    return quant if parsed == quant else ""
+
+
+def humanize_serve_error(raw: str | None, *, model: str = "") -> str | None:
+    blocked = configured_unservable_reason({"model": model} if model else None)
+    if blocked:
+        return blocked
+    text = (raw or "").strip()
+    if "cannot find the config file for awq" in text.lower():
+        return LEFTOVER_AWQ_MSG
+    return text[-500:] or None
+
+
+def is_fatal_serve_crash(message: str | None, *, model: str = "") -> bool:
+    if configured_unservable_reason({"model": model} if model else None):
+        return True
+    lower = (message or "").lower()
+    return any(needle in lower for needle in _FATAL_CRASH_NEEDLES)
 
 
 def configured_model_id(settings: dict | None) -> str:
@@ -147,7 +209,7 @@ def serve_argv(executable: str | Path, settings: dict) -> list[str]:
         "--enable-auto-tool-choice",
         "--tool-call-parser", str(settings.get("tool_call_parser") or "hermes"),
     ]
-    quant = str(settings.get("quantization") or "").strip()
+    quant = serve_quantization(settings)
     if quant:
         argv.extend(["--quantization", quant])
     kv = str(settings.get("kv_cache_dtype") or "").strip()
@@ -233,8 +295,15 @@ class VllmSupervisor:
 
     def start(self, timeout_s: int = 120) -> None:
         self._stopping = False
+        hid = configured_model_id(self.settings)
+        blocked = configured_unservable_reason(self.settings)
+        if blocked:
+            write_last_error(blocked)
+            disable_auto_start()
+            raise RuntimeError(blocked)
         if configured_cache_missing(self.settings):
             write_last_error(MODEL_REMOVED_MSG)
+            disable_auto_start()
             raise RuntimeError(MODEL_REMOVED_MSG)
         clear_last_error()
         try:
@@ -244,8 +313,9 @@ class VllmSupervisor:
             crash = last_serve_error_line(self.log_path)
             if configured_cache_missing(self.settings):
                 write_last_error(MODEL_REMOVED_MSG)
-            elif crash:
-                write_last_error(crash)
+            else:
+                write_last_error(humanize_serve_error(crash, model=hid) or str(crash or "vllm serve failed"))
+            disable_auto_start()
             raise
         self._write_state()
         self._watchdog = threading.Thread(
@@ -289,14 +359,37 @@ class VllmSupervisor:
                 continue
             if self._stopping:
                 return
+            hid = configured_model_id(self.settings)
             if configured_cache_missing(self.settings):
                 write_last_error(MODEL_REMOVED_MSG)
                 logger.error("%s", MODEL_REMOVED_MSG)
+                disable_auto_start()
                 self.stop()
                 return
+            blocked = configured_unservable_reason(self.settings)
             crash = last_serve_error_line(self.log_path)
+            if blocked:
+                write_last_error(blocked)
+                logger.error("%s", blocked)
+                disable_auto_start()
+                self.stop()
+                return
             if crash:
-                write_last_error(crash)
+                write_last_error(humanize_serve_error(crash, model=hid) or crash)
+            if is_fatal_serve_crash(crash, model=hid):
+                logger.error("vllm serve fatal; not restarting: %s", crash)
+                disable_auto_start()
+                self.stop()
+                return
+            if self._restarts >= _MAX_CRASH_RESTARTS:
+                write_last_error(
+                    humanize_serve_error(crash, model=hid)
+                    or f"vllm serve crashed {self._restarts} times — Stop, then Use another model"
+                )
+                logger.error("vllm serve restart budget exhausted")
+                disable_auto_start()
+                self.stop()
+                return
             backoff = _RESTART_BACKOFF_S[min(self._restarts, len(_RESTART_BACKOFF_S) - 1)]
             logger.warning("vllm serve exited rc=%s; restart #%s in %ss",
                            rc, self._restarts + 1, backoff)
@@ -306,6 +399,7 @@ class VllmSupervisor:
             if configured_cache_missing(self.settings):
                 write_last_error(MODEL_REMOVED_MSG)
                 logger.error("%s", MODEL_REMOVED_MSG)
+                disable_auto_start()
                 self.stop()
                 return
             self._restarts += 1
@@ -315,9 +409,11 @@ class VllmSupervisor:
                 clear_last_error()
             except Exception as exc:  # noqa: BLE001
                 logger.error("vllm serve restart failed: %s", exc)
-                write_last_error(str(exc))
-                if configured_cache_missing(self.settings):
-                    write_last_error(MODEL_REMOVED_MSG)
+                write_last_error(humanize_serve_error(str(exc), model=hid) or str(exc))
+                if configured_cache_missing(self.settings) or is_fatal_serve_crash(str(exc), model=hid):
+                    if configured_cache_missing(self.settings):
+                        write_last_error(MODEL_REMOVED_MSG)
+                    disable_auto_start()
                     self.stop()
                     return
 
