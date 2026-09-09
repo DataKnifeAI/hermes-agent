@@ -1044,7 +1044,7 @@ async def local_models_vllm_update():
     job = _job("vllm-update", "vLLM")
 
     def _run():
-        _step(job, "updating-venv", "Updating vLLM in the isolated environment")
+        _step(job, "updating-venv", "Updating vLLM")
         engine_mod.apply_vllm_update()
         _finish(job, "vLLM is up to date")
 

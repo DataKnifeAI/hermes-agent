@@ -85,6 +85,13 @@ function engineOf(status: LocalModelsStatus | null): LocalEngine {
   return status?.engine === 'vllm' ? 'vllm' : 'llamacpp'
 }
 
+function vllmLibraryEmpty(status: LocalModelsStatus): boolean {
+  // Cached HF weights (or a sized active row). A configured id with no
+  // cache is not a library — deleting every hub dir should look like a
+  // fresh engine, not a dead empty list.
+  return !(status.models ?? []).some(m => (m.size_bytes ?? 0) > 0)
+}
+
 function EngineSelect({
   disabled,
   engine,
@@ -180,6 +187,21 @@ export function LocalModelsSettings() {
   }, [refresh])
 
   const selectedEngine = engineOf(status)
+  const hadVllmLibrary = useRef(false)
+
+  useEffect(() => {
+    if (selectedEngine !== 'vllm' || !status) {
+      return
+    }
+
+    const empty = vllmLibraryEmpty(status)
+
+    if (hadVllmLibrary.current && empty) {
+      setConfigure(false)
+    }
+
+    hadVllmLibrary.current = !empty
+  }, [selectedEngine, status])
 
   useEffect(() => {
     if (selectedEngine !== 'vllm') {
@@ -437,7 +459,8 @@ export function LocalModelsSettings() {
   // view so its progress has a home even after a remount.
   const qJob = runningQuickstart ?? null
 
-  const needsSetup = engine === 'vllm' ? !status.runtime_installed : !status.runtime_installed || status.models.length === 0
+  const libraryEmpty = engine === 'vllm' ? vllmLibraryEmpty(status) : status.models.length === 0
+  const needsSetup = !status.runtime_installed || libraryEmpty
   const heroModel = catalog?.find(c => c.recommended && c.fits) ?? catalog?.find(c => c.fits) ?? null
 
   if (engine === 'vllm' && (vllmInstallJob || (needsSetup && !configure))) {

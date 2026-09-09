@@ -114,13 +114,26 @@ def _assert_isolated(target: Path) -> None:
     )
 
 
-def _stream(cmd: list[str], log_path: Path) -> None:
+def _uv_install_env() -> dict[str, str]:
+    """Don't inherit Hermes' project uv config (``exclude-newer = 14 days``).
+
+    Desktop ``serve`` cwd is the git checkout. Bare ``uv pip install`` then
+    reads ``pyproject.toml`` and silently skips a PyPI release newer than the
+    rolling cutoff — the Update button "succeeds" and vLLM stays put.
+    """
+    env = os.environ.copy()
+    env["UV_NO_CONFIG"] = "1"
+    return env
+
+
+def _stream(cmd: list[str], log_path: Path, *, cwd: Path | None = None,
+            env: dict[str, str] | None = None) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("vLLM install: %s", " ".join(cmd))
     with log_path.open("ab") as log:
         log.write(f"+ {' '.join(cmd)}\n".encode())
         log.flush()
-        proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=cwd, env=env)
     if proc.returncode != 0:
         raise RuntimeError(
             f"vLLM install command failed rc={proc.returncode} ({log_path}): {' '.join(cmd)}"
@@ -198,11 +211,13 @@ def _ninja_executable() -> Path:
     return venv_dir() / "bin" / "ninja"
 
 
-def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False) -> Path:
+def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False,
+                     version: str | None = None) -> Path:
     """Create the isolated venv if needed and pip-install ``vllm``. Returns the ``vllm`` exe.
 
     Uses ``uv`` when it is already on PATH (CUDA torch via ``--torch-backend=auto``).
     Otherwise stdlib ``venv`` + ``python -m pip``. Never installs into ``sys.prefix``.
+    ``version`` pins ``vllm==…`` (updates); empty means "latest the resolver can see".
     """
     creator = resolve_venv_python(python_pin)
     dest = venv_dir()
@@ -221,10 +236,15 @@ def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False) -> P
     _assert_isolated(py)
     need_wheels = not venv_ready() or upgrade or not _ninja_executable().is_file()
     if need_wheels:
-        packages = ["vllm", "ninja"]
+        spec = f"vllm=={version}" if (version or "").strip() else "vllm"
+        packages = [spec, "ninja"]
         if uv:
-            _stream([uv, "pip", "install", "--python", str(py),
-                     "--upgrade", *packages, "--torch-backend=auto"], log)
+            # --no-config + UV_NO_CONFIG + cwd outside the Hermes tree: see _uv_install_env.
+            _stream(
+                [uv, "--no-config", "pip", "install", "--python", str(py),
+                 "--upgrade", *packages, "--torch-backend=auto"],
+                log, cwd=dest.parent, env=_uv_install_env(),
+            )
         else:
             _stream([str(py), "-m", "pip", "install", "--upgrade", "pip"], log)
             _stream([str(py), "-m", "pip", "install", "--upgrade", *packages], log)

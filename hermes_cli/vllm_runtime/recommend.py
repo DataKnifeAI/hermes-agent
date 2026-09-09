@@ -5,9 +5,11 @@ CUDA driver via ctypes) so a driver/library mismatch that kills ``nvidia-smi``
 still sees the card. Host-independent math takes VRAM as data; callers that
 need a live GPU mark the test ``linux_only``.
 
-Recommend is a curated HF catalog: each row has a min-VRAM and a tool-parser.
-8–12 GB cards stay ``feasible: false`` at the 64k tool-loop floor — never a
-silent ctx shrink.
+Recommend is a curated HF catalog (llama.cpp Local Models' quality/speed/fit
+idea, retuned for vLLM): popular modern instruct checkpoints that vLLM
+actually serves — AWQ/FP8 or BF16 by VRAM tier, a real tool parser, 64k
+floor. 8–12 GB cards stay ``feasible: false`` at that floor — never a
+silent ctx shrink. No GGUF.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ MIN_CONTEXT = 65536  # Hermes tool-loop floor; never silently drop below this.
 _DEFAULT_MODEL = "solidrust/Hermes-3-Llama-3.1-8B-AWQ"
 _DEFAULT_SERVED = "hermes3:8b"
 _DEFAULT_PARSER = "hermes"
+# Parsers vLLM's OpenAI-compat /v1/chat/completions actually implements.
+TOOL_PARSERS = frozenset({"hermes", "llama3_json", "qwen3_xml", "qwen3_coder", "mistral"})
 
 
 @dataclass(frozen=True)
@@ -40,10 +44,12 @@ class VllmTier:
 
 # Highest matching tier wins. min_vram is a floor: recommend never returns a
 # row whose min exceeds probed total. Feasible rows use distinct HF ids.
+# 8–12 GB stay in the catalog so the pane can name a modern instruct build,
+# but feasible_at_64k is false (KV at the tool-loop floor does not fit).
 TIERS: tuple[VllmTier, ...] = (
     VllmTier(
-        "8gb", 8 * _GIB, 0.70, False, "awq", "fp8",
-        _DEFAULT_MODEL, _DEFAULT_SERVED, _DEFAULT_PARSER,
+        "8gb", 8 * _GIB, 0.70, False, "", "fp8",
+        "Qwen/Qwen3-4B-Instruct-2507", "qwen3:4b", _DEFAULT_PARSER,
     ),
     VllmTier(
         "12gb", 12 * _GIB, 0.70, False, "awq", "fp8",
@@ -51,15 +57,21 @@ TIERS: tuple[VllmTier, ...] = (
     ),
     VllmTier(
         "16gb", 16 * _GIB, 0.75, True, "awq", "fp8",
-        _DEFAULT_MODEL, _DEFAULT_SERVED, _DEFAULT_PARSER,
+        "Qwen/Qwen3-8B-AWQ", "qwen3:8b", _DEFAULT_PARSER,
     ),
     VllmTier(
-        "24gb", 24 * _GIB, 0.75, True, "", "",
-        "NousResearch/Hermes-3-Llama-3.1-8B", "hermes3:8b-bf16", _DEFAULT_PARSER,
+        "24gb", 24 * _GIB, 0.75, True, "awq", "fp8",
+        "Qwen/Qwen3-14B-AWQ", "qwen3:14b", _DEFAULT_PARSER,
     ),
     VllmTier(
         "40gb", 40 * _GIB, 0.80, True, "awq", "fp8",
-        "Qwen/Qwen2.5-32B-Instruct-AWQ", "qwen2.5:32b", _DEFAULT_PARSER,
+        "Qwen/Qwen3-32B-AWQ", "qwen3:32b", _DEFAULT_PARSER,
+    ),
+    VllmTier(
+        # Official FP8 checkpoint — vLLM reads quant from the repo; don't
+        # also pass --quantization fp8 (that flag is for on-the-fly casts).
+        "80gb", 80 * _GIB, 0.85, True, "", "fp8",
+        "Qwen/Qwen3.8-27B-FP8", "qwen3.8:27b", "qwen3_coder",
     ),
 )
 

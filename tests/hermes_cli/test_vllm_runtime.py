@@ -18,7 +18,7 @@ import pytest
 import yaml
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG
-from hermes_cli.vllm_runtime.recommend import MIN_CONTEXT, TIERS, recommend_vllm
+from hermes_cli.vllm_runtime.recommend import MIN_CONTEXT, TIERS, TOOL_PARSERS, recommend_vllm
 from hermes_cli.vllm_runtime.supervisor import serve_argv, vllm_settings
 
 
@@ -134,30 +134,37 @@ def test_recommend_vram_relationship_not_snapshot():
 def test_recommend_catalog_vram_and_parser_relationship():
     """Every catalog row has min-VRAM + tool-parser; recommend never picks a
     row whose min exceeds probed total; feasible GPUs get distinct HF ids;
-    8–12 GB stay infeasible without shrinking below 64k."""
+    8–12 GB stay infeasible without shrinking below 64k. No GGUF."""
     for tier in TIERS:
         assert tier.min_vram_bytes > 0
-        assert tier.tool_call_parser
+        assert tier.tool_call_parser in TOOL_PARSERS
         assert tier.max_model_len >= MIN_CONTEXT
         assert "/" in tier.model
+        assert "gguf" not in tier.model.lower()
+        assert tier.served_model_name
 
     feasible = [t for t in TIERS if t.feasible_at_64k]
+    assert feasible
     assert len({t.model for t in feasible}) == len(feasible)
 
-    for gib, should_fit in ((8, False), (12, False), (16, True), (24, True), (40, True)):
+    for gib in (8, 12):
         rec = recommend_vllm(total_bytes=gib * _GIB)
+        assert rec.feasible is False
         assert rec.max_model_len >= MIN_CONTEXT
-        if rec.tier is not None:
-            assert rec.tier.min_vram_bytes <= gib * _GIB
-        assert rec.feasible is should_fit
-        if rec.feasible:
-            assert rec.tool_call_parser
 
-    sixteen = recommend_vllm(total_bytes=16 * _GIB)
-    twenty_four = recommend_vllm(total_bytes=24 * _GIB)
-    forty = recommend_vllm(total_bytes=40 * _GIB)
-    assert sixteen.feasible and twenty_four.feasible and forty.feasible
-    assert len({sixteen.model, twenty_four.model, forty.model}) == 3
+    floor = min(t.min_vram_bytes for t in feasible)
+    picks: list[str] = []
+    for tier in feasible:
+        rec = recommend_vllm(total_bytes=tier.min_vram_bytes)
+        assert rec.max_model_len >= MIN_CONTEXT
+        assert rec.tier is not None
+        assert rec.tier.min_vram_bytes <= tier.min_vram_bytes
+        assert rec.feasible is (tier.min_vram_bytes >= floor)
+        assert rec.tool_call_parser in TOOL_PARSERS
+        assert rec.model == tier.model
+        assert "gguf" not in rec.model.lower()
+        picks.append(rec.model)
+    assert len(set(picks)) == len(picks)
 
 
 def test_recommend_libcuda_when_smi_missing(monkeypatch):
@@ -393,6 +400,88 @@ def test_ensure_venv_never_installs_into_hermes_prefix(tmp_path, monkeypatch):
         # pip/uv install target is the isolated dest, not Hermes site-packages.
         if "pip" in cmd or (len(cmd) > 1 and cmd[1] == "pip"):
             assert str(venv_mod.venv_dir()) in joined or str(venv_mod.venv_python()) in joined
+
+
+def test_uv_pip_install_ignores_project_exclude_newer(tmp_path, monkeypatch):
+    """Desktop serve cwd is the Hermes checkout; uv must not read its
+    ``exclude-newer = 14 days`` or Update silently keeps the old wheel."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(venv_mod, "resolve_venv_python", lambda pin="": str(Path(sys.executable)))
+    calls: list[list[str]] = []
+
+    def _fake_stream(cmd, log_path, cwd=None, env=None):
+        calls.append(list(cmd))
+        dest = venv_mod.venv_dir()
+        bin_dir = dest / ("Scripts" if sys.platform == "win32" else "bin")
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / ("python.exe" if sys.platform == "win32" else "python")).write_text("", encoding="utf-8")
+        exe = "vllm.exe" if sys.platform == "win32" else "vllm"
+        (bin_dir / exe).write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(venv_mod, "_stream", _fake_stream)
+    monkeypatch.setattr(venv_mod, "_assert_cuda", lambda py: None)
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda py: None)
+    monkeypatch.setattr(venv_mod.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    venv_mod.ensure_vllm_venv("", upgrade=True, version="0.28.0")
+    pip_cmds = [c for c in calls if "pip" in c]
+    assert pip_cmds
+    for cmd in pip_cmds:
+        assert "--no-config" in cmd
+        assert "vllm==0.28.0" in cmd
+
+
+def test_apply_vllm_update_refuses_silent_no_op(tmp_path, monkeypatch):
+    """A resolver that leaves the old tag behind must fail the job."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+    from hermes_cli.web_routers import local_models_engine as engine
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.vllm_settings",
+        lambda cfg: {"python": ""})
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+    monkeypatch.setattr(venv_mod, "latest_vllm_pypi_version", lambda: "0.28.0")
+    monkeypatch.setattr(venv_mod, "ensure_vllm_venv", lambda *a, **k: Path("/tmp/vllm"))
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda: "0.27.1")
+    monkeypatch.setattr(venv_mod, "install_log_path", lambda: home / "install.log")
+    with pytest.raises(RuntimeError, match="still 0.27.1"):
+        engine.apply_vllm_update()
+
+
+def test_apply_vllm_update_records_matching_pypi_tag(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+    from hermes_cli.web_routers import local_models_engine as engine
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.vllm_settings",
+        lambda cfg: {"python": ""})
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+    monkeypatch.setattr(venv_mod, "latest_vllm_pypi_version", lambda: "0.28.0")
+    monkeypatch.setattr(venv_mod, "ensure_vllm_venv", lambda *a, **k: Path("/tmp/vllm"))
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda: "0.28.0")
+    engine.apply_vllm_update()
+    remembered = venv_mod.read_version_check()
+    assert remembered["installed"] == "0.28.0"
+    assert remembered["update_available"] is False
 
 
 def test_pick_listen_port_never_shares_llamacpp_and_falls_back_when_busy():

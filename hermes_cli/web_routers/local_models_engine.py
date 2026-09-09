@@ -265,10 +265,23 @@ def check_vllm_update() -> dict[str, Any]:
 def apply_vllm_update() -> None:
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
-    from hermes_cli.vllm_runtime.venv import ensure_vllm_venv, installed_vllm_version, write_version_check
+    from hermes_cli.vllm_runtime.venv import (
+        ensure_vllm_venv,
+        install_log_path,
+        installed_vllm_version,
+        latest_vllm_pypi_version,
+        write_version_check,
+    )
 
     settings = vllm_settings(load_config())
-    ensure_vllm_venv(str(settings.get("python") or ""), upgrade=True)
+    latest = latest_vllm_pypi_version()
+    ensure_vllm_venv(str(settings.get("python") or ""), upgrade=True, version=latest or None)
     installed = installed_vllm_version()
-    if installed:
-        write_version_check(installed, installed)
+    if not installed:
+        raise RuntimeError(f"vLLM update finished but no version is installed. See {install_log_path()}")
+    remembered = write_version_check(installed, latest or installed)
+    if latest and remembered.get("update_available"):
+        raise RuntimeError(
+            f"vLLM is still {installed} after update (PyPI has {latest}). "
+            f"See {install_log_path()}"
+        )

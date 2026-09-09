@@ -654,7 +654,8 @@ describe('vLLM engine', () => {
       server_base_url: 'http://127.0.0.1:18435/v1',
       active_model_id: 'hermes3:8b',
       tag: '0.10.0',
-      venv_path: '/tmp/runtimes/vllm/.venv'
+      venv_path: '/tmp/runtimes/vllm/.venv',
+      models: [{ id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }]
     })
     renderPane()
 
@@ -692,6 +693,21 @@ describe('vLLM engine', () => {
       expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm')
     })
     expect(mocked.setLocalServer).not.toHaveBeenCalled()
+  })
+
+  it('falls back to first-time setup when the vLLM inventory is empty', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      runtime_installed: true,
+      venv_ready: true,
+      tag: '0.27.1',
+      models: []
+    })
+    renderPane()
+
+    expect(await screen.findByRole('button', { name: /set up for me/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /configure/i })).toBeTruthy()
+    expect(screen.queryByText('Local')).toBeNull()
   })
 
   it('surfaces occupancy copy on the vLLM pane', async () => {
