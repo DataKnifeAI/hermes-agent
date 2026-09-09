@@ -1169,7 +1169,22 @@ export const ja = defineLocale({
       deleteAction: 'モデルを削除',
       deleteConfirm: model => `${model} をディスクから削除しますか？`,
       deleted: model => `${model} を削除しました。`,
-      deleteFailed: '削除に失敗しました'
+      deleteFailed: '削除に失敗しました',
+      engineLabel: 'ローカルバックエンド',
+      engineLlama: 'llama.cpp',
+      engineVllm: 'vLLM',
+      vllmInstallTitle: 'vLLM をインストール',
+      vllmInstallDetail:
+        '隔離された Python 環境と vLLM ホイールをダウンロードします。サーバーは Hermes が起動・管理します——pip や vllm serve は不要です。',
+      vllmReadyTitle: 'vLLM 準備完了',
+      vllmReadyDetail: model =>
+        `${model} はこの GPU 向けのおすすめです。一度インストールし、Use で新しいチャットのデフォルトにします。`,
+      vllmUseAction: '使う',
+      vllmUseFailed: 'vLLM に切り替えられませんでした',
+      vllmUseDone: url => `新しいチャットは ${url} の vLLM を使います。`,
+      vllmRecommendFailed: 'この GPU 向けの vLLM モデルを選べませんでした',
+      vllmNotFeasible: reason => `この GPU ではまだ管理 vLLM を実行できません（${reason}）。`,
+      occupancyTitle: '別の LLM が GPU を使用中です'
     },
     providers: {
       connectAccount: 'アカウントを接続',

@@ -1123,7 +1123,22 @@ export const zhHant = defineLocale({
       deleteAction: '刪除模型',
       deleteConfirm: model => `從磁碟刪除 ${model}？`,
       deleted: model => `已刪除 ${model}。`,
-      deleteFailed: '刪除失敗'
+      deleteFailed: '刪除失敗',
+      engineLabel: '本機後端',
+      engineLlama: 'llama.cpp',
+      engineVllm: 'vLLM',
+      vllmInstallTitle: '安裝 vLLM',
+      vllmInstallDetail:
+        '下載隔離的 Python 環境與 vLLM 套件。Hermes 會啟動並管理伺服器——不必自行 pip 或執行 vllm serve。',
+      vllmReadyTitle: 'vLLM 已就緒',
+      vllmReadyDetail: model =>
+        `${model} 是此 GPU 的建議建置。安裝一次，再按「使用」設為新對話的預設模型。`,
+      vllmUseAction: '使用',
+      vllmUseFailed: '無法切換到 vLLM',
+      vllmUseDone: url => `新對話將使用 ${url} 上的 vLLM。`,
+      vllmRecommendFailed: '無法為此 GPU 選擇 vLLM 模型',
+      vllmNotFeasible: reason => `此 GPU 尚無法執行託管 vLLM（${reason}）。`,
+      occupancyTitle: '另一個 LLM 正在使用 GPU'
     },
     providers: {
       connectAccount: '連結帳號',

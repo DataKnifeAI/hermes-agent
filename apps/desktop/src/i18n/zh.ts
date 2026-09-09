@@ -1456,7 +1456,22 @@ export const zh: Translations = {
       deleteAction: '删除模型',
       deleteConfirm: model => `从磁盘删除 ${model}？`,
       deleted: model => `已删除 ${model}。`,
-      deleteFailed: '删除失败'
+      deleteFailed: '删除失败',
+      engineLabel: '本地后端',
+      engineLlama: 'llama.cpp',
+      engineVllm: 'vLLM',
+      vllmInstallTitle: '安装 vLLM',
+      vllmInstallDetail:
+        '下载隔离的 Python 环境和 vLLM 轮子。Hermes 会启动并管理服务器——无需自行 pip 或运行 vllm serve。',
+      vllmReadyTitle: 'vLLM 已就绪',
+      vllmReadyDetail: model =>
+        `${model} 是此 GPU 的推荐构建。安装一次，然后点「使用」设为新对话的默认模型。`,
+      vllmUseAction: '使用',
+      vllmUseFailed: '无法切换到 vLLM',
+      vllmUseDone: url => `新对话将使用 ${url} 上的 vLLM。`,
+      vllmRecommendFailed: '无法为此 GPU 选择 vLLM 模型',
+      vllmNotFeasible: reason => `此 GPU 尚无法运行托管 vLLM（${reason}）。`,
+      occupancyTitle: '另一个 LLM 正在占用 GPU'
     },
     providers: {
       connectAccount: '连接账号',

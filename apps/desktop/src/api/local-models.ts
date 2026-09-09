@@ -1,4 +1,10 @@
-import type { LocalCatalogModel, LocalHardware, LocalModelsStatus, LocalRuntimeJob } from '@/types/hermes'
+import type {
+  LocalCatalogModel,
+  LocalEngine,
+  LocalHardware,
+  LocalModelsStatus,
+  LocalRuntimeJob
+} from '@/types/hermes'
 
 import { hermesApi, profileScoped } from './client'
 
@@ -108,6 +114,51 @@ export function setLocalServer(action: 'start' | 'stop'): Promise<{ ok: boolean 
     body: { action },
     method: 'POST',
     path: '/api/local-models/server'
+  })
+}
+
+export function setLocalEngine(engine: LocalEngine): Promise<{ engine: LocalEngine; ok: boolean }> {
+  return hermesApi<{ engine: LocalEngine; ok: boolean }>({
+    ...profileScoped(),
+    body: { engine },
+    method: 'POST',
+    path: '/api/local-models/engine'
+  })
+}
+
+export interface VllmRecommend {
+  config: Record<string, number | string>
+  feasible: boolean
+  gpu_memory_utilization: number
+  kv_cache_dtype: string
+  max_model_len: number
+  model: string
+  quantization: string
+  reason: string
+  served_model_name: string
+  tier: null | string
+}
+
+export function getVllmRecommend(): Promise<VllmRecommend> {
+  return hermesApi<VllmRecommend>({
+    ...profileScoped(),
+    path: '/api/local-models/vllm/recommend'
+  })
+}
+
+export function installVllm(): Promise<{ job_id: string }> {
+  return hermesApi<{ job_id: string }>({
+    ...profileScoped(),
+    method: 'POST',
+    path: '/api/local-models/vllm/install'
+  })
+}
+
+export function useVllm(): Promise<{ base_url: string; ok: boolean }> {
+  return hermesApi<{ base_url: string; ok: boolean }>({
+    ...profileScoped(),
+    method: 'POST',
+    path: '/api/local-models/vllm/use'
   })
 }
 

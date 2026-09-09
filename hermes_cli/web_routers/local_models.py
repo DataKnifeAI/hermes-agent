@@ -35,6 +35,8 @@ from hermes_cli.local_runtime import (
     load_progress, presets, supervisor,
 )
 from hermes_cli.local_runtime.endpoint import _state_endpoint
+from hermes_cli.web_routers import local_models_engine as engine_mod
+from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,10 @@ class BrowsedDownloadBody(BaseModel):
 
 class SideloadBody(BaseModel):
     path: str                   # absolute path to a .gguf on this machine
+
+
+class EngineBody(BaseModel):
+    engine: str                 # "llamacpp" | "vllm"
 
 
 def _human_gb(n: int | float) -> str:
@@ -455,8 +461,11 @@ def _active_llamacpp_model_id() -> str | None:
 
 @router.get("/api/local-models/status")
 def local_models_status():
-    """Cheap, immediate: config state + installed runtime + staged models + supervisor state (GPU facts live
+    """Cheap, immediate: config state + the *selected* engine's server (GPU facts live
     in /hardware). Sync def on purpose: blocking urlopen/scans run in the threadpool."""
+    config = _load_config()
+    if engine_mod.configured_engine(config) == "vllm":
+        return engine_mod.vllm_status_fields(config)
     section = _runtime_section()
     configured_tag = section.get("tag") or binaries.default_tag()
     have = binaries.installed_tags()
@@ -470,6 +479,7 @@ def local_models_status():
     loaded, placement = ({}, {}) if running is None else _quiet(
         lambda: _loaded_models(running), ({}, {}), warn="loaded-models read failed: %r")
     return {
+        "engine": "llamacpp",
         "enabled": bool(section.get("enabled")), "tag": tag, "configured_tag": configured_tag,
         # Update pending = engine in use (enabled + something installed) and the configured tag
         # (pinned or release default) isn't on disk. The download is a button click, never automatic.
@@ -483,6 +493,12 @@ def local_models_status():
         "placement": placement,
         "models": [_staged_row(gguf) for gguf in bootstrap.staged_models()] if mdir.exists() else [],
         "models_dir": str(mdir),
+        "venv_ready": False,
+        "occupancy": [],
+        "occupancy_message": None,
+        "served_model_name": None,
+        "start_phase": None,
+        "last_error": None,
     }
 
 
@@ -583,6 +599,7 @@ def local_models_catalog():
     get. The row advertises the BEST build for this machine (highest quality fully on GPU at the 64K floor;
     else the smallest that works, spilled and priced). No entry is hidden; unaffordable models show WHY.
     Sync def: blocking I/O -> threadpool."""
+    engine_mod.refuse_llama_only()
     # Serve the in-memory catalog; a TTL-gated background fetch lands new entries for the next call
     # (day-0 models without an app release).
     catalog.refresh_catalog_soon()
@@ -646,6 +663,7 @@ def _restart_on_new_tag(job: Dict[str, Any], tag: str, previous: list) -> bool:
 
 @router.post("/api/local-models/runtime/install")
 async def local_models_runtime_install(body: RuntimeInstallBody):
+    engine_mod.refuse_llama_only()
     tag, backend = _runtime_target(body.backend)
     plan = _resolve_assets_or_400(tag, backend)
     job = _job("runtime-install", f"llama.cpp {tag} ({backend})")
@@ -684,6 +702,7 @@ def _download_target(model_id: str):
 @router.post("/api/local-models/download")
 async def local_models_download(body: ModelDownloadBody):
     """Accepts either a family id (downloads this machine's selected variant) or an exact variant model_id."""
+    engine_mod.refuse_llama_only()
     entry, variant = _download_target(body.model_id)
     if variant.model_id in bootstrap.staged_model_ids():
         return {"job_id": None, "already_downloaded": True, "model_id": variant.model_id}
@@ -699,6 +718,7 @@ async def local_models_download(body: ModelDownloadBody):
 async def local_models_delete(model_id: str):
     """Remove every split part plus private assets, then bounce the router off the request thread (deleting
     the active file mid-serve is exactly the stale state the refresh exists for)."""
+    engine_mod.refuse_llama_only()
     files = _variant_files_on_disk(model_id)
     if not files:
         raise HTTPException(status_code=404, detail="model not found")
@@ -733,6 +753,7 @@ async def local_models_quickstart(body: QuickstartBody):
     missing), make it the default. Each leg is the same code the individual routes run, so 'Configure' and
     quickstart can never disagree. Preflight rejects (no servable entry, engine too old) fail the POST
     synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress."""
+    engine_mod.refuse_llama_only()
     entry, variant = _quickstart_target(body, hardware.probe_budget(planning=True))
     tag, backend = _runtime_target()
     need_runtime = not binaries.installed_tags()
@@ -791,18 +812,22 @@ def _start_server() -> None:
     _start_local_server(_set_runtime_enabled(True), _SERVER_START_FAILED)
 
 
-_SERVER_ACTIONS = {"stop": _stop_server, "start": _start_server}
+_SERVER_ACTIONS = {"stop": engine_mod.stop_active_engine, "start": engine_mod.start_active_engine}
 
 
 @router.post("/api/local-models/server")
 async def local_models_server(body: ServerActionBody):
-    """Turn the local engine off (stop the server, free ALL GPU memory, disable auto-start) or back on. Unlike
-    per-model eject the off switch IS durable: the user said off, so boots stay off until they say on."""
+    """Turn the selected local engine off or on. Stops the other supervisor first on start.
+    OccupyingLlmError is returned to the client — never swallowed."""
     action = (body.action or "").strip().lower()
     if action not in _SERVER_ACTIONS:
         raise HTTPException(status_code=400, detail="action must be 'stop' or 'start'")
-    with _http_error(502):
+    try:
         await asyncio.to_thread(_SERVER_ACTIONS[action])
+    except OccupyingLlmError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True, "action": action}
 
 
@@ -811,6 +836,7 @@ async def local_models_server(body: ServerActionBody):
 def local_models_eject(body: ModelEjectBody):
     """Free a loaded model's GPU memory now; only demand (the next message) reloads it — residency v2 has no
     automatic loading anywhere. Sync def: the fallback path blocks on a 120s urlopen — threadpool, never the loop."""
+    engine_mod.refuse_llama_only()
     sup = bootstrap.get_supervisor()
     if sup is not None:
         with _http_error(502):
@@ -830,6 +856,7 @@ async def local_models_activate(body: ModelActivateBody):
     """Make a downloaded model the default for new chats: a config write via the same machinery as
     /api/model/set plus making sure the server is up. NO model loading (residency v2: models load on first
     inference; an empty router costs nothing). Kept as a job for UI continuity."""
+    engine_mod.refuse_llama_only()
     # Split variants stage under their first part — resolve like the other routes.
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")
@@ -869,6 +896,7 @@ async def local_models_job(job_id: str):
 @router.get("/api/local-models/search")
 async def local_models_search(q: str, limit: int = 20):
     """Full-text HF search over GGUF models — the firehose behind the curated catalog; fit pills come from /search/files."""
+    engine_mod.refuse_llama_only()
     if not q.strip():
         return {"hits": []}
     with _http_error(502, "Hugging Face search unavailable: "):
@@ -879,6 +907,7 @@ async def local_models_search(q: str, limit: int = 20):
 async def local_models_search_files(repo: str):
     """Servable GGUFs in one HF repo with a rough pre-download fit verdict per quant (file size + conservative
     fill-ins; the GGUF header refines it)."""
+    engine_mod.refuse_llama_only()
     with _http_error(502, f"Could not list {repo}: "):
         groups = await run_in_threadpool(hf_browse.priced_repo_files, repo, hardware.probe_budget(planning=True))
     return {"files": [dict(g.__dict__, paths=list(g.paths)) for g in groups]}
@@ -889,6 +918,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
     """Download an arbitrary HF GGUF into the managed models dir. Once landed it is a normal staged model (the
     post-download bounce regenerates presets from its real header); with no catalog entry it serves
     'unverified', capabilities answered from the live server only."""
+    engine_mod.refuse_llama_only()
     paths = [p for p in (body.paths or []) if p.lower().endswith(".gguf")]
     if not paths:
         raise HTTPException(status_code=422, detail="no .gguf files given")
@@ -915,6 +945,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
 async def local_models_sideload(body: SideloadBody):
     """Register a GGUF already on this machine: link it into the managed models dir (copy only when linking is
     impossible) and bounce the router. The original stays put; delete-from-Hermes removes only our link."""
+    engine_mod.refuse_llama_only()
     src = Path(body.path)
     if not src.is_file() or src.suffix.lower() != ".gguf":
         raise HTTPException(status_code=422, detail="Pick a .gguf model file")
@@ -931,3 +962,43 @@ async def local_models_sideload(body: SideloadBody):
             await run_in_threadpool(shutil.copyfile, src, dest)
     _refresh_runtime("post-sideload runtime refresh skipped")
     return {"ok": True, "model_id": dest.stem}
+
+
+# ── engine switch + vLLM (Install → Use) ─────────────────────
+@router.post("/api/local-models/engine")
+def local_models_set_engine(body: EngineBody):
+    """Bind the Local Models dropdown: persist engine, stop the other supervisor."""
+    return engine_mod.set_engine(body.engine)
+
+
+@router.get("/api/local-models/vllm/recommend")
+def local_models_vllm_recommend():
+    """VRAM-tier pick for managed vLLM (same helper as ``hermes local recommend``)."""
+    return engine_mod.recommend_payload()
+
+
+@router.post("/api/local-models/vllm/install")
+async def local_models_vllm_install():
+    """Isolated venv + wheel — same job pattern as llama runtime install."""
+    job = _job("vllm-install", "vLLM")
+
+    def _run():
+        _step(job, "installing-venv", "Installing the isolated vLLM environment")
+        engine_mod.apply_recommend_and_install()
+        _finish(job, "vLLM is ready to start")
+
+    _spawn_job(job, "lr-vllm-install", _run, fail_msg="vLLM install failed: %s")
+    return {"job_id": job["job_id"]}
+
+
+@router.post("/api/local-models/vllm/use")
+async def local_models_vllm_use():
+    """Start managed vLLM if needed, then point ``model.provider`` at the loopback URL."""
+    try:
+        await asyncio.to_thread(engine_mod.start_active_engine)
+        result = engine_mod.activate_vllm()
+    except OccupyingLlmError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result

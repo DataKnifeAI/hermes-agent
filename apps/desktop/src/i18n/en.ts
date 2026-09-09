@@ -1277,7 +1277,22 @@ export const en: Translations = {
       deleteAction: 'Delete model',
       deleteConfirm: model => `Delete ${model} from disk?`,
       deleted: model => `${model} deleted.`,
-      deleteFailed: 'Delete failed'
+      deleteFailed: 'Delete failed',
+      engineLabel: 'Local backend',
+      engineLlama: 'llama.cpp',
+      engineVllm: 'vLLM',
+      vllmInstallTitle: 'Install vLLM',
+      vllmInstallDetail:
+        'Downloads an isolated Python environment and the vLLM wheel. Hermes starts and manages the server — you never run pip or vllm serve.',
+      vllmReadyTitle: 'vLLM ready',
+      vllmReadyDetail: model =>
+        `${model} is the recommended build for this GPU. Install once, then Use to make it the default for new chats.`,
+      vllmUseAction: 'Use',
+      vllmUseFailed: 'Could not switch to vLLM',
+      vllmUseDone: url => `New chats use vLLM at ${url}.`,
+      vllmRecommendFailed: 'Could not pick a vLLM model for this GPU',
+      vllmNotFeasible: reason => `This GPU cannot run managed vLLM yet (${reason}).`,
+      occupancyTitle: 'Another LLM is using the GPU'
     },
     providers: {
       connectAccount: 'Connect an account',

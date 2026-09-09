@@ -136,7 +136,11 @@ export function runningModelDownloads(jobs: readonly LocalRuntimeJob[]): LocalRu
 }
 
 export function runningRuntimeInstall(jobs: readonly LocalRuntimeJob[]): LocalRuntimeJob | null {
-  return jobs.find(j => j.kind === 'runtime-install' && j.status === 'running') ?? null
+  return (
+    jobs.find(
+      j => (j.kind === 'runtime-install' || j.kind === 'vllm-install') && j.status === 'running'
+    ) ?? null
+  )
 }
 
 // One engine-update toast per app session: checked at boot (after the

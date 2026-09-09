@@ -1283,8 +1283,19 @@ export interface LocalModelLoadProgress {
   percent: number
 }
 
+export type LocalEngine = 'llamacpp' | 'vllm'
+
+export interface LocalOccupancyHit {
+  kind: string
+  detail: string
+  port?: null | number
+  pid?: null | number
+}
+
 export interface LocalModelsStatus {
   enabled: boolean
+  /** Selected local engine. Missing on older backends — treat as llama.cpp. */
+  engine?: LocalEngine
   tag: string
   configured_tag: string
   update_available: boolean
@@ -1299,6 +1310,13 @@ export interface LocalModelsStatus {
   placement?: Record<string, LocalModelPlacement>
   models: { id: string; size_bytes: number; size_label: string }[]
   models_dir: string
+  venv_ready?: boolean
+  occupancy?: LocalOccupancyHit[]
+  occupancy_message?: null | string
+  served_model_name?: null | string
+  start_phase?: null | string
+  last_error?: null | string
+  model?: null | string
 }
 
 export interface LocalHardware {
@@ -1346,7 +1364,7 @@ export interface LocalCatalogModel {
 
 export interface LocalRuntimeJob {
   job_id: string
-  kind: 'model-activate' | 'model-download' | 'quickstart' | 'runtime-install'
+  kind: 'model-activate' | 'model-download' | 'quickstart' | 'runtime-install' | 'vllm-install'
   target: string
   model_id: string | null
   status: 'running' | 'done' | 'error'

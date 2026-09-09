@@ -21,11 +21,16 @@ vi.mock('@/hermes', () => ({
   getLocalModelsJobs: vi.fn(),
   getLocalModelsStatus: vi.fn(),
   getLocalRuntimeJob: vi.fn(),
+  getVllmRecommend: vi.fn(),
   installLocalRuntime: vi.fn(),
+  installVllm: vi.fn(),
   listHFRepoFiles: vi.fn(),
   quickstartLocalModels: vi.fn(),
   searchHFModels: vi.fn(),
-  sideloadLocalModel: vi.fn()
+  setLocalEngine: vi.fn(),
+  setLocalServer: vi.fn(),
+  sideloadLocalModel: vi.fn(),
+  useVllm: vi.fn()
 }))
 
 import * as hermes from '@/hermes'
@@ -34,6 +39,7 @@ const mocked = vi.mocked(hermes)
 
 const BASE_STATUS: LocalModelsStatus = {
   enabled: true,
+  engine: 'llamacpp',
   tag: 'b10290',
   configured_tag: 'b10290',
   update_available: false,
@@ -45,6 +51,19 @@ const BASE_STATUS: LocalModelsStatus = {
   loaded_models: {},
   models: [],
   models_dir: 'C:/somewhere/models'
+}
+
+const VLLM_STATUS: LocalModelsStatus = {
+  ...BASE_STATUS,
+  engine: 'vllm',
+  tag: '',
+  configured_tag: '',
+  runtime_installed: false,
+  venv_ready: false,
+  occupancy: [],
+  occupancy_message: null,
+  served_model_name: 'hermes3:8b',
+  model: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ'
 }
 
 const BASE_HARDWARE: LocalHardware = {
@@ -128,6 +147,21 @@ beforeEach(() => {
   mocked.getLocalHardware.mockResolvedValue(BASE_HARDWARE)
   mocked.getLocalCatalog.mockResolvedValue({ models: [FITTING_MODEL, SPILLED_MODEL, REFUSED_MODEL] })
   mocked.getLocalModelsJobs.mockResolvedValue({ jobs: [] })
+  mocked.getVllmRecommend.mockResolvedValue({
+    config: {},
+    feasible: true,
+    gpu_memory_utilization: 0.75,
+    kv_cache_dtype: 'fp8',
+    max_model_len: 65536,
+    model: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+    quantization: 'awq',
+    reason: 'ok',
+    served_model_name: 'hermes3:8b',
+    tier: '24gb'
+  })
+  mocked.setLocalEngine.mockResolvedValue({ engine: 'vllm', ok: true })
+  mocked.installVllm.mockResolvedValue({ job_id: 'v1' })
+  mocked.useVllm.mockResolvedValue({ base_url: 'http://127.0.0.1:18435/v1', ok: true })
   $localRuntimeJobs.set([])
 })
 
@@ -552,5 +586,64 @@ describe('quickstart completion navigation', () => {
       $localRuntimeJobs.set([doneJob, { ...running, phase: 'done', status: 'done' }])
     })
     expect(routeProbe).toHaveBeenCalledWith('/')
+  })
+})
+
+describe('vLLM engine', () => {
+  it('does not call llama-only APIs while vLLM is selected', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue(VLLM_STATUS)
+    renderPane()
+
+    expect(await screen.findByLabelText(/local backend/i)).toBeTruthy()
+    await waitFor(() => {
+      expect(mocked.getLocalModelsStatus).toHaveBeenCalled()
+    })
+    expect(mocked.getLocalCatalog).not.toHaveBeenCalled()
+    expect(mocked.quickstartLocalModels).not.toHaveBeenCalled()
+    expect(mocked.sideloadLocalModel).not.toHaveBeenCalled()
+    expect(mocked.ejectLocalModel).not.toHaveBeenCalled()
+    expect(screen.queryByText('Qwen3.6 27B')).toBeNull()
+    expect(screen.queryByPlaceholderText(/search models/i)).toBeNull()
+  })
+
+  it('shows vLLM visibility and Install→Use, not GGUF widgets', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      runtime_installed: true,
+      venv_ready: true,
+      server_running: true,
+      server_base_url: 'http://127.0.0.1:18435/v1',
+      active_model_id: 'hermes3:8b'
+    })
+    renderPane()
+
+    expect(await screen.findByText(/hermes3:8b/i)).toBeTruthy()
+    expect(screen.getByText(/127\.0\.0\.1:18435/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /turn off/i })).toBeTruthy()
+    expect(screen.queryByText('Install the local runtime')).toBeNull()
+    expect(screen.queryByText('Qwen3.6 27B')).toBeNull()
+  })
+
+  it('writes the engine through setLocalEngine when the dropdown changes', async () => {
+    renderPane()
+    const picker = await screen.findByLabelText(/local backend/i)
+    fireEvent.change(picker, { target: { value: 'vllm' } })
+
+    await waitFor(() => {
+      expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm')
+    })
+  })
+
+  it('surfaces occupancy copy on the vLLM pane', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      runtime_installed: true,
+      venv_ready: true,
+      occupancy_message:
+        'Another LLM is already running (Ollama on http://127.0.0.1:11434). Stop it so managed vLLM can use the GPU.'
+    })
+    renderPane()
+
+    expect(await screen.findAllByText(/Another LLM is already running/)).not.toHaveLength(0)
   })
 })
