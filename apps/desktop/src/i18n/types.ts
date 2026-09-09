@@ -1031,6 +1031,7 @@ export interface Translations {
       recommendedReason: Record<string, string>
       downloaded: string
       downloadAction: (size: string) => string
+      downloadBare: string
       downloadProgress: (done: string, total: string) => string
       downloadDoneToast: (model: string) => string
       installDoneToast: string
@@ -1078,6 +1079,8 @@ export interface Translations {
       pillFitsGpu: string
       pillUsesRam: string
       pillTooBig: string
+      pillInstruct: string
+      pillTools: string
       browseTitle: string
       browseHint: string
       browsePlaceholder: string

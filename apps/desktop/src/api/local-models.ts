@@ -154,11 +154,30 @@ export function installVllm(): Promise<{ job_id: string }> {
   })
 }
 
-export function useVllm(): Promise<{ base_url: string; ok: boolean }> {
-  return hermesApi<{ base_url: string; ok: boolean }>({
+export interface VllmUseResult {
+  already_downloaded?: boolean
+  base_url?: string
+  job_id?: null | string
+  model?: string
+  needs_download?: boolean
+  ok: boolean
+}
+
+export function useVllm(model?: string): Promise<VllmUseResult> {
+  return hermesApi<VllmUseResult>({
     ...profileScoped(),
+    body: model ? { model } : {},
     method: 'POST',
     path: '/api/local-models/vllm/use'
+  })
+}
+
+export function downloadVllmModel(model: string): Promise<{ already_downloaded?: boolean; job_id: null | string; model: string }> {
+  return hermesApi<{ already_downloaded?: boolean; job_id: null | string; model: string }>({
+    ...profileScoped(),
+    body: { model },
+    method: 'POST',
+    path: '/api/local-models/vllm/download'
   })
 }
 
@@ -166,7 +185,10 @@ export interface VllmInventoryModel {
   active: boolean
   added_by_you?: boolean
   cached: boolean
+  capabilities?: string[]
   display_name: string
+  fit?: 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
+  fit_detail?: string
   fits?: boolean | null
   id: string
   min_vram_bytes?: number
@@ -241,6 +263,11 @@ export interface HFSearchHit {
   updated: string
   gated: boolean
   cached?: boolean
+  capabilities?: string[]
+  fit?: 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
+  fit_detail?: string
+  quantization?: string
+  recommended?: boolean
 }
 
 export interface HFFileGroup {

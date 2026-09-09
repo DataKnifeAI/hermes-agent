@@ -5,17 +5,135 @@ import { Button } from '@/components/ui/button'
 import { Tip } from '@/components/ui/tooltip'
 import {
   deleteVllmModel,
+  downloadVllmModel,
   type HFSearchHit,
+  type VllmInventoryModel,
   searchVllmModels,
-  setVllmModel,
-  type VllmInventoryModel
+  useVllm
 } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { Check, CheckCircle2, Loader2, Search, Trash2 } from '@/lib/icons'
-import { $localRuntimeJobs } from '@/store/local-runtime-jobs'
+import { Check, CheckCircle2, Cpu, Download, Loader2, Search, Trash2 } from '@/lib/icons'
+import { $localRuntimeJobs, runningDownloadFor, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
 import { notify, notifyError } from '@/store/notifications'
 
 import { ListRow, Pill, SettingsSection } from './primitives'
+
+type FitKind = 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
+
+function fitOf(model: { fit?: FitKind; fits?: boolean | null }): FitKind {
+  if (model.fit) {
+    return model.fit
+  }
+
+  if (model.fits === true) {
+    return 'fits-gpu'
+  }
+
+  if (model.fits === false) {
+    return 'too-big'
+  }
+
+  return 'unknown'
+}
+
+function fitRank(model: VllmInventoryModel): number {
+  const fit = fitOf(model)
+
+  if (fit === 'fits-gpu') {
+    return 0
+  }
+
+  if (fit === 'unknown' || fit === 'needs-ram') {
+    return 1
+  }
+
+  return 2
+}
+
+function downloadLabel(copy: { downloadAction: (size: string) => string; downloadBare: string }, size?: string) {
+  if (size && size !== '—') {
+    return copy.downloadAction(size)
+  }
+
+  return copy.downloadBare
+}
+
+function capabilityLabel(cap: string, copy: { pillInstruct: string; pillTools: string }): string {
+  if (cap === 'instruct') {
+    return copy.pillInstruct
+  }
+
+  if (cap === 'tools') {
+    return copy.pillTools
+  }
+
+  return cap.toUpperCase()
+}
+
+function VllmModelTags({
+  cached,
+  capabilities,
+  copy,
+  fit,
+  fitDetail,
+  recommended
+}: {
+  cached?: boolean
+  capabilities?: string[]
+  copy: {
+    browseFitUnknown: string
+    downloaded: string
+    pillFitsGpu: string
+    pillInstruct: string
+    pillTooBig: string
+    pillTools: string
+    pillUsesRam: string
+    recommended: string
+    vllmCachedPill: string
+  }
+  fit: FitKind
+  fitDetail?: string
+  recommended?: boolean
+}) {
+  return (
+    <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      {fit === 'too-big' ? (
+        <Tip label={fitDetail || copy.pillTooBig}>
+          <Pill tone="destructive">
+            <Cpu className="mr-1 size-3" />
+            {copy.pillTooBig}
+          </Pill>
+        </Tip>
+      ) : fit === 'needs-ram' ? (
+        <Tip label={fitDetail || copy.pillUsesRam}>
+          <Pill tone="warn">
+            <Cpu className="mr-1 size-3" />
+            {copy.pillUsesRam}
+          </Pill>
+        </Tip>
+      ) : fit === 'fits-gpu' ? (
+        <Tip label={fitDetail || copy.pillFitsGpu}>
+          <Pill tone="success">
+            <Cpu className="mr-1 size-3" />
+            {copy.pillFitsGpu}
+          </Pill>
+        </Tip>
+      ) : (
+        <Pill>
+          <Cpu className="mr-1 size-3" />
+          {copy.browseFitUnknown}
+        </Pill>
+      )}
+
+      {recommended && <Pill tone="primary">{copy.recommended}</Pill>}
+      {cached && <Pill>{copy.downloaded}</Pill>}
+
+      {(capabilities ?? []).map(cap => (
+        <Pill key={cap}>{capabilityLabel(cap, copy)}</Pill>
+      ))}
+    </span>
+  )
+}
 
 export function VllmModelsPane({
   models,
@@ -26,14 +144,23 @@ export function VllmModelsPane({
 }) {
   const { t } = useI18n()
   const copy = t.settings.localModels
+  const jobs = useStore($localRuntimeJobs)
   const [deleting, setDeleting] = useState<null | string>(null)
   const [setting, setSetting] = useState<null | string>(null)
+  const anyDownloadRunning = jobs.some(j => j.kind === 'model-download' && j.status === 'running')
 
   async function handleUse(model: VllmInventoryModel) {
     setSetting(model.id)
 
     try {
-      await setVllmModel(model.id)
+      const res = await useVllm(model.id)
+
+      if (res.job_id) {
+        watchLocalRuntimeJobs()
+
+        return
+      }
+
       notify({
         durationMs: 2_500,
         kind: 'success',
@@ -45,6 +172,22 @@ export function VllmModelsPane({
       notifyError(err, copy.vllmSetFailed)
     } finally {
       setSetting(null)
+    }
+  }
+
+  async function handleDownload(model: { id: string; display_name?: string }) {
+    try {
+      const res = await downloadVllmModel(model.id)
+
+      if (res.already_downloaded || !res.job_id) {
+        onChanged()
+
+        return
+      }
+
+      watchLocalRuntimeJobs()
+    } catch (err) {
+      notifyError(err, copy.downloadFailed(model.display_name || model.id))
     }
   }
 
@@ -66,18 +209,22 @@ export function VllmModelsPane({
     }
   }
 
+  const sorted = [...models].sort((a, b) => fitRank(a) - fitRank(b))
+
   return (
     <>
       <SettingsSection icon={Search} meta={`${models.length}`} title={copy.modelsTitle}>
         <div className="grid gap-1">
-          {models.map(model => {
+          {sorted.map(model => {
             const busy = setting === model.id
+            const dJob = runningDownloadFor(jobs, model.id)
+            const fit = fitOf(model)
+            const tooBig = fit === 'too-big'
 
             return (
               <ListRow
                 action={
                   <div className="flex items-center justify-end gap-2">
-                    {model.cached && <Pill>{copy.vllmCachedPill}</Pill>}
                     {model.active ? (
                       <Tip label={copy.activeDetail}>
                         <Pill tone="primary">
@@ -85,10 +232,20 @@ export function VllmModelsPane({
                           {copy.activePill}
                         </Pill>
                       </Tip>
-                    ) : (
+                    ) : model.cached ? (
                       <Button className={busy ? '[&_svg]:animate-spin' : undefined} disabled={Boolean(setting)} onClick={() => void handleUse(model)} size="sm">
                         {busy ? <Loader2 /> : <Check />}
                         {copy.useAction}
+                      </Button>
+                    ) : dJob ? undefined : (
+                      <Button
+                        disabled={tooBig || anyDownloadRunning}
+                        onClick={() => void handleDownload(model)}
+                        size="sm"
+                        variant="outline"
+                      >
+                        <Download />
+                        {downloadLabel(copy, model.size_label)}
                       </Button>
                     )}
                     {model.cached && (
@@ -105,6 +262,24 @@ export function VllmModelsPane({
                     )}
                   </div>
                 }
+                below={
+                  dJob ? (
+                    <div className="mt-2 grid gap-1">
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-(--ui-bg-tertiary)">
+                        <div
+                          className="h-full rounded-full bg-primary transition-[width] duration-300"
+                          style={{ width: `${Math.max(2, Math.min(100, dJob.percent ?? 2))}%` }}
+                        />
+                      </div>
+                      <p className="text-[0.68rem] text-muted-foreground">
+                        {dJob.detail || copy.downloadProgress(
+                          dJob.done_bytes ? `${(dJob.done_bytes / (1 << 30)).toFixed(1)} GB` : '—',
+                          dJob.total_bytes ? `${(dJob.total_bytes / (1 << 30)).toFixed(1)} GB` : '—'
+                        )}
+                      </p>
+                    </div>
+                  ) : undefined
+                }
                 description={
                   <>
                     <span className="font-mono text-[0.72rem]">{model.id}</span>
@@ -112,6 +287,13 @@ export function VllmModelsPane({
                     {model.size_label && model.size_label !== '—' && (
                       <span className="mt-1 block text-muted-foreground">{model.size_label}</span>
                     )}
+                    <VllmModelTags
+                      cached={model.cached}
+                      capabilities={model.capabilities}
+                      copy={copy}
+                      fit={fit}
+                      fitDetail={model.fit_detail}
+                    />
                   </>
                 }
                 key={model.id}
@@ -141,6 +323,7 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
   const [setting, setSetting] = useState<null | string>(null)
   const [error, setError] = useState<null | string>(null)
   const searchSeq = useRef(0)
+  const anyDownloadRunning = jobs.some(j => j.kind === 'model-download' && j.status === 'running')
 
   useEffect(() => {
     const q = query.trim()
@@ -181,8 +364,14 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
   const adopt = useCallback(
     (repo: string) => {
       setSetting(repo)
-      setVllmModel(repo)
-        .then(() => {
+      useVllm(repo)
+        .then(res => {
+          if (res.job_id) {
+            watchLocalRuntimeJobs()
+
+            return
+          }
+
           notify({
             durationMs: 3_000,
             kind: 'success',
@@ -195,6 +384,30 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
         .finally(() => setSetting(null))
     },
     [copy.activateDoneToast, copy.browseTitle, copy.vllmSetFailed, onChanged]
+  )
+
+  const startDownload = useCallback(
+    (repo: string) => {
+      downloadVllmModel(repo)
+        .then(r => {
+          if (r.already_downloaded) {
+            notify({ durationMs: 3_000, kind: 'info', message: copy.browseAlreadyDownloaded, title: copy.browseTitle })
+            onChanged()
+
+            return
+          }
+
+          watchLocalRuntimeJobs()
+          notify({
+            durationMs: 3_000,
+            kind: 'info',
+            message: copy.browseDownloadStarted.replace('{name}', repo),
+            title: copy.browseTitle
+          })
+        })
+        .catch((e: Error) => notifyError(e, copy.browseTitle))
+    },
+    [copy.browseAlreadyDownloaded, copy.browseDownloadStarted, copy.browseTitle, onChanged]
   )
 
   return (
@@ -225,33 +438,72 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
       )}
 
       <div className="grid gap-1">
-        {hits.map(hit => (
-          <ListRow
-            action={
-              <div className="flex items-center gap-2">
-                {hit.cached && <Pill>{copy.vllmCachedPill}</Pill>}
-                <Button
-                  disabled={Boolean(setting) || jobs.some(j => j.status === 'running')}
-                  onClick={() => adopt(hit.repo)}
-                  size="sm"
-                >
-                  {setting === hit.repo ? <Loader2 className="animate-spin" /> : <CheckCircle2 />}
-                  {copy.useAction}
-                </Button>
-              </div>
-            }
-            description={
-              <span>
-                {Intl.NumberFormat().format(hit.downloads)} {copy.browseDownloads}
-                {' · '}
-                {Intl.NumberFormat().format(hit.likes)} {copy.browseLikes}
-                {hit.gated ? ` · ${copy.browseGated}` : ''}
-              </span>
-            }
-            key={hit.repo}
-            title={<span className="font-mono text-[0.8rem]">{hit.repo}</span>}
-          />
-        ))}
+        {hits.map(hit => {
+          const dJob = runningDownloadFor(jobs, hit.repo)
+          const fit = hit.fit ?? 'unknown'
+          const tooBig = fit === 'too-big'
+
+          return (
+            <ListRow
+              action={
+                <div className="flex items-center gap-2">
+                  {hit.cached ? (
+                    <Button
+                      disabled={Boolean(setting) || jobs.some(j => j.status === 'running')}
+                      onClick={() => adopt(hit.repo)}
+                      size="sm"
+                    >
+                      {setting === hit.repo ? <Loader2 className="animate-spin" /> : <CheckCircle2 />}
+                      {copy.useAction}
+                    </Button>
+                  ) : dJob ? undefined : (
+                    <Button
+                      disabled={tooBig || anyDownloadRunning}
+                      onClick={() => startDownload(hit.repo)}
+                      size="sm"
+                      variant="outline"
+                    >
+                      <Download />
+                      {copy.downloadBare}
+                    </Button>
+                  )}
+                </div>
+              }
+              below={
+                dJob ? (
+                  <div className="mt-2 grid gap-1">
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-(--ui-bg-tertiary)">
+                      <div
+                        className="h-full rounded-full bg-primary transition-[width] duration-300"
+                        style={{ width: `${Math.max(2, Math.min(100, dJob.percent ?? 2))}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : undefined
+              }
+              description={
+                <>
+                  <span>
+                    {Intl.NumberFormat().format(hit.downloads)} {copy.browseDownloads}
+                    {' · '}
+                    {Intl.NumberFormat().format(hit.likes)} {copy.browseLikes}
+                    {hit.gated ? ` · ${copy.browseGated}` : ''}
+                  </span>
+                  <VllmModelTags
+                    cached={hit.cached}
+                    capabilities={hit.capabilities}
+                    copy={copy}
+                    fit={fit}
+                    fitDetail={hit.fit_detail}
+                    recommended={hit.recommended}
+                  />
+                </>
+              }
+              key={hit.repo}
+              title={<span className="font-mono text-[0.8rem]">{hit.repo}</span>}
+            />
+          )
+        })}
       </div>
     </SettingsSection>
   )

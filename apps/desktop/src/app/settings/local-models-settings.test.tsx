@@ -16,6 +16,7 @@ vi.mock('@/hermes', () => ({
   deleteLocalModel: vi.fn(),
   deleteVllmModel: vi.fn(),
   downloadBrowsedModel: vi.fn(),
+  downloadVllmModel: vi.fn(),
   downloadLocalModel: vi.fn(),
   ejectLocalModel: vi.fn(),
   getLocalCatalog: vi.fn(),
@@ -174,7 +175,10 @@ beforeEach(() => {
         active: true,
         added_by_you: false,
         cached: false,
+        capabilities: ['awq', 'instruct', 'tools'],
         display_name: 'hermes3:8b',
+        fit: 'fits-gpu',
+        fits: true,
         id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
         recommended: true,
         served_model_name: 'hermes3:8b',
@@ -183,6 +187,7 @@ beforeEach(() => {
       }
     ]
   })
+  mocked.downloadVllmModel.mockResolvedValue({ already_downloaded: false, job_id: 'vd1', model: 'x' })
   mocked.searchVllmModels.mockResolvedValue({ hits: [] })
   mocked.setVllmModel.mockResolvedValue({
     model: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
@@ -721,5 +726,149 @@ describe('vLLM engine', () => {
     renderPane()
 
     expect(await screen.findAllByText(/Another LLM is already running/)).not.toHaveLength(0)
+  })
+
+  it('shows fit / capability tags and Download then Use on vLLM catalog rows', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq', 'instruct'],
+          display_name: 'hermes3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+          recommended: true,
+          served_model_name: 'hermes3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        },
+        {
+          active: false,
+          added_by_you: false,
+          cached: false,
+          capabilities: ['awq'],
+          display_name: 'qwen3:32b',
+          fit: 'too-big',
+          fits: false,
+          id: 'Qwen/Qwen3-32B-AWQ',
+          recommended: false,
+          served_model_name: 'qwen3:32b',
+          size_bytes: 0,
+          size_label: '—'
+        },
+        {
+          active: false,
+          added_by_you: true,
+          cached: true,
+          capabilities: ['fp8'],
+          display_name: 'cached-fp8',
+          fit: 'unknown',
+          fits: null,
+          id: 'acme/mystery-fp8',
+          recommended: false,
+          served_model_name: 'mystery',
+          size_bytes: 2 * 2 ** 30,
+          size_label: '2.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByText('Fits your GPU')).toBeTruthy()
+    expect(screen.getByText('Too big for this machine')).toBeTruthy()
+    expect(screen.getByText('Fit unknown')).toBeTruthy()
+    expect(screen.getByText('Recommended')).toBeTruthy()
+    expect(screen.getAllByText('AWQ').length).toBeGreaterThan(0)
+    expect(screen.getByText('Instruct')).toBeTruthy()
+    expect(screen.getByText('FP8')).toBeTruthy()
+
+    const downloadFit = screen.getByRole('button', { name: /download · 5\.0 GB/i })
+    expect((downloadFit as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(downloadFit)
+    await waitFor(() => {
+      expect(mocked.downloadVllmModel).toHaveBeenCalledWith('solidrust/Hermes-3-Llama-3.1-8B-AWQ')
+    })
+
+    const tooBigDownload = screen.getByRole('button', { name: /^download$/i })
+    expect((tooBigDownload as HTMLButtonElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: /^use$/i }))
+    await waitFor(() => {
+      expect(mocked.useVllm).toHaveBeenCalledWith('acme/mystery-fp8')
+    })
+    expect(mocked.setVllmModel).not.toHaveBeenCalled()
+  })
+
+  it('tags vLLM Hugging Face hits with honest fit and capabilities', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({ models: [] })
+    mocked.searchVllmModels.mockResolvedValue({
+      hits: [
+        {
+          capabilities: ['awq', 'instruct'],
+          downloads: 9,
+          fit: 'fits-gpu',
+          gated: false,
+          likes: 2,
+          recommended: true,
+          repo: 'Qwen/Qwen3-8B-AWQ',
+          updated: '2026-01-01'
+        },
+        {
+          capabilities: [],
+          downloads: 1,
+          fit: 'unknown',
+          gated: false,
+          likes: 0,
+          repo: 'someone/mystery-weights',
+          updated: ''
+        },
+        {
+          cached: true,
+          capabilities: ['awq'],
+          downloads: 3,
+          fit: 'too-big',
+          gated: false,
+          likes: 0,
+          repo: 'Qwen/Qwen3-32B-AWQ',
+          updated: ''
+        }
+      ]
+    })
+
+    renderPane()
+    const box = await screen.findByPlaceholderText(/search models/i)
+    fireEvent.change(box, { target: { value: 'qwen' } })
+    await waitFor(() => {
+      expect(mocked.searchVllmModels).toHaveBeenCalledWith('qwen')
+    })
+
+    expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
+    expect(screen.getByText('Fits your GPU')).toBeTruthy()
+    expect(screen.getByText('Fit unknown')).toBeTruthy()
+    expect(screen.getByText('Too big for this machine')).toBeTruthy()
+    expect(screen.getByText('Recommended')).toBeTruthy()
+    expect(screen.getByText('Instruct')).toBeTruthy()
+    expect(screen.queryByText('someone/mystery-weights')).toBeTruthy()
+
+    const downloads = screen.getAllByRole('button', { name: /^download$/i })
+    expect(downloads.length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByRole('button', { name: /^use$/i })).toBeTruthy()
   })
 })

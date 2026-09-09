@@ -192,9 +192,10 @@ def start_active_engine() -> None:
     lm._start_local_server(cfg, lm._SERVER_START_FAILED)
 
 
-def apply_recommend_and_install() -> None:
+def apply_recommend_and_install(job: dict | None = None) -> None:
     from cli import save_config_value
     from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
     from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
@@ -205,6 +206,12 @@ def apply_recommend_and_install() -> None:
             save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
     ensure_vllm_venv(str(settings.get("python") or ""))
+    model = str(settings.get("model") or rec.model or "").strip()
+    if model:
+        if job is not None:
+            job["phase"] = "downloading"
+            job["detail"] = f"Downloading {model}"
+        ensure_hf_weights(model, job)
 
 
 def activate_vllm() -> dict[str, Any]:
@@ -231,6 +238,21 @@ def set_vllm_model(hf_id: str) -> dict[str, Any]:
 
     try:
         return apply_vllm_model(hf_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def repo_is_cached(hf_id: str) -> bool:
+    from hermes_cli.vllm_runtime.inventory import repo_is_cached as _cached
+
+    return _cached(hf_id)
+
+
+def download_vllm_weights(hf_id: str, job: dict | None = None) -> dict[str, Any]:
+    from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
+
+    try:
+        return ensure_hf_weights(hf_id, job)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

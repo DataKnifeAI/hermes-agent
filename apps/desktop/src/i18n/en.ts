@@ -1195,7 +1195,8 @@ export const en: Translations = {
         'least-painful-spilled': 'No model fits entirely in GPU memory here — this one runs best from system RAM.'
       } as Record<string, string>,
       downloaded: 'Downloaded',
-      downloadAction: size => `Download · ${size}`,
+      downloadAction: size => (size && size !== '—' ? `Download · ${size}` : 'Download'),
+      downloadBare: 'Download',
       downloadProgress: (done, total) => `Downloading ${done} of ${total}`,
       downloadDoneToast: model => `${model} is ready.`,
       installDoneToast: 'Local runtime installed and ready.',
@@ -1248,6 +1249,8 @@ export const en: Translations = {
       pillFitsGpu: 'Fits your GPU',
       pillUsesRam: 'Uses system RAM',
       pillTooBig: 'Too big for this machine',
+      pillInstruct: 'Instruct',
+      pillTools: 'Tools',
       browseTitle: 'Find more models',
       browseHint:
         'Search all of Hugging Face. Models you download here are sized to your machine automatically, but not tested by us.',
@@ -1281,12 +1284,12 @@ export const en: Translations = {
       engineLabel: 'Local backend',
       engineLlama: 'llama.cpp',
       engineVllm: 'vLLM',
-      vllmInstallTitle: 'Install vLLM',
+      vllmInstallTitle: 'Install the vLLM runtime',
       vllmInstallDetail:
-        'Downloads an isolated Python environment and the vLLM wheel. Hermes starts and manages the server — you never run pip or vllm serve.',
-      vllmReadyTitle: 'vLLM ready',
+        'Downloads the vLLM inference engine. Models you download run entirely on this machine — no account, nothing leaves your computer. Hermes starts and manages the server for you.',
+      vllmReadyTitle: 'vLLM runtime installed',
       vllmReadyDetail: model =>
-        `${model} is the recommended build for this GPU. Install once, then Use to make it the default for new chats.`,
+        `${model} is ready. Hermes starts and manages the server for you. Download a model, then Use to make it the default for new chats.`,
       vllmUseAction: 'Use',
       vllmUseFailed: 'Could not switch to vLLM',
       vllmUseDone: url => `New chats use vLLM at ${url}.`,
@@ -1294,19 +1297,19 @@ export const en: Translations = {
       vllmNotFeasible: reason => `This GPU cannot run managed vLLM yet (${reason}).`,
       occupancyTitle: 'Another LLM is using the GPU',
       vllmVersionMissing: 'vLLM is not installed yet.',
-      vllmVersionDetail: ver => `vLLM ${ver} is installed.`,
+      vllmVersionDetail: ver => `Running vLLM ${ver}.`,
       vllmCheckUpdate: 'Check for update',
       vllmCheckingUpdate: 'Checking…',
       vllmUpdateAvailable: (latest, current) =>
-        `vLLM ${latest} is on PyPI — you're on ${current}.`,
-      vllmUpToDate: ver => `vLLM ${ver} is the latest release on PyPI.`,
-      vllmCheckFailed: 'Could not check PyPI for a vLLM update',
-      vllmVenvDetail: path => `Isolated venv · ${path}`,
+        `A newer vLLM build (${latest}) is ready to install — you're on ${current}. Models keep working during the download.`,
+      vllmUpToDate: ver => `Running vLLM ${ver} — the latest release on PyPI.`,
+      vllmCheckFailed: 'Could not check for a vLLM engine update',
+      vllmVenvDetail: path => `Installed at ${path}`,
       vllmBrowseHint:
-        'Search Hugging Face for models vLLM can serve (safetensors / AWQ). Cached weights appear under Local.',
+        'Search Hugging Face. Models you download here are sized to your machine when we can tell, but not tested by us.',
       vllmBrowseNoHits: 'No Hugging Face models found.',
       vllmSetFailed: 'Could not set this as the local model',
-      vllmCachedPill: 'Cached'
+      vllmCachedPill: 'Downloaded'
     },
     providers: {
       connectAccount: 'Connect an account',

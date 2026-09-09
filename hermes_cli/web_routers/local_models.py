@@ -96,6 +96,10 @@ class VllmModelBody(BaseModel):
     model: str                  # Hugging Face org/name id
 
 
+class VllmUseBody(BaseModel):
+    model: str | None = None    # optional HF id; download-if-needed then start
+
+
 def _human_gb(n: int | float) -> str:
     return f"{n / (1 << 30):.1f} GB"
 
@@ -987,8 +991,8 @@ async def local_models_vllm_install():
     job = _job("vllm-install", "vLLM")
 
     def _run():
-        _step(job, "installing-venv", "Installing the isolated vLLM environment")
-        engine_mod.apply_recommend_and_install()
+        _step(job, "installing-venv", "Installing vLLM")
+        engine_mod.apply_recommend_and_install(job)
         _finish(job, "vLLM is ready to start")
 
     _spawn_job(job, "lr-vllm-install", _run, fail_msg="vLLM install failed: %s")
@@ -996,8 +1000,33 @@ async def local_models_vllm_install():
 
 
 @router.post("/api/local-models/vllm/use")
-async def local_models_vllm_use():
-    """Start managed vLLM if needed, then point ``model.provider`` at the loopback URL."""
+async def local_models_vllm_use(body: VllmUseBody | None = None):
+    """Set the HF id (optional), download weights if they are not cached, then start.
+
+    No ``model`` in the body keeps the historical start-only path (``vllm serve``
+    may still pull weights on first boot). Passing a model is download-then-load.
+    """
+    hid = ((body.model if body else None) or "").strip() or None
+    if hid:
+        engine_mod.set_vllm_model(hid)
+        if not engine_mod.repo_is_cached(hid):
+            job = _job("model-download", hid, model_id=hid)
+
+            def _run():
+                engine_mod.download_vllm_weights(hid, job)
+                engine_mod.set_vllm_model(hid)
+                engine_mod.start_active_engine()
+                engine_mod.activate_vllm()
+                _finish(job, f"{hid} is the default for new chats")
+
+            _spawn_job(job, "lr-vllm-use", _run, fail_msg="vLLM use failed: %s")
+            return {
+                "ok": True,
+                "job_id": job["job_id"],
+                "model": hid,
+                "needs_download": True,
+                "already_downloaded": False,
+            }
     try:
         await asyncio.to_thread(engine_mod.start_active_engine)
         result = engine_mod.activate_vllm()
@@ -1005,7 +1034,28 @@ async def local_models_vllm_use():
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    result["needs_download"] = False
+    result["already_downloaded"] = True
+    if hid:
+        result["model"] = hid
     return result
+
+
+@router.post("/api/local-models/vllm/download")
+async def local_models_vllm_download(body: VllmModelBody):
+    """Prefetch HF weights into the hub cache. Same ``model-download`` job the pane polls."""
+    hid = (body.model or "").strip()
+    if not hid or "/" not in hid:
+        raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
+    if engine_mod.repo_is_cached(hid):
+        return {"job_id": None, "already_downloaded": True, "model": hid}
+    job = _job("model-download", hid, model_id=hid)
+
+    def _fetch():
+        engine_mod.download_vllm_weights(hid, job)
+
+    _spawn_job(job, "lr-vllm-download", _fetch, download_label=hid)
+    return {"job_id": job["job_id"], "already_downloaded": False, "model": hid}
 
 
 @router.get("/api/local-models/vllm/models")

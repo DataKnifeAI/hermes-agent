@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import urllib.parse
 import urllib.request
@@ -19,6 +20,21 @@ logger = logging.getLogger(__name__)
 
 _HF = "https://huggingface.co"
 _TIMEOUT_S = 15
+_PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)[Bb](?:\b|[^a-zA-Z]|$)")
+# Bytes/param including a small framework overhead. Missing quant → no guess
+# (unknown fit beats a lying "Fits your GPU").
+_QUANT_BYTES = {
+    "awq": 0.55,
+    "gptq": 0.55,
+    "int4": 0.55,
+    "fp8": 1.1,
+    "int8": 1.1,
+    "bf16": 2.2,
+    "fp16": 2.2,
+}
+_SKIP_DOWNLOAD_SUFFIX = frozenset({
+    ".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".html", ".txt",
+})
 
 
 def hf_hub_dir() -> Path:
@@ -89,6 +105,175 @@ def cached_repo_ids() -> set[str]:
     return {r["id"] for r in list_cached_repos()}
 
 
+def repo_is_cached(repo: str) -> bool:
+    return (repo or "").strip() in cached_repo_ids()
+
+
+def parse_param_billions(text: str) -> float | None:
+    """Last ``Nb`` / ``N.NB`` token in an HF id — ``Qwen3.8-27B`` → 27, not 3.8."""
+    hits = _PARAM_RE.findall(text or "")
+    if not hits:
+        return None
+    try:
+        return float(hits[-1])
+    except ValueError:
+        return None
+
+
+def parse_quantization(repo: str, tags: list[str] | None = None) -> str | None:
+    blob = f"{repo} {' '.join(tags or [])}".lower()
+    for name in ("awq", "gptq", "fp8", "int4", "int8", "bf16", "fp16"):
+        if name in blob:
+            return name
+    return None
+
+
+def estimate_min_vram_bytes(params_b: float, quant: str) -> int:
+    """Conservative 64k-floor VRAM from param count + known quant. Not a promise."""
+    bpp = _QUANT_BYTES.get(quant)
+    if bpp is None:
+        raise ValueError(f"unknown quant {quant}")
+    weight = int(params_b * 1_000_000_000 * bpp)
+    # KV + activations at the tool-loop floor: ~25% of weights, 2 GiB minimum.
+    reserve = max(2 * (1 << 30), int(weight * 0.25))
+    return weight + reserve
+
+
+def classify_vllm_repo(
+    repo: str,
+    *,
+    tags: list[str] | None = None,
+    total_vram: int = 0,
+    recommended_id: str = "",
+) -> dict[str, Any]:
+    """Fit / capability tags for a catalog row or HF search hit.
+
+    ``fit`` is ``fits-gpu``, ``too-big``, or ``unknown``. Unknown when param
+    size or quant cannot be read — never a green Fits badge on a guess.
+    """
+    from hermes_cli.vllm_runtime.recommend import TIERS
+
+    hid = (repo or "").strip()
+    tag_list = [str(t) for t in (tags or [])]
+    matched = next((t for t in TIERS if t.model == hid), None)
+    quant = (matched.quantization if matched and matched.quantization else None) or parse_quantization(hid, tag_list)
+    params_b = parse_param_billions(hid)
+    min_vram = 0
+    fit = "unknown"
+    if matched is not None:
+        min_vram = matched.min_vram_bytes
+        if total_vram > 0:
+            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
+    elif params_b is not None and quant is not None:
+        min_vram = estimate_min_vram_bytes(params_b, quant)
+        if total_vram > 0:
+            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
+    blob = f"{hid} {' '.join(tag_list)}".lower()
+    capabilities: list[str] = []
+    if quant in {"awq", "gptq", "fp8"}:
+        capabilities.append(quant)
+    if "instruct" in blob or "-chat" in blob or "chat-" in blob:
+        capabilities.append("instruct")
+    if matched is not None or "hermes" in blob or "tool" in blob:
+        if "instruct" not in capabilities and matched is not None:
+            capabilities.append("instruct")
+        if "tools" not in capabilities and (matched is not None or "hermes" in blob):
+            capabilities.append("tools")
+    return {
+        "fit": fit,
+        "fits": None if fit == "unknown" else fit == "fits-gpu",
+        "min_vram_bytes": min_vram,
+        "quantization": quant or "",
+        "capabilities": capabilities,
+        "recommended": bool(recommended_id and hid == recommended_id),
+        "fit_detail": (
+            f"Needs ~{_human_gb(min_vram)} GPU memory"
+            if min_vram else ""
+        ),
+    }
+
+
+def ensure_hf_weights(repo: str, job: dict | None = None) -> dict[str, Any]:
+    """Pull ``repo`` into the HF hub cache when missing. Tests patch ``download_hf_repo``."""
+    hid = (repo or "").strip()
+    if not hid or "/" not in hid:
+        raise ValueError("model must be an org/name Hugging Face id")
+    if hid in cached_repo_ids():
+        return {"id": hid, "already_downloaded": True}
+    download_hf_repo(hid, job)
+    return {"id": hid, "already_downloaded": False}
+
+
+def download_hf_repo(repo: str, job: dict | None = None) -> None:
+    """Write ``repo`` into the hub cache. Suite always monkeypatches this."""
+    hid = (repo or "").strip()
+    if job is not None:
+        job["phase"] = "downloading"
+        job["detail"] = f"Downloading {hid}"
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        snapshot_download = None
+    if snapshot_download is not None:
+        snapshot_download(repo_id=hid, cache_dir=str(hf_hub_dir()))
+        return
+    _download_hf_via_api(hid, job)
+
+
+def _download_hf_via_api(repo: str, job: dict | None = None) -> None:
+    """Hub-API fallback when ``huggingface_hub`` is not installed."""
+    info = _hf_json(f"{_HF}/api/models/{urllib.parse.quote(repo, safe='')}?blobs=true")
+    if not isinstance(info, dict):
+        raise RuntimeError(f"Hugging Face did not describe {repo}")
+    siblings = [s for s in (info.get("siblings") or []) if isinstance(s, dict) and s.get("rfilename")]
+    files = [
+        s for s in siblings
+        if Path(str(s["rfilename"])).suffix.lower() not in _SKIP_DOWNLOAD_SUFFIX
+    ]
+    if not files:
+        raise RuntimeError(f"{repo} has no downloadable model files")
+    total = sum(int(s.get("size") or 0) for s in files)
+    if job is not None:
+        job["total_bytes"] = total or None
+        job["done_bytes"] = 0
+    dest_root = hf_hub_dir() / _cache_name(repo) / "snapshots" / "main"
+    dest_root.mkdir(parents=True, exist_ok=True)
+    done = 0
+    for s in files:
+        name = str(s["rfilename"])
+        dest = dest_root / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() and dest.stat().st_size > 0:
+            done += int(s.get("size") or dest.stat().st_size)
+            if job is not None:
+                job["done_bytes"] = done
+            continue
+        url = f"{_HF}/{repo}/resolve/main/{urllib.parse.quote(name)}"
+        _http_download(url, dest, job, done)
+        done += int(s.get("size") or dest.stat().st_size)
+        if job is not None:
+            job["done_bytes"] = done
+
+
+def _http_download(url: str, dest: Path, job: dict | None, base_done: int) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": "hermes-local-models"})
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as fh:
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                if job is not None:
+                    job["done_bytes"] = base_done + fh.tell()
+        tmp.replace(dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def delete_cached_repo(repo: str) -> None:
     """Remove one HF repo's hub cache. Refuses paths outside the hub root."""
     repo = (repo or "").strip()
@@ -127,10 +312,15 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
     served = str(settings.get("served_model_name") or "").strip()
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
+    recommended_id = rec.tier.model if rec.tier else ""
+    vram = rec.probe.total_bytes or 0
 
     def _row(hf_id: str, *, display: str, recommended: bool, extra: dict | None = None) -> dict[str, Any]:
         hit = cached.get(hf_id) or {}
         size = int(hit.get("size_bytes") or 0)
+        tags = classify_vllm_repo(
+            hf_id, total_vram=vram, recommended_id=recommended_id,
+        )
         out = {
             "id": hf_id,
             "display_name": display,
@@ -140,6 +330,12 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
             "size_bytes": size,
             "size_label": hit.get("size_label") or ("—" if not size else _human_gb(size)),
             "active": bool(configured and hf_id == configured),
+            "fits": tags["fits"],
+            "fit": tags["fit"],
+            "fit_detail": tags["fit_detail"],
+            "min_vram_bytes": tags["min_vram_bytes"],
+            "quantization": tags["quantization"],
+            "capabilities": tags["capabilities"],
         }
         if extra:
             out.update(extra)
@@ -149,17 +345,11 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
         if tier.model in seen:
             continue
         seen.add(tier.model)
-        fits = rec.probe.total_bytes >= tier.min_vram_bytes if rec.probe.total_bytes else None
         rows.append(_row(
             tier.model,
             display=tier.served_model_name or tier.model.rsplit("/", 1)[-1],
             recommended=bool(rec.tier and rec.tier.model == tier.model),
-            extra={
-                "min_vram_bytes": tier.min_vram_bytes,
-                "quantization": tier.quantization,
-                "fits": fits,
-                "added_by_you": False,
-            },
+            extra={"added_by_you": False},
         ))
 
     extras = list(cached)
@@ -229,6 +419,11 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     cached = cached_repo_ids()
+    from hermes_cli.vllm_runtime.recommend import recommend_vllm
+
+    rec = recommend_vllm()
+    recommended_id = rec.tier.model if rec.tier else ""
+    vram = rec.probe.total_bytes or 0
     hits: list[dict[str, Any]] = []
     for m in raw:
         if not isinstance(m, dict):
@@ -239,6 +434,9 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
         tags = [str(t).lower() for t in (m.get("tags") or [])] if isinstance(m.get("tags"), list) else []
         if any("gguf" in t for t in tags):
             continue
+        classified = classify_vllm_repo(
+            repo, tags=tags, total_vram=vram, recommended_id=recommended_id,
+        )
         hits.append({
             "repo": repo,
             "downloads": int(m.get("downloads") or 0),
@@ -246,5 +444,10 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
             "updated": str(m.get("lastModified") or ""),
             "gated": bool(m.get("gated")),
             "cached": repo in cached,
+            "fit": classified["fit"],
+            "recommended": classified["recommended"],
+            "capabilities": classified["capabilities"],
+            "quantization": classified["quantization"],
+            "fit_detail": classified["fit_detail"],
         })
     return hits

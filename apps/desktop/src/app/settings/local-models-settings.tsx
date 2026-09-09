@@ -702,9 +702,9 @@ export function LocalModelsSettings() {
                 description={
                   status.update_available
                     ? copy.vllmUpdateAvailable(status.configured_tag, status.tag)
-                    : copy.vllmVersionDetail(status.tag)
+                    : copy.vllmUpToDate(status.tag)
                 }
-                title={status.tag ? `vLLM ${status.tag}` : copy.engineVllm}
+                title={status.update_available ? copy.updateTitle : copy.upToDateTitle}
               />
             )}
             {status.venv_path && (

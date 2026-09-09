@@ -1098,7 +1098,8 @@ export const ja = defineLocale({
           'GPU メモリに完全に収まるモデルはありません — システム RAM からの実行で最も快適なモデルです。'
       } as Record<string, string>,
       downloaded: 'ダウンロード済み',
-      downloadAction: size => `ダウンロード · ${size}`,
+      downloadAction: size => (size && size !== '—' ? `ダウンロード · ${size}` : 'ダウンロード'),
+      downloadBare: 'ダウンロード',
       downloadProgress: (done, total) => `ダウンロード中 ${done} / ${total}`,
       downloadDoneToast: model => `${model} の準備ができました。`,
       installDoneToast: 'ローカルランタイムのインストールが完了しました。',
@@ -1138,6 +1139,8 @@ export const ja = defineLocale({
       activateDoneToast: model => `新しいチャットは ${model} を使用します。`,
       downloadFailed: model => `${model} のダウンロードに失敗しました`,
       pillFitsGpu: 'GPU に完全に収まります',
+      pillInstruct: 'Instruct',
+      pillTools: 'ツール',
       pillUsesRam: 'システム RAM を使用',
       pillTooBig: 'このマシンには大きすぎます',
       browseTitle: 'さらにモデルを探す',
@@ -1173,12 +1176,12 @@ export const ja = defineLocale({
       engineLabel: 'ローカルバックエンド',
       engineLlama: 'llama.cpp',
       engineVllm: 'vLLM',
-      vllmInstallTitle: 'vLLM をインストール',
+      vllmInstallTitle: 'vLLM ランタイムをインストール',
       vllmInstallDetail:
-        '隔離された Python 環境と vLLM ホイールをダウンロードします。サーバーは Hermes が起動・管理します——pip や vllm serve は不要です。',
-      vllmReadyTitle: 'vLLM 準備完了',
+        'vLLM 推論エンジンをダウンロードします。ダウンロードしたモデルはこのマシンだけで動きます——アカウント不要、データは外に出ません。サーバーは Hermes が起動・管理します。',
+      vllmReadyTitle: 'vLLM ランタイム導入済み',
       vllmReadyDetail: model =>
-        `${model} はこの GPU 向けのおすすめです。一度インストールし、Use で新しいチャットのデフォルトにします。`,
+        `${model} の準備ができました。サーバーは Hermes が起動・管理します。モデルをダウンロードしてから「使用する」で新しいチャットのデフォルトにします。`,
       vllmUseAction: '使う',
       vllmUseFailed: 'vLLM に切り替えられませんでした',
       vllmUseDone: url => `新しいチャットは ${url} の vLLM を使います。`,
@@ -1186,19 +1189,19 @@ export const ja = defineLocale({
       vllmNotFeasible: reason => `この GPU ではまだ管理 vLLM を実行できません（${reason}）。`,
       occupancyTitle: '別の LLM が GPU を使用中です',
       vllmVersionMissing: 'まだ vLLM がインストールされていません。',
-      vllmVersionDetail: ver => `vLLM ${ver} をインストール済み。`,
+      vllmVersionDetail: ver => `vLLM ${ver} を実行中。`,
       vllmCheckUpdate: '更新を確認',
       vllmCheckingUpdate: '確認中…',
       vllmUpdateAvailable: (latest, current) =>
-        `PyPI に vLLM ${latest} があります——現在は ${current}。`,
-      vllmUpToDate: ver => `vLLM ${ver} は PyPI の最新リリースです。`,
-      vllmCheckFailed: 'PyPI で vLLM の更新を確認できませんでした',
-      vllmVenvDetail: path => `隔離 venv · ${path}`,
+        `新しい vLLM ビルド（${latest}）をインストールできます——現在は ${current} です。ダウンロード中もモデルは引き続き使えます。`,
+      vllmUpToDate: ver => `vLLM ${ver} を実行中——PyPI の最新リリースです。`,
+      vllmCheckFailed: 'vLLM エンジンの更新を確認できませんでした',
+      vllmVenvDetail: path => `インストール先 ${path}`,
       vllmBrowseHint:
-        'vLLM が扱えるモデル（safetensors / AWQ）を Hugging Face で検索します。キャッシュ済みの重みは「ローカル」に出ます。',
+        'Hugging Face を検索できます。ここでダウンロードしたモデルは分かる範囲でマシンに合わせますが、当方でのテストは行われていません。',
       vllmBrowseNoHits: 'Hugging Face モデルが見つかりません。',
       vllmSetFailed: 'このモデルをローカル既定にできませんでした',
-      vllmCachedPill: 'キャッシュ済み'
+      vllmCachedPill: 'ダウンロード済み'
     },
     providers: {
       connectAccount: 'アカウントを接続',
