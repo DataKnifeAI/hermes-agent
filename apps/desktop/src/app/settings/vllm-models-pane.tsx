@@ -58,13 +58,36 @@ function downloadLabel(copy: { downloadAction: (size: string) => string; downloa
   return copy.downloadBare
 }
 
-function capabilityLabel(cap: string, copy: { pillInstruct: string; pillTools: string }): string {
+function capabilityLabel(
+  cap: string,
+  copy: { pillInstruct: string; pillTools: string; pillVision: string }
+): string {
   if (cap === 'instruct') {
     return copy.pillInstruct
   }
 
   if (cap === 'tools') {
     return copy.pillTools
+  }
+
+  if (cap === 'vision') {
+    return copy.pillVision
+  }
+
+  if (cap === 'omni') {
+    return 'Omni'
+  }
+
+  if (cap === 'moe') {
+    return 'MoE'
+  }
+
+  if (cap === 'coding') {
+    return 'Coding'
+  }
+
+  if (cap === '32k' || cap === '64k' || cap === '128k') {
+    return cap
   }
 
   return cap.toUpperCase()
@@ -82,12 +105,14 @@ function VllmModelTags({
   capabilities?: string[]
   copy: {
     browseFitUnknown: string
+    browseFitUnknownHint: string
     downloaded: string
     pillFitsGpu: string
     pillInstruct: string
     pillTooBig: string
     pillTools: string
     pillUsesRam: string
+    pillVision: string
     recommended: string
     vllmCachedPill: string
   }
@@ -119,10 +144,12 @@ function VllmModelTags({
           </Pill>
         </Tip>
       ) : (
-        <Pill>
-          <Cpu className="mr-1 size-3" />
-          {copy.browseFitUnknown}
-        </Pill>
+        <Tip label={fitDetail || copy.browseFitUnknownHint}>
+          <Pill>
+            <Cpu className="mr-1 size-3" />
+            {copy.browseFitUnknown}
+          </Pill>
+        </Tip>
       )}
 
       {recommended && <Pill tone="primary">{copy.recommended}</Pill>}

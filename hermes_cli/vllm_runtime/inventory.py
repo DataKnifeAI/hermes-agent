@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 _HF = "https://huggingface.co"
 _TIMEOUT_S = 15
 _PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)[Bb](?:\b|[^a-zA-Z]|$)")
+# Qwen-style MoE ids put active experts after the total (``30B-A3B``).
+_ACTIVE_EXPERTS_RE = re.compile(r"A\d+(?:\.\d+)?B", re.I)
+_CTX_RE = re.compile(r"(?<![a-z0-9])(32|64|128|131)\s*k\b", re.I)
 # Bytes/param including a small framework overhead. Missing quant → no guess
 # (unknown fit beats a lying "Fits your GPU").
 _QUANT_BYTES = {
@@ -32,6 +35,52 @@ _QUANT_BYTES = {
     "bf16": 2.2,
     "fp16": 2.2,
 }
+_QUANT_TOKENS = (
+    ("awq", "awq"),
+    ("gptq", "gptq"),
+    ("fp8", "fp8"),
+    ("int4", "int4"),
+    ("4-bit", "int4"),
+    ("4bit", "int4"),
+    ("int8", "int8"),
+    ("8-bit", "int8"),
+    ("8bit", "int8"),
+    ("bf16", "bf16"),
+    ("fp16", "fp16"),
+)
+_SAFETENSORS_DTYPE = {
+    "BF16": "bf16",
+    "F16": "fp16",
+    "F8": "fp8",
+    "F8_E4M3": "fp8",
+    "F8_E5M2": "fp8",
+    "I8": "int8",
+    "U8": "int8",
+}
+# List/search ``expand`` — usedStorage is model_info-only and 400s the list API.
+_HF_SEARCH_EXPAND = (
+    "safetensors", "cardData", "config", "tags",
+    "downloads", "likes", "lastModified", "gated",
+    "pipeline_tag", "library_name",
+)
+_MIN_WEIGHT_BYTES = 100 << 20  # ignore tokenizer-only / empty cache dirs
+_MAX_CAPS = 5
+_TOOL_TAGS = frozenset({
+    "function calling", "function-calling", "function_calling",
+    "tool-use", "tool_use", "tool-calling", "tool_calling",
+    "tools", "tool",
+})
+_CODE_TAGS = frozenset({
+    "code", "coding", "coder", "code-generation", "codeqwen", "qwen-coder",
+})
+_VISION_TAGS = frozenset({
+    "vision", "image-text-to-text", "image-text", "multimodal",
+    "visual-question-answering",
+})
+_INSTRUCT_TAGS = frozenset({
+    "instruct", "instruction-tuned", "conversational", "chat",
+})
+_QUANT_CAP_ORDER = ("awq", "gptq", "fp8", "int4", "int8", "bf16", "fp16")
 _SKIP_DOWNLOAD_SUFFIX = frozenset({
     ".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".html", ".txt",
 })
@@ -110,8 +159,12 @@ def repo_is_cached(repo: str) -> bool:
 
 
 def parse_param_billions(text: str) -> float | None:
-    """Last ``Nb`` / ``N.NB`` token in an HF id — ``Qwen3.8-27B`` → 27, not 3.8."""
-    hits = _PARAM_RE.findall(text or "")
+    """Last ``Nb`` / ``N.NB`` token — ``Qwen3.8-27B`` → 27, not 3.8.
+
+    Skips MoE active-expert tokens (``30B-A3B`` → 30, not 3).
+    """
+    cleaned = _ACTIVE_EXPERTS_RE.sub(" ", text or "")
+    hits = _PARAM_RE.findall(cleaned)
     if not hits:
         return None
     try:
@@ -122,9 +175,24 @@ def parse_param_billions(text: str) -> float | None:
 
 def parse_quantization(repo: str, tags: list[str] | None = None) -> str | None:
     blob = f"{repo} {' '.join(tags or [])}".lower()
-    for name in ("awq", "gptq", "fp8", "int4", "int8", "bf16", "fp16"):
-        if name in blob:
-            return name
+    for token, quant in _QUANT_TOKENS:
+        if token in blob:
+            return quant
+    return None
+
+
+def param_billions_from_safetensors(safetensors: dict | None) -> float | None:
+    """``safetensors.total`` / summed ``parameters`` — param count, not file bytes."""
+    if not isinstance(safetensors, dict):
+        return None
+    total = safetensors.get("total")
+    if isinstance(total, (int, float)) and total >= 10_000_000:
+        return float(total) / 1_000_000_000
+    params = safetensors.get("parameters")
+    if isinstance(params, dict):
+        summed = sum(v for v in params.values() if isinstance(v, (int, float)))
+        if summed >= 10_000_000:
+            return float(summed) / 1_000_000_000
     return None
 
 
@@ -134,9 +202,133 @@ def estimate_min_vram_bytes(params_b: float, quant: str) -> int:
     if bpp is None:
         raise ValueError(f"unknown quant {quant}")
     weight = int(params_b * 1_000_000_000 * bpp)
+    return _vram_from_weight_bytes(weight)
+
+
+def _vram_from_weight_bytes(weight: int) -> int:
     # KV + activations at the tool-loop floor: ~25% of weights, 2 GiB minimum.
     reserve = max(2 * (1 << 30), int(weight * 0.25))
     return weight + reserve
+
+
+def _base_model_blob(card_data: dict | None) -> str:
+    if not isinstance(card_data, dict):
+        return ""
+    raw = card_data.get("base_model")
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        return " ".join(str(x) for x in raw if x)
+    return ""
+
+
+def _quant_from_config(config: dict | None) -> str | None:
+    if not isinstance(config, dict):
+        return None
+    qcfg = config.get("quantization_config")
+    if not isinstance(qcfg, dict):
+        return None
+    method = str(qcfg.get("quant_method") or "").lower()
+    bits = qcfg.get("bits")
+    if method in {"awq", "gptq", "fp8"}:
+        return method
+    if bits == 4:
+        return "int4"
+    if bits == 8:
+        return "int8"
+    return None
+
+
+def _quant_from_safetensors(safetensors: dict | None) -> str | None:
+    """Single-dtype packs only. I32+BF16 AWQ shards are not a unique dtype."""
+    if not isinstance(safetensors, dict):
+        return None
+    params = safetensors.get("parameters")
+    if not isinstance(params, dict) or not params:
+        return None
+    mapped = {_SAFETENSORS_DTYPE.get(str(k).upper()) for k in params}
+    mapped.discard(None)
+    if len(mapped) == 1:
+        return next(iter(mapped))
+    return None
+
+
+def _context_label(blob: str, config: dict | None) -> str | None:
+    ranks: list[tuple[int, str]] = []
+    max_pos = config.get("max_position_embeddings") if isinstance(config, dict) else None
+    if isinstance(max_pos, int) and max_pos >= 24_000:
+        if max_pos >= 100_000:
+            ranks.append((128, "128k"))
+        elif max_pos >= 48_000:
+            ranks.append((64, "64k"))
+        else:
+            ranks.append((32, "32k"))
+    for match in _CTX_RE.finditer(blob):
+        n = int(match.group(1))
+        ranks.append((128, "128k") if n >= 128 else (n, f"{n}k"))
+    if not ranks:
+        return None
+    return max(ranks, key=lambda item: item[0])[1]
+
+
+def _has_token(blob: str, token: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", blob))
+
+
+def _capability_tags(
+    *,
+    hid: str,
+    tag_list: list[str],
+    quant: str | None,
+    matched: Any,
+    config: dict | None,
+    pipeline_tag: str,
+) -> list[str]:
+    """HF tags / id tokens only — never a model-name hardcode (no 'hermes' → tools)."""
+    tags_l = {t.lower() for t in tag_list}
+    blob = f"{hid} {' '.join(tag_list)} {pipeline_tag}".lower()
+    caps: list[str] = []
+    if quant in _QUANT_CAP_ORDER:
+        caps.append(quant)
+    instruct = (
+        matched is not None
+        or bool(tags_l & _INSTRUCT_TAGS)
+        or "instruct" in blob
+        or "-chat" in blob
+        or "chat-" in blob
+    )
+    if instruct:
+        caps.append("instruct")
+    tools = matched is not None or bool(tags_l & _TOOL_TAGS)
+    if tools:
+        caps.append("tools")
+    vision = (
+        pipeline_tag.lower() in _VISION_TAGS
+        or bool(tags_l & _VISION_TAGS)
+        or "-vl-" in blob
+        or "-vision-" in blob
+    )
+    omni = _has_token(blob, "omni")
+    if omni:
+        caps.append("omni")
+    elif vision:
+        caps.append("vision")
+    moe = False
+    if isinstance(config, dict) and isinstance(config.get("num_experts"), int) and config["num_experts"] > 1:
+        moe = True
+    elif any("moe" in t.lower().replace("-", "_").split("_") for t in tag_list):
+        moe = True
+    elif "-moe-" in blob or blob.endswith("-moe"):
+        moe = True
+    if moe:
+        caps.append("moe")
+    ctx = _context_label(blob, config)
+    if ctx:
+        caps.append(ctx)
+    coding = bool(tags_l & _CODE_TAGS) or "-coder-" in blob or _has_token(blob, "coder")
+    if coding:
+        caps.append("coding")
+    return caps[:_MAX_CAPS]
 
 
 def classify_vllm_repo(
@@ -145,19 +337,35 @@ def classify_vllm_repo(
     tags: list[str] | None = None,
     total_vram: int = 0,
     recommended_id: str = "",
+    safetensors: dict | None = None,
+    card_data: dict | None = None,
+    config: dict | None = None,
+    weight_bytes: int = 0,
+    pipeline_tag: str = "",
 ) -> dict[str, Any]:
     """Fit / capability tags for a catalog row or HF search hit.
 
     ``fit`` is ``fits-gpu``, ``too-big``, or ``unknown``. Unknown when param
-    size or quant cannot be read — never a green Fits badge on a guess.
+    size *and* weight bytes are missing, or quant cannot be read — never a
+    green Fits badge on a guess.
     """
     from hermes_cli.vllm_runtime.recommend import TIERS
 
     hid = (repo or "").strip()
     tag_list = [str(t) for t in (tags or [])]
     matched = next((t for t in TIERS if t.model == hid), None)
-    quant = (matched.quantization if matched and matched.quantization else None) or parse_quantization(hid, tag_list)
-    params_b = parse_param_billions(hid)
+    quant = (
+        (matched.quantization if matched and matched.quantization else None)
+        or parse_quantization(hid, tag_list)
+        or _quant_from_config(config)
+        or _quant_from_safetensors(safetensors)
+    )
+    params_b = (
+        param_billions_from_safetensors(safetensors)
+        or parse_param_billions(hid)
+        or parse_param_billions(" ".join(tag_list))
+        or parse_param_billions(_base_model_blob(card_data))
+    )
     min_vram = 0
     fit = "unknown"
     if matched is not None:
@@ -168,17 +376,14 @@ def classify_vllm_repo(
         min_vram = estimate_min_vram_bytes(params_b, quant)
         if total_vram > 0:
             fit = "fits-gpu" if total_vram >= min_vram else "too-big"
-    blob = f"{hid} {' '.join(tag_list)}".lower()
-    capabilities: list[str] = []
-    if quant in {"awq", "gptq", "fp8"}:
-        capabilities.append(quant)
-    if "instruct" in blob or "-chat" in blob or "chat-" in blob:
-        capabilities.append("instruct")
-    if matched is not None or "hermes" in blob or "tool" in blob:
-        if "instruct" not in capabilities and matched is not None:
-            capabilities.append("instruct")
-        if "tools" not in capabilities and (matched is not None or "hermes" in blob):
-            capabilities.append("tools")
+    elif int(weight_bytes or 0) >= _MIN_WEIGHT_BYTES:
+        min_vram = _vram_from_weight_bytes(int(weight_bytes))
+        if total_vram > 0:
+            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
+    capabilities = _capability_tags(
+        hid=hid, tag_list=tag_list, quant=quant, matched=matched,
+        config=config, pipeline_tag=pipeline_tag or "",
+    )
     return {
         "fit": fit,
         "fits": None if fit == "unknown" else fit == "fits-gpu",
@@ -320,6 +525,7 @@ def catalog_models(config: dict | None = None) -> list[dict[str, Any]]:
         size = int(hit.get("size_bytes") or 0)
         tags = classify_vllm_repo(
             hf_id, total_vram=vram, recommended_id=recommended_id,
+            weight_bytes=size,
         )
         out = {
             "id": hf_id,
@@ -411,9 +617,11 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
     if not q:
         return []
     n = max(1, min(int(limit), 50))
+    expand = "".join(f"&expand={name}" for name in _HF_SEARCH_EXPAND)
     url = (
         f"{_HF}/api/models?search={urllib.parse.quote(q)}"
         f"&pipeline_tag=text-generation&sort=downloads&direction=-1&limit={n}"
+        f"{expand}"
     )
     raw = _hf_json(url)
     if not isinstance(raw, list):
@@ -432,10 +640,23 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
         if not repo or "gguf" in repo.lower():
             continue
         tags = [str(t).lower() for t in (m.get("tags") or [])] if isinstance(m.get("tags"), list) else []
+        card = m.get("cardData") if isinstance(m.get("cardData"), dict) else {}
+        extra = card.get("tags") if isinstance(card.get("tags"), list) else []
+        tags.extend(str(t).lower() for t in extra)
         if any("gguf" in t for t in tags):
             continue
+        safetensors = m.get("safetensors") if isinstance(m.get("safetensors"), dict) else None
+        config = m.get("config") if isinstance(m.get("config"), dict) else None
         classified = classify_vllm_repo(
-            repo, tags=tags, total_vram=vram, recommended_id=recommended_id,
+            repo,
+            tags=tags,
+            total_vram=vram,
+            recommended_id=recommended_id,
+            safetensors=safetensors,
+            card_data=card,
+            config=config,
+            weight_bytes=int(m.get("usedStorage") or 0),
+            pipeline_tag=str(m.get("pipeline_tag") or ""),
         )
         hits.append({
             "repo": repo,

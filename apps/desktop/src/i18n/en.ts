@@ -1264,6 +1264,8 @@ export const en: Translations = {
       browseGated: 'requires Hugging Face sign-in',
       browseNoGguf: 'No compatible model files found.',
       browseFitUnknown: 'Fit unknown',
+      browseFitUnknownHint:
+        'Hugging Face did not publish a parameter count and a known quantization, so Hermes will not guess whether this fits your GPU.',
       browseAlreadyDownloaded: 'Already downloaded.',
       addedByYou: 'Added by you',
       browseDownloadStarted: 'Downloading {name}',

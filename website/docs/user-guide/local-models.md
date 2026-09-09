@@ -59,6 +59,15 @@ foreign LLM (Ollama, LM Studio, a `vllm serve` you started yourself) —
 if another process is occupying the GPU, Desktop and `hermes local start`
 show that message and wait for you to stop it.
 
+vLLM **Find more models** search asks Hugging Face for `safetensors`,
+card, and tag metadata. **Fits your GPU** / **Too big** fire when a
+parameter count (id token, `safetensors.total`, or `base_model`) and a
+known quantization (AWQ/GPTQ/FP8/BF16, `4-bit` / `8-bit` tags, or a
+single safetensors dtype) are present. **Fit unknown** means that
+metadata is missing — Hermes will not guess. Capability pills
+(Instruct, Tools, quant, Vision/Omni, MoE, 32k/64k/128k, Coding) come
+from those HF tags, not from recognizing a model name.
+
 A remote GPU box is the same engine with a different host: point a custom
 endpoint at that OpenAI URL. Activate will not rewrite a non-loopback
 `model.base_url` to `127.0.0.1`.

@@ -874,7 +874,7 @@ describe('vLLM engine', () => {
           updated: '2026-01-01'
         },
         {
-          capabilities: [],
+          capabilities: ['vision', 'moe', '32k', 'coding'],
           downloads: 1,
           fit: 'unknown',
           gated: false,
@@ -908,6 +908,10 @@ describe('vLLM engine', () => {
     expect(screen.getByText('Too big for this machine')).toBeTruthy()
     expect(screen.getByText('Recommended')).toBeTruthy()
     expect(screen.getByText('Instruct')).toBeTruthy()
+    expect(screen.getByText('Sees images')).toBeTruthy()
+    expect(screen.getByText('MoE')).toBeTruthy()
+    expect(screen.getByText('32k')).toBeTruthy()
+    expect(screen.getByText('Coding')).toBeTruthy()
     expect(screen.queryByText('someone/mystery-weights')).toBeTruthy()
 
     const downloads = screen.getAllByRole('button', { name: /^download$/i })

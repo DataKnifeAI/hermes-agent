@@ -1093,6 +1093,7 @@ export interface Translations {
       browseGated: string
       browseNoGguf: string
       browseFitUnknown: string
+      browseFitUnknownHint: string
       browseAlreadyDownloaded: string
       addedByYou: string
       browseDownloadStarted: string

@@ -313,7 +313,8 @@ def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch
     hermes = next(h for h in search.json()["hits"] if "Hermes-3" in h["repo"])
     # 8B in the id, no quant on the card → unknown, never a lying Fits badge.
     assert hermes["fit"] == "unknown"
-    assert "tools" in hermes["capabilities"]
+    # Tools come from HF tags (function-calling), not the word Hermes in the id.
+    assert "tools" not in hermes["capabilities"]
 
 
 def test_switch_engine_then_status_still_shows_running_vllm(tmp_path, monkeypatch):
@@ -502,9 +503,11 @@ def test_vllm_search_fit_tags_never_lie(tmp_path, monkeypatch):
     tier = next(t for t in TIERS if t.id == "24gb")
     rec = VllmRecommendation(NvidiaProbe(24 * (1 << 30), 24 * (1 << 30), "data"), tier, True, "ok")
     monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
-    monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.inventory._hf_json",
-        lambda url: [
+    seen_urls: list[str] = []
+
+    def _fake_hf(url):
+        seen_urls.append(url)
+        return [
             {"id": "Qwen/Qwen3-8B-AWQ", "downloads": 9, "likes": 2,
              "lastModified": "", "gated": False, "tags": ["awq", "instruct"]},
             {"id": "Qwen/Qwen3-14B-AWQ", "downloads": 5, "likes": 1,
@@ -513,10 +516,18 @@ def test_vllm_search_fit_tags_never_lie(tmp_path, monkeypatch):
              "lastModified": "", "gated": False, "tags": []},
             {"id": "Qwen/Qwen3-32B-AWQ", "downloads": 3, "likes": 0,
              "lastModified": "", "gated": False, "tags": ["awq"]},
-        ])
+            {"id": "org/finetune-awq", "downloads": 2, "likes": 0,
+             "lastModified": "", "gated": False, "tags": ["awq", "4-bit"],
+             "safetensors": {"total": 8_000_000_000,
+                             "parameters": {"I32": 7_000_000_000, "BF16": 1_000_000_000}}},
+        ]
+
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory._hf_json", _fake_hf)
 
     search = client.get("/api/local-models/vllm/search?q=qwen")
     assert search.status_code == 200
+    assert seen_urls and "expand=safetensors" in seen_urls[0]
+    assert "expand=cardData" in seen_urls[0]
     by_repo = {h["repo"]: h for h in search.json()["hits"]}
     assert by_repo["Qwen/Qwen3-8B-AWQ"]["fit"] == "fits-gpu"
     assert "awq" in by_repo["Qwen/Qwen3-8B-AWQ"]["capabilities"]
@@ -526,6 +537,8 @@ def test_vllm_search_fit_tags_never_lie(tmp_path, monkeypatch):
     assert by_repo["Qwen/Qwen3-14B-AWQ"]["recommended"] is True
     assert by_repo["someone/mystery-weights"]["fit"] == "unknown"
     assert by_repo["Qwen/Qwen3-32B-AWQ"]["fit"] == "too-big"
+    # No 8B in the id — safetensors.total + AWQ tag still prices a 24 GB card.
+    assert by_repo["org/finetune-awq"]["fit"] == "fits-gpu"
 
 
 def _feasible_rec(monkeypatch, *, feasible=True):

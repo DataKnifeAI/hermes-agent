@@ -1443,6 +1443,8 @@ export const zh: Translations = {
       browseGated: '需要登录 Hugging Face',
       browseNoGguf: '未找到兼容的模型文件。',
       browseFitUnknown: '适配情况未知',
+      browseFitUnknownHint:
+        'Hugging Face 未提供参数量和已知量化信息，Hermes 不会猜测它是否适合你的 GPU。',
       browseAlreadyDownloaded: '已下载。',
       addedByYou: '由你添加',
       browseDownloadStarted: '正在下载 {name}',

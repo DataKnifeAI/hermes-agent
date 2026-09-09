@@ -1156,6 +1156,8 @@ export const ja = defineLocale({
       browseGated: 'Hugging Face へのサインインが必要',
       browseNoGguf: '互換性のあるモデルファイルが見つかりません。',
       browseFitUnknown: '適合状況は不明',
+      browseFitUnknownHint:
+        'Hugging Face がパラメータ数と既知の量子化を公開していないため、GPU に収まるかは推測しません。',
       browseAlreadyDownloaded: 'ダウンロード済みです。',
       addedByYou: 'あなたが追加',
       browseDownloadStarted: '{name} をダウンロード中',

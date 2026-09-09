@@ -1110,6 +1110,8 @@ export const zhHant = defineLocale({
       browseGated: '需要登入 Hugging Face',
       browseNoGguf: '未找到相容的模型檔案。',
       browseFitUnknown: '適配情況未知',
+      browseFitUnknownHint:
+        'Hugging Face 未提供參數量和已知量化資訊，Hermes 不會猜測它是否適合你的 GPU。',
       browseAlreadyDownloaded: '已下載。',
       addedByYou: '由你新增',
       browseDownloadStarted: '正在下載 {name}',
