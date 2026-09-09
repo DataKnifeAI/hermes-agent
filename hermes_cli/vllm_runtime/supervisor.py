@@ -25,6 +25,7 @@ from hermes_cli.vllm_runtime.venv import runtimes_root, vllm_executable
 logger = logging.getLogger(__name__)
 
 _RESTART_BACKOFF_S = (1, 5, 15, 60)
+MODEL_REMOVED_MSG = "model was removed — Download to use again"
 # llama.cpp's managed listen port — never share it. Sessions persist base_url per
 # engine; TIME_WAIT after a switch would also collide. Same reason llama.cpp
 # avoids 8000/8080.
@@ -36,6 +37,67 @@ _LOOPBACK = "127.0.0.1"
 
 def state_path() -> Path:
     return runtimes_root() / "server.json"
+
+
+def last_error_path() -> Path:
+    return runtimes_root() / "last_error.json"
+
+
+def write_last_error(message: str) -> None:
+    path = last_error_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"error": message}, ensure_ascii=False), encoding="utf-8")
+
+
+def read_last_error() -> str | None:
+    path = last_error_path()
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(raw, dict):
+        text = str(raw.get("error") or "").strip()
+        return text or None
+    return None
+
+
+def clear_last_error() -> None:
+    last_error_path().unlink(missing_ok=True)
+
+
+def configured_model_id(settings: dict | None) -> str:
+    return str((settings or {}).get("model") or "").strip()
+
+
+def configured_cache_missing(settings: dict | None) -> bool:
+    """True when a configured HF id is set but its hub cache dir is gone."""
+    hid = configured_model_id(settings)
+    if not hid:
+        return False
+    from hermes_cli.vllm_runtime.inventory import repo_is_cached
+
+    return not repo_is_cached(hid)
+
+
+def last_serve_error_line(log_path: Path | None = None) -> str | None:
+    """Last real error line from vllm-server.log — not a restart-loop breadcrumb."""
+    path = Path(log_path) if log_path else (runtimes_root() / "vllm-server.log")
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")[-12000:]
+    except OSError:
+        return None
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if "validationerror" in lower or "value error" in lower or "error:" in lower:
+            return stripped[-500:]
+    return None
 
 
 def vllm_settings(config: dict | None) -> dict:
@@ -161,6 +223,9 @@ class VllmSupervisor:
         env = os.environ.copy()
         bindir = str(Path(self.executable).parent)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        # Qwen3-8B-AWQ (the 16 GB shipped default) derives 40960; Hermes' tool
+        # loop is 64k. vLLM refuses the override unless this is set.
+        env.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
         self.proc = subprocess.Popen(
             cmd, stdout=self._log_handle, stderr=subprocess.STDOUT, env=env)
         logger.info("vllm serve spawned pid=%s port=%s", self.proc.pid, self.port)
@@ -168,8 +233,20 @@ class VllmSupervisor:
 
     def start(self, timeout_s: int = 120) -> None:
         self._stopping = False
-        self._spawn()
-        self._wait_ready(timeout_s)
+        if configured_cache_missing(self.settings):
+            write_last_error(MODEL_REMOVED_MSG)
+            raise RuntimeError(MODEL_REMOVED_MSG)
+        clear_last_error()
+        try:
+            self._spawn()
+            self._wait_ready(timeout_s)
+        except Exception:
+            crash = last_serve_error_line(self.log_path)
+            if configured_cache_missing(self.settings):
+                write_last_error(MODEL_REMOVED_MSG)
+            elif crash:
+                write_last_error(crash)
+            raise
         self._write_state()
         self._watchdog = threading.Thread(
             target=self._watch, daemon=True, name="vllm-supervisor")
@@ -212,16 +289,37 @@ class VllmSupervisor:
                 continue
             if self._stopping:
                 return
+            if configured_cache_missing(self.settings):
+                write_last_error(MODEL_REMOVED_MSG)
+                logger.error("%s", MODEL_REMOVED_MSG)
+                self.stop()
+                return
+            crash = last_serve_error_line(self.log_path)
+            if crash:
+                write_last_error(crash)
             backoff = _RESTART_BACKOFF_S[min(self._restarts, len(_RESTART_BACKOFF_S) - 1)]
             logger.warning("vllm serve exited rc=%s; restart #%s in %ss",
                            rc, self._restarts + 1, backoff)
             time.sleep(backoff)
+            if self._stopping:
+                return
+            if configured_cache_missing(self.settings):
+                write_last_error(MODEL_REMOVED_MSG)
+                logger.error("%s", MODEL_REMOVED_MSG)
+                self.stop()
+                return
             self._restarts += 1
             try:
                 self._spawn()
                 self._wait_ready(120)
+                clear_last_error()
             except Exception as exc:  # noqa: BLE001
                 logger.error("vllm serve restart failed: %s", exc)
+                write_last_error(str(exc))
+                if configured_cache_missing(self.settings):
+                    write_last_error(MODEL_REMOVED_MSG)
+                    self.stop()
+                    return
 
     def stop(self) -> None:
         self._stopping = True

@@ -48,6 +48,17 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
     require_gpu_free()
 
     settings = vllm_settings(config)
+    from hermes_cli.vllm_runtime.supervisor import (
+        MODEL_REMOVED_MSG, configured_cache_missing, configured_model_id,
+        write_last_error)
+
+    if not configured_model_id(settings):
+        logger.warning("managed vLLM has no configured model — not starting")
+        return None
+    if configured_cache_missing(settings):
+        write_last_error(MODEL_REMOVED_MSG)
+        logger.warning("%s", MODEL_REMOVED_MSG)
+        return None
     if executable is not None:
         exe_path = Path(executable)
     else:
@@ -103,7 +114,9 @@ def activate_vllm_provider(config: dict | None = None) -> str:
 
     cfg = config if config is not None else load_config()
     settings = vllm_settings(cfg)
-    served = str(settings.get("served_model_name") or "hermes3:8b")
+    from hermes_cli.vllm_runtime.recommend import _DEFAULT_SERVED
+
+    served = str(settings.get("served_model_name") or _DEFAULT_SERVED)
     sup = get_supervisor()
     if sup is not None:
         managed = sup.base_url

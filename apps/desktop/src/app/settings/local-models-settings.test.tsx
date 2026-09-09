@@ -914,4 +914,88 @@ describe('vLLM engine', () => {
     expect(downloads.length).toBeGreaterThanOrEqual(2)
     expect(screen.getByRole('button', { name: /^use$/i })).toBeTruthy()
   })
+
+  it('shows the llama.cpp engine-update icons for vLLM idle / available / current', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.28.0',
+      configured_tag: '0.28.0',
+      update_available: false,
+      venv_ready: true
+    })
+    renderPane()
+
+    expect(await screen.findByText('Engine up to date')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /check for update/i })).toBeTruthy()
+  })
+
+  it('shows Engine update available with the same update action as llama.cpp', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.27.1',
+      configured_tag: '0.28.0',
+      update_available: true,
+      venv_ready: true
+    })
+    renderPane()
+
+    expect(await screen.findByText('Engine update available')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /update engine/i })).toBeTruthy()
+  })
+
+  it('deleting the last vLLM model shows first-time setup and does not start a download', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: true,
+          added_by_you: false,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    mocked.deleteVllmModel.mockImplementation(async () => {
+      mocked.getLocalModelsStatus.mockResolvedValue({
+        ...VLLM_STATUS,
+        models: [],
+        runtime_installed: true,
+        tag: '0.10.0',
+        venv_ready: true,
+        last_error: 'model was removed — Download to use again'
+      })
+      mocked.getVllmModels.mockResolvedValue({ models: [] })
+      return { ok: true }
+    })
+    renderPane()
+
+    const trash = await screen.findByRole('button', { name: /delete model/i })
+    fireEvent.click(trash)
+    await waitFor(() => {
+      expect(mocked.deleteVllmModel).toHaveBeenCalledWith('Qwen/Qwen3-8B-AWQ')
+    })
+    expect(mocked.quickstartLocalModels).not.toHaveBeenCalled()
+    expect(mocked.downloadVllmModel).not.toHaveBeenCalled()
+    expect(await screen.findByRole('button', { name: /set up for me/i })).toBeTruthy()
+    confirm.mockRestore()
+  })
 })

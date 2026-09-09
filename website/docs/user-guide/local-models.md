@@ -151,8 +151,8 @@ local_runtime:
   tag: b10362        # pinned llama.cpp release; Hermes updates it with
                      # each release after re-validation
   vllm:              # written by Desktop / `hermes local` when engine is vllm
-    model: solidrust/Hermes-3-Llama-3.1-8B-AWQ
-    served_model_name: hermes3:8b
+    model: Qwen/Qwen3-8B-AWQ
+    served_model_name: qwen3:8b
     max_model_len: 65536
 ```
 

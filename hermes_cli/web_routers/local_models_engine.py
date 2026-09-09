@@ -43,6 +43,12 @@ def refuse_llama_only() -> None:
         raise HTTPException(status_code=400, detail=_LLAMA_ONLY_DETAIL)
 
 
+def _vllm_last_error() -> str | None:
+    from hermes_cli.vllm_runtime.supervisor import read_last_error
+
+    return read_last_error()
+
+
 def occupancy_payload() -> dict[str, Any]:
     from hermes_cli.vllm_runtime.occupancy import (
         discover_occupying_llms, occupancy_stop_message)
@@ -103,7 +109,7 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
         "served_model_name": served,
         "model": configured,
         "start_phase": None if running else _vllm_log_phase(),
-        "last_error": occ["occupancy_message"],
+        "last_error": occ["occupancy_message"] or _vllm_last_error(),
         **occ,
         "tag": versions.get("tag") or "",
         "configured_tag": versions.get("configured_tag") or "",
@@ -177,6 +183,12 @@ def start_active_engine() -> None:
             require_gpu_free()
         except OccupyingLlmError:
             raise
+        from hermes_cli.vllm_runtime.supervisor import (
+            MODEL_REMOVED_MSG, configured_cache_missing, vllm_settings, write_last_error)
+
+        if configured_cache_missing(vllm_settings(cfg)):
+            write_last_error(MODEL_REMOVED_MSG)
+            raise RuntimeError(MODEL_REMOVED_MSG)
         from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
 
         sup = ensure_vllm_runtime(cfg, force=True)
@@ -207,16 +219,19 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
     if hid:
         if "/" not in hid:
             raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
-    else:
-        if not rec.feasible or not (rec.model or "").strip():
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "this GPU cannot run managed vLLM at the 64k tool-loop floor — "
-                    "open Local Models to pick a smaller build"
-                ),
-            )
+    elif rec.feasible and (rec.model or "").strip():
         hid = rec.model
+    elif rec.reason == "no_nvidia" and (rec.model or "").strip():
+        # No probe: ship the 16 GB balanced id, not a 14B or stale Hermes-8B.
+        hid = rec.model
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this GPU cannot run managed vLLM at the 64k tool-loop floor — "
+                "open Local Models to pick a smaller build"
+            ),
+        )
     display = rec.served_model_name if rec.model == hid else hid.rsplit("/", 1)[-1]
     return {
         "model": hid,
@@ -354,14 +369,35 @@ def download_vllm_weights(hf_id: str, job: dict | None = None) -> dict[str, Any]
 
 
 def delete_vllm_model(hf_id: str) -> dict[str, Any]:
-    from hermes_cli.vllm_runtime.inventory import delete_cached_repo
+    """Remove HF cache for ``hf_id``. Never downloads, recommends, or starts serve.
 
+    If this was the configured model, stop the supervisor and drop the id so
+    an empty library shows first-time setup instead of re-pulling weights.
+    """
+    from cli import save_config_value
+    from hermes_cli.config import load_config
+    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.vllm_runtime.inventory import cached_repo_ids, delete_cached_repo
+    from hermes_cli.vllm_runtime.supervisor import (
+        MODEL_REMOVED_MSG, configured_model_id, vllm_settings, write_last_error)
+
+    hid = (hf_id or "").strip()
+    settings = vllm_settings(load_config())
+    was_configured = configured_model_id(settings) == hid
     try:
-        delete_cached_repo(hf_id)
+        delete_cached_repo(hid)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if was_configured:
+        stop_vllm_engine()
+        save_config_value("local_runtime.vllm.model", "")
+        save_config_value("local_runtime.vllm.served_model_name", "")
+        write_last_error(MODEL_REMOVED_MSG)
+        if not cached_repo_ids():
+            # Last library row: first-time setup UI, not an auto-boot of DEFAULT_CONFIG.
+            save_config_value("local_runtime.enabled", False)
     return {"ok": True}
 
 

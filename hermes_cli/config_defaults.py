@@ -2347,8 +2347,8 @@ DEFAULT_CONFIG = {
         "vllm": {
             "port": 0,
             "host": "127.0.0.1",
-            "model": "solidrust/Hermes-3-Llama-3.1-8B-AWQ",
-            "served_model_name": "hermes3:8b",
+            "model": "Qwen/Qwen3-8B-AWQ",
+            "served_model_name": "qwen3:8b",
             "max_model_len": 65536,
             "gpu_memory_utilization": 0.75,
             "quantization": "awq",

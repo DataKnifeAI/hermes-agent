@@ -131,7 +131,12 @@ def _boot_in_flight(config: dict | None) -> bool:
 
         if engine_from_config(config) != "vllm":
             return False
+        from hermes_cli.vllm_runtime.supervisor import (
+            configured_cache_missing, configured_model_id, vllm_settings)
         from hermes_cli.vllm_runtime.venv import venv_ready
 
+        settings = vllm_settings(config)
+        if not configured_model_id(settings) or configured_cache_missing(settings):
+            return False
         return venv_ready()
     return False

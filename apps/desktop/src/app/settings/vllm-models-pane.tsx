@@ -251,6 +251,7 @@ export function VllmModelsPane({
                     {model.cached && (
                       <Tip label={copy.deleteAction}>
                         <Button
+                          aria-label={copy.deleteAction}
                           className={deleting === model.id ? '[&_svg]:animate-spin' : undefined}
                           onClick={() => void handleDelete(model)}
                           size="icon"

@@ -43,6 +43,7 @@ import {
   Loader2,
   Monitor,
   Package,
+  RefreshCw,
   Search,
   StopFilled,
   Trash2,
@@ -540,9 +541,9 @@ export function LocalModelsSettings() {
               </div>
             )}
 
-            {(status.occupancy_message || lastError?.error) && (
+            {(status.occupancy_message || status.last_error || lastError?.error) && (
               <p className="mt-4 text-[0.75rem] text-destructive">
-                {status.occupancy_message ?? lastError?.error}
+                {status.occupancy_message ?? status.last_error ?? lastError?.error}
               </p>
             )}
           </div>
@@ -702,8 +703,8 @@ export function LocalModelsSettings() {
                 )
               }
               description={
-                status.occupancy_message
-                  ? status.occupancy_message
+                status.occupancy_message || status.last_error
+                  ? (status.occupancy_message ?? status.last_error)
                   : status.server_running
                     ? `${status.served_model_name ?? status.active_model_id ?? ''} · ${status.server_base_url ?? ''}`
                     : status.runtime_installed
@@ -723,7 +724,7 @@ export function LocalModelsSettings() {
                 action={
                   <div className="flex items-center gap-2">
                     <Button disabled={checkingUpdate} onClick={() => void handleVllmCheckUpdate()} size="sm" variant="outline">
-                      {checkingUpdate ? <Loader2 className="animate-spin" /> : null}
+                      {checkingUpdate ? <Loader2 className="animate-spin" /> : <RefreshCw />}
                       {checkingUpdate ? copy.vllmCheckingUpdate : copy.vllmCheckUpdate}
                     </Button>
                     {status.update_available && !rJob && (
@@ -739,7 +740,22 @@ export function LocalModelsSettings() {
                     ? copy.vllmUpdateAvailable(status.configured_tag, status.tag)
                     : copy.vllmUpToDate(status.tag)
                 }
-                title={status.update_available ? copy.updateTitle : copy.upToDateTitle}
+                title={
+                  <span className="inline-flex items-center gap-2">
+                    {checkingUpdate ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : status.update_available ? (
+                      <Download className="size-4" />
+                    ) : (
+                      <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
+                    )}
+                    {checkingUpdate
+                      ? copy.vllmCheckingUpdate
+                      : status.update_available
+                        ? copy.updateTitle
+                        : copy.upToDateTitle}
+                  </span>
+                }
               />
             )}
             {status.venv_path && (
@@ -769,8 +785,10 @@ export function LocalModelsSettings() {
                 }
               />
             )}
-            {status.occupancy_message && (
-              <p className="text-[0.75rem] text-destructive">{status.occupancy_message}</p>
+            {(status.occupancy_message || status.last_error) && (
+              <p className="text-[0.75rem] text-destructive">
+                {status.occupancy_message ?? status.last_error}
+              </p>
             )}
           </>
         ) : status.runtime_installed ? (

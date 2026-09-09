@@ -111,6 +111,23 @@ def test_serve_argv_loopback_and_hermes_tool_parser():
     assert remote[remote.index("--host") + 1] == "0.0.0.0"
 
 
+def test_shipped_default_is_smallest_64k_feasible_id():
+    """No-probe / DEFAULT_CONFIG use the 16 GB feasible row, not 14B or Hermes-8B."""
+    feasible = [t for t in TIERS if t.feasible_at_64k]
+    assert feasible
+    floor = min(t.min_vram_bytes for t in feasible)
+    default_tier = next(t for t in feasible if t.min_vram_bytes == floor)
+    shipped = DEFAULT_CONFIG["local_runtime"]["vllm"]["model"]
+    assert shipped == default_tier.model
+    assert shipped == recommend_vllm(total_bytes=0).model
+    assert "/" in shipped
+    roomy = recommend_vllm(total_bytes=24 * _GIB)
+    assert roomy.feasible is True
+    assert roomy.model != shipped
+    fits = [t for t in TIERS if t.min_vram_bytes <= 24 * _GIB]
+    assert roomy.model == max(fits, key=lambda t: t.min_vram_bytes).model
+
+
 def test_recommend_vram_relationship_not_snapshot():
     floor = min(t.min_vram_bytes for t in TIERS if t.feasible_at_64k)
     tight = recommend_vllm(total_bytes=8 * _GIB)
@@ -246,6 +263,11 @@ def test_ensure_vllm_runtime_fake_server(tmp_path, monkeypatch):
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
 
     fake = _write_fake_vllm(tmp_path / "fake-vllm")
+    hub = tmp_path / "hub"
+    cached = hub / "models--solidrust--Hermes-3-Llama-3.1-8B-AWQ"
+    cached.mkdir(parents=True)
+    (cached / "w.bin").write_bytes(b"x")
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     import hermes_cli.vllm_runtime.bootstrap as boot
 
     monkeypatch.setattr(boot, "_SUPERVISOR", None)
@@ -282,6 +304,75 @@ def test_ensure_vllm_runtime_fake_server(tmp_path, monkeypatch):
     finally:
         boot.shutdown_vllm_runtime()
         hermes_constants._default_hermes_root_memo = None
+
+
+def test_watch_stops_when_configured_cache_is_gone(tmp_path, monkeypatch):
+    """Deleted weights must halt `_watch`, not backoff-restart and re-pull."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    import hermes_constants
+    from hermes_cli.vllm_runtime.supervisor import (
+        MODEL_REMOVED_MSG, VllmSupervisor, read_last_error)
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19999)
+    fake = tmp_path / "vllm"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    spawned: list[str] = []
+    sup = VllmSupervisor(
+        {"model": "acme/gone-awq", "port": 19999},
+        executable=fake,
+        log_path=home / "runtimes" / "vllm" / "vllm-server.log",
+    )
+    monkeypatch.setattr(sup, "_spawn", lambda: spawned.append("spawn"))
+
+    class _Dead:
+        def poll(self):
+            return 1
+
+    sup.proc = _Dead()
+    sup._watch()
+    assert spawned == []
+    assert sup._stopping is True
+    assert read_last_error() == MODEL_REMOVED_MSG
+
+
+def test_start_refuses_when_configured_cache_is_gone(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    import hermes_constants
+    from hermes_cli.vllm_runtime.supervisor import (
+        MODEL_REMOVED_MSG, VllmSupervisor, read_last_error)
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19998)
+    fake = tmp_path / "vllm"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    spawned: list[str] = []
+    sup = VllmSupervisor(
+        {"model": "acme/gone-awq", "port": 19998},
+        executable=fake,
+        log_path=home / "runtimes" / "vllm" / "vllm-server.log",
+    )
+    monkeypatch.setattr(sup, "_spawn", lambda: spawned.append("spawn"))
+    with pytest.raises(RuntimeError, match="removed"):
+        sup.start(timeout_s=1)
+    assert spawned == []
+    assert read_last_error() == MODEL_REMOVED_MSG
 
 
 def test_inventory_lists_and_deletes_only_hf_cache(tmp_path, monkeypatch):

@@ -248,6 +248,55 @@ def test_vllm_list_set_delete_and_search_contracts(tmp_path, monkeypatch):
     missing = client.delete("/api/local-models/vllm/models/no/such-model")
     assert missing.status_code == 404
 
+
+def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch):
+    """Delete drops HF cache + configured id. It must not start a download or Set up."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "acme/doomed-awq"
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": hid, "served_model_name": "doomed",
+    }})
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--acme--doomed-awq"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"x" * 64)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    pulled: list[str] = []
+    started: list[str] = []
+    jobs: list[object] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo",
+        lambda repo, job=None: pulled.append(repo))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine",
+        lambda: started.append("start"))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.apply_recommend_and_install",
+        lambda *a, **k: started.append("recommend"))
+    monkeypatch.setattr(
+        "hermes_cli.local_engines.stop_vllm_engine",
+        lambda: started.append("stop"))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models._spawn_job",
+        lambda *a, **k: jobs.append(a))
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models._job",
+        lambda *a, **k: jobs.append(("job", a)))
+
+    gone = client.delete(f"/api/local-models/vllm/models/{hid}")
+    assert gone.status_code == 200, gone.text
+    assert not dest.exists()
+    assert pulled == []
+    assert jobs == []
+    assert started == ["stop"]
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import MODEL_REMOVED_MSG, read_last_error
+
+    cfg = load_config()
+    assert not (cfg["local_runtime"]["vllm"].get("model") or "").strip()
+    assert cfg["local_runtime"]["enabled"] is False
+    assert read_last_error() == MODEL_REMOVED_MSG
+
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.inventory._hf_json",
         lambda url: [
@@ -428,6 +477,9 @@ def test_vllm_download_job_and_cached_noop(tmp_path, monkeypatch):
 def test_vllm_install_downloads_recommended_weights(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
+    hub = tmp_path / "hf-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     pulled: list[str] = []
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
@@ -558,6 +610,30 @@ def test_vllm_quickstart_skips_satisfied_legs(tmp_path, monkeypatch):
     assert job["status"] == "done", job
     assert "download" not in calls
     assert calls[-2:] == ["start", "activate"] or calls[-1] == "activate"
+
+
+def test_vllm_quickstart_no_probe_uses_16gb_default(tmp_path, monkeypatch):
+    """Missing VRAM probe still plans the shipped 16 GB id — not a 409."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, VllmRecommendation, recommend_vllm
+
+    none = recommend_vllm(total_bytes=0)
+    rec = VllmRecommendation(NvidiaProbe(0, 0, "none", error="no_nvidia"), None, False, "no_nvidia")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.download_hf_repo", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: {"ok": True, "base_url": "http://127.0.0.1:9/v1"})
+    r = client.post("/api/local-models/quickstart", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["model_id"] == none.model
+    assert "/" in r.json()["model_id"]
 
 
 def test_vllm_quickstart_refuses_when_gpu_infeasible(tmp_path, monkeypatch):

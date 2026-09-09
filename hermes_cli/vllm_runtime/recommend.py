@@ -18,9 +18,14 @@ from dataclasses import dataclass
 
 _GIB = 1 << 30
 MIN_CONTEXT = 65536  # Hermes tool-loop floor; never silently drop below this.
-_DEFAULT_MODEL = "solidrust/Hermes-3-Llama-3.1-8B-AWQ"
-_DEFAULT_SERVED = "hermes3:8b"
+# Shipped / no-probe default: the smallest 64k-feasible catalog row (16 GB).
+# 24 GB probe still recommends the 14B tier; this id is first paint + config.yaml.
+_DEFAULT_MODEL = "Qwen/Qwen3-8B-AWQ"
+_DEFAULT_SERVED = "qwen3:8b"
 _DEFAULT_PARSER = "hermes"
+# 12 GB catalog row only — infeasible at 64k; not the shipped default.
+_12GB_MODEL = "solidrust/Hermes-3-Llama-3.1-8B-AWQ"
+_12GB_SERVED = "hermes3:8b"
 # Parsers vLLM's OpenAI-compat /v1/chat/completions actually implements.
 TOOL_PARSERS = frozenset({"hermes", "llama3_json", "qwen3_xml", "qwen3_coder", "mistral"})
 
@@ -53,7 +58,7 @@ TIERS: tuple[VllmTier, ...] = (
     ),
     VllmTier(
         "12gb", 12 * _GIB, 0.70, False, "awq", "fp8",
-        _DEFAULT_MODEL, _DEFAULT_SERVED, _DEFAULT_PARSER,
+        _12GB_MODEL, _12GB_SERVED, _DEFAULT_PARSER,
     ),
     VllmTier(
         "16gb", 16 * _GIB, 0.75, True, "awq", "fp8",
