@@ -1049,6 +1049,7 @@ export interface Translations {
       quickstartStageFinish: string
       useAction: string
       activePill: string
+      inUsePill: string
       updateTitle: string
       updateDetail: (next: string, current: string) => string
       updateAction: string

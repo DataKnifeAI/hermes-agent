@@ -1108,6 +1108,7 @@ export const ja = defineLocale({
       installDoneToast: 'ローカルランタイムのインストールが完了しました。',
       useAction: '使用する',
       activePill: 'デフォルト',
+      inUsePill: '使用中',
       updateTitle: 'エンジンの更新があります',
       updateDetail: (next, current) =>
         `新しい llama.cpp ビルド（${next}）をインストールできます——現在は ${current} です。ダウンロード中もモデルは引き続き使えます。`,

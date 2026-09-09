@@ -1309,6 +1309,9 @@ describe('vLLM engine', () => {
     renderPane()
 
     expect(await screen.findByRole('button', { name: /^use$/i })).toBeTruthy()
+    expect(screen.getByText('In use')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^in use$/i })).toBeNull()
+    expect(screen.getAllByRole('button', { name: /^use$/i })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: /set up for me/i })).toBeNull()
     expect(screen.getByRole('button', { name: /restore recommended setup/i })).toBeTruthy()
     expect(screen.getByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
@@ -1379,5 +1382,92 @@ describe('vLLM engine', () => {
     })
     expect(mocked.useVllm).not.toHaveBeenCalled()
     expect(mocked.deleteVllmModel).not.toHaveBeenCalled()
+  })
+
+  it('shows In use on the served cached model and Use on other cached rows', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      model: 'acme/sideload-awq',
+      served_model_name: 'sideload',
+      active_model_id: 'sideload',
+      models: [
+        { id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' },
+        { id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }
+      ],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        },
+        {
+          active: true,
+          added_by_you: true,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'sideload',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'acme/sideload-awq',
+          recommended: false,
+          served_model_name: 'sideload',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByText('In use')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^in use$/i })).toBeNull()
+    expect(screen.getAllByRole('button', { name: /^use$/i })).toHaveLength(1)
+  })
+
+  it('left-aligns Restore recommended setup with padding', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      models: [{ id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: true,
+          added_by_you: true,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'sideload',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'acme/sideload-awq',
+          recommended: false,
+          served_model_name: 'sideload',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    const restore = await screen.findByRole('button', { name: /restore recommended setup/i })
+    const wrap = restore.closest('.justify-start')
+    expect(wrap).toBeTruthy()
+    expect(wrap!.className.split(/\s+/)).toEqual(expect.arrayContaining(['mt-3', 'flex', 'justify-start', 'py-2']))
   })
 })

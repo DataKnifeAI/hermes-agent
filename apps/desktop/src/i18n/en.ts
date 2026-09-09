@@ -1217,6 +1217,7 @@ export const en: Translations = {
       quickstartStageFinish: 'Finish',
       useAction: 'Use',
       activePill: 'Default',
+      inUsePill: 'In use',
       updateTitle: 'Engine update available',
       updateDetail: (next, current) =>
         `A newer llama.cpp build (${next}) is ready to install — you're on ${current}. Models keep working during the download.`,

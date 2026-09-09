@@ -94,6 +94,31 @@ function fitRank(model: VllmInventoryModel): number {
   return 2
 }
 
+function isServedModel(
+  model: { active?: boolean; id: string; served_model_name?: string },
+  activeModelId?: null | string,
+  servedModelName?: null | string
+): boolean {
+  if (model.active) {
+    return true
+  }
+
+  const keys = [activeModelId, servedModelName].filter((k): k is string => Boolean(k))
+
+  return keys.some(k => k === model.id || k === model.served_model_name)
+}
+
+function InUseState({ detail, label }: { detail: string; label: string }) {
+  return (
+    <Tip label={detail}>
+      <Pill tone="primary">
+        <Check className="mr-1 size-3" />
+        {label}
+      </Pill>
+    </Tip>
+  )
+}
+
 function downloadLabel(copy: { downloadAction: (size: string) => string; downloadBare: string }, size?: string) {
   if (size && size !== '—') {
     return copy.downloadAction(size)
@@ -226,11 +251,15 @@ function VllmModelTags({
 }
 
 export function VllmModelsPane({
+  activeModelId,
   models,
-  onChanged
+  onChanged,
+  servedModelName
 }: {
+  activeModelId?: null | string
   models: VllmInventoryModel[]
   onChanged: () => void
+  servedModelName?: null | string
 }) {
   const { t } = useI18n()
   const copy = t.settings.localModels
@@ -327,13 +356,8 @@ export function VllmModelsPane({
                           {downloadLabel(copy, model.size_label)}
                         </Button>
                       )
-                    ) : model.active ? (
-                      <Tip label={copy.activeDetail}>
-                        <Pill tone="primary">
-                          <Check className="mr-1 size-3" />
-                          {copy.activePill}
-                        </Pill>
-                      </Tip>
+                    ) : isServedModel(model, activeModelId, servedModelName) ? (
+                      <InUseState detail={copy.activeDetail} label={copy.inUsePill} />
                     ) : tooBig ? undefined : (
                       <Button className={busy ? '[&_svg]:animate-spin' : undefined} disabled={Boolean(setting)} onClick={() => void handleUse(model)} size="sm">
                         {busy ? <Loader2 /> : <Check />}
@@ -394,12 +418,20 @@ export function VllmModelsPane({
           })}
         </div>
       </SettingsSection>
-      <VllmBrowseSection onChanged={onChanged} />
+      <VllmBrowseSection activeModelId={activeModelId} onChanged={onChanged} servedModelName={servedModelName} />
     </>
   )
 }
 
-function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
+function VllmBrowseSection({
+  activeModelId,
+  onChanged,
+  servedModelName
+}: {
+  activeModelId?: null | string
+  onChanged: () => void
+  servedModelName?: null | string
+}) {
   const { t } = useI18n()
   const copy = t.settings.localModels
   const jobs = useStore($localRuntimeJobs)
@@ -529,13 +561,16 @@ function VllmBrowseSection({ onChanged }: { onChanged: () => void }) {
           const fit = hit.fit ?? 'unknown'
           const tooBig = fit === 'too-big'
           const gated = Boolean(hit.gated)
+          const inUse = isServedModel({ id: hit.repo, served_model_name: hit.repo }, activeModelId, servedModelName)
 
           return (
             <ListRow
               action={
                 <div className="flex items-center gap-2">
                   {hit.cached ? (
-                    tooBig ? undefined : (
+                    tooBig ? undefined : inUse ? (
+                      <InUseState detail={copy.activeDetail} label={copy.inUsePill} />
+                    ) : (
                       <Button
                         disabled={Boolean(setting) || jobs.some(j => j.status === 'running')}
                         onClick={() => adopt(hit.repo)}

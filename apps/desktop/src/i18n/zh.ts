@@ -1398,6 +1398,7 @@ export const zh: Translations = {
       installDoneToast: '本地运行时已安装就绪。',
       useAction: '使用',
       activePill: '默认',
+      inUsePill: '使用中',
       updateTitle: '引擎有可用更新',
       updateDetail: (next, current) =>
         `新的 llama.cpp 构建（${next}）可以安装——当前为 ${current}。下载期间模型仍可正常使用。`,

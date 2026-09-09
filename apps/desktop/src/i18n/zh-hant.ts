@@ -1064,6 +1064,7 @@ export const zhHant = defineLocale({
       installDoneToast: '本地執行環境已安裝就緒。',
       useAction: '使用',
       activePill: '預設',
+      inUsePill: '使用中',
       updateTitle: '引擎有可用更新',
       updateDetail: (next, current) =>
         `新的 llama.cpp 組建（${next}）可以安裝——目前為 ${current}。下載期間模型仍可正常使用。`,

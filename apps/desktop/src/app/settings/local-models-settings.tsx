@@ -551,7 +551,14 @@ export function LocalModelsSettings() {
             )}
           </div>
         </div>
-        {!vllmSetupJob && <VllmModelsPane models={vllmModels ?? []} onChanged={refresh} />}
+        {!vllmSetupJob && (
+          <VllmModelsPane
+            activeModelId={status.model ?? status.active_model_id}
+            models={vllmModels ?? []}
+            onChanged={refresh}
+            servedModelName={status.served_model_name}
+          />
+        )}
       </SettingsContent>
     )
   }
@@ -766,11 +773,13 @@ export function LocalModelsSettings() {
               <p className="text-[0.72rem] text-muted-foreground">{copy.vllmVenvDetail(status.venv_path)}</p>
             )}
             {status.runtime_installed && (
-              <Tip label={copy.recommendedSetupHint}>
-                <Button onClick={() => void handleQuickstart()} size="sm" variant="ghost">
-                  {copy.recommendedSetup}
-                </Button>
-              </Tip>
+              <div className="mt-3 flex justify-start py-2">
+                <Tip label={copy.recommendedSetupHint}>
+                  <Button onClick={() => void handleQuickstart()} size="sm" variant="ghost">
+                    {copy.recommendedSetup}
+                  </Button>
+                </Tip>
+              </div>
             )}
             {!status.runtime_installed && !rJob && (
               <ListRow
@@ -1221,7 +1230,14 @@ export function LocalModelsSettings() {
       )}
 
       {engine === 'llamacpp' && <BrowseSection onChanged={refresh} />}
-      {engine === 'vllm' && <VllmModelsPane models={vllmModels ?? []} onChanged={refresh} />}
+      {engine === 'vllm' && (
+        <VllmModelsPane
+          activeModelId={status.model ?? status.active_model_id}
+          models={vllmModels ?? []}
+          onChanged={refresh}
+          servedModelName={status.served_model_name}
+        />
+      )}
     </SettingsContent>
   )
 }
