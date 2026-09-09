@@ -524,12 +524,51 @@ def ensure_hf_weights(repo: str, job: dict | None = None) -> dict[str, Any]:
 
 
 def _job_tqdm_class(job: dict):
-    """tqdm stand-in so ``snapshot_download`` writes done_bytes, not just a phase."""
+    """tqdm stand-in so ``snapshot_download`` writes done_bytes, not just a phase.
+
+    huggingface_hub always reads and assigns ``bar.total`` (even when it
+    constructed the bar with ``total=0`` / omitted it). A missing attribute
+    aborts the download.
+    """
 
     class _JobTqdm:
         def __init__(self, *args, **kwargs):
             iterable = args[0] if args else kwargs.get("iterable")
             self._iter = iter(iterable) if iterable is not None else None
+            self._unit = kwargs.get("unit")
+            self.n = int(kwargs.get("initial") or 0)
+            # HF's snapshot bars start at 0; per-file wrappers omit total.
+            self._total = kwargs["total"] if "total" in kwargs else None
+            self._publish_total(self._total)
+
+        @property
+        def total(self):
+            return self._total
+
+        @total.setter
+        def total(self, value):
+            self._total = value
+            self._publish_total(value)
+
+        @property
+        def format_dict(self):
+            return {"n": self.n, "total": self._total, "rate": None}
+
+        def _publish_total(self, value):
+            if job.get("total_bytes"):
+                return
+            if self._unit not in (None, "B"):
+                return
+            try:
+                nbytes = int(value)
+            except (TypeError, ValueError):
+                return
+            if nbytes <= 0:
+                return
+            # hf_thread_map uses a file-count bar (no unit, tiny total).
+            if self._unit != "B" and nbytes < 256:
+                return
+            job["total_bytes"] = nbytes
 
         def __iter__(self):
             return self
@@ -544,9 +583,12 @@ def _job_tqdm_class(job: dict):
                 step = int(n or 0)
             except (TypeError, ValueError):
                 step = 0
+            self.n = int(self.n or 0) + max(step, 0)
             if step <= 0:
                 return
-            job["done_bytes"] = int(job.get("done_bytes") or 0) + step
+            # Several HF bars share this class; keep the largest n so a
+            # file-count bar cannot clobber byte progress (or vice versa).
+            job["done_bytes"] = max(int(job.get("done_bytes") or 0), self.n)
             total = job.get("total_bytes") or 0
             if total:
                 job["done_bytes"] = min(int(job["done_bytes"]), int(total))
@@ -564,6 +606,9 @@ def _job_tqdm_class(job: dict):
             return None
 
         def set_postfix(self, *args, **kwargs):
+            return None
+
+        def set_postfix_str(self, *args, **kwargs):
             return None
 
         def __enter__(self):

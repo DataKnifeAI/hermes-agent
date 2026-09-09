@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hermes_cli.vllm_runtime.inventory import (
+    _job_tqdm_class,
     _vram_from_weight_bytes,
     classify_vllm_repo,
     created_at_from_hf,
@@ -295,9 +296,7 @@ def test_download_job_reports_bytes(monkeypatch, tmp_path):
     )
 
     def _snap(hid, job):
-        bar = __import__(
-            "hermes_cli.vllm_runtime.inventory", fromlist=["_job_tqdm_class"]
-        )._job_tqdm_class(job)(total=1000)
+        bar = _job_tqdm_class(job)(total=1000)
         bar.update(400)
         bar.close()
 
@@ -308,6 +307,32 @@ def test_download_job_reports_bytes(monkeypatch, tmp_path):
     assert job["total_bytes"] == 1000
     assert job["done_bytes"] == 1000
     assert job["phase"] == "downloading"
+
+
+def test_download_completes_when_hub_tqdm_omits_total(monkeypatch, tmp_path):
+    """snapshot_download reads bar.total; HF often constructs the bar without it."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda url, timeout=15: {"siblings": [{"rfilename": "model.safetensors"}]},
+    )
+
+    def _snap(hid, job):
+        # HF may construct the bar with no total kwarg, then still read .total.
+        bare = _job_tqdm_class(job)()
+        bar = _job_tqdm_class(job)(total=0, unit="B")
+        bar.total = (bare.total or 0) + (bar.total or 0)
+        bar.update(400)
+        bar.close()
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hub_snapshot_download", _snap)
+    job = {"phase": "", "detail": "", "done_bytes": 0, "total_bytes": None}
+    download_hf_repo("org/weights", job)
+    assert job["done_bytes"] == 400
+    assert job["total_bytes"] is None
 
 
 def test_estimate_min_vram_matches_weight_plus_kv():
