@@ -8,6 +8,12 @@ import type {
 
 import { hermesApi, profileScoped } from './client'
 
+/** POST /vllm/use and /server start block until GET /v1/models is 200.
+ *  Must cover CUDA-graph cold start (~2–3 min) plus tool-call verify — the
+ *  30s fetch default reports "vLLM failed to start" while the pid is still
+ *  capturing graphs. Keep >= hermes_cli READY_TIMEOUT_S (180s). */
+export const VLLM_START_REQUEST_TIMEOUT_MS = 240_000
+
 // The desktop surface of the managed llama.cpp runtime: status/catalog
 // reads, download/install/activate jobs, and server control.
 
@@ -113,7 +119,8 @@ export function setLocalServer(action: 'start' | 'stop'): Promise<{ ok: boolean 
     ...profileScoped(),
     body: { action },
     method: 'POST',
-    path: '/api/local-models/server'
+    path: '/api/local-models/server',
+    timeoutMs: action === 'start' ? VLLM_START_REQUEST_TIMEOUT_MS : undefined
   })
 }
 
@@ -168,7 +175,8 @@ export function useVllm(model?: string): Promise<VllmUseResult> {
     ...profileScoped(),
     body: model ? { model } : {},
     method: 'POST',
-    path: '/api/local-models/vllm/use'
+    path: '/api/local-models/vllm/use',
+    timeoutMs: VLLM_START_REQUEST_TIMEOUT_MS
   })
 }
 
