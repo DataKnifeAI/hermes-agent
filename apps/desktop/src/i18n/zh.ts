@@ -1380,7 +1380,7 @@ export const zh: Translations = {
       vram: label => `${label} 显存`,
       ram: label => `${label} 内存`,
       unifiedMemory: '统一内存',
-      modelsTitle: '模型',
+      modelsTitle: '本地',
       recommended: '推荐',
       recommendedReason: {
         'best-quality-resident': '在完全驻留 GPU 且保持全速的模型中质量最高。推荐会在质量与该硬件的预计速度之间权衡。',
@@ -1471,7 +1471,19 @@ export const zh: Translations = {
       vllmUseDone: url => `新对话将使用 ${url} 上的 vLLM。`,
       vllmRecommendFailed: '无法为此 GPU 选择 vLLM 模型',
       vllmNotFeasible: reason => `此 GPU 尚无法运行托管 vLLM（${reason}）。`,
-      occupancyTitle: '另一个 LLM 正在占用 GPU'
+      occupancyTitle: '另一个 LLM 正在占用 GPU',
+      vllmVersionMissing: '隔离环境中尚未安装 vLLM。',
+      vllmVersionDetail: ver => `隔离 venv 中已安装 ${ver}——不是 Hermes 自己的 Python。`,
+      vllmCheckUpdate: '检查更新',
+      vllmCheckingUpdate: '正在检查…',
+      vllmUpdateAvailable: (latest, current) => `PyPI 上有 vLLM ${latest}——当前为 ${current}。更新会安装到隔离 venv。`,
+      vllmUpToDate: ver => `vLLM ${ver} 已是 PyPI 上的最新版本。`,
+      vllmCheckFailed: '无法从 PyPI 检查 vLLM 更新',
+      vllmVenvDetail: path => `隔离 venv · ${path}`,
+      vllmBrowseHint: '在 Hugging Face 搜索 vLLM 可服务的模型（safetensors / AWQ）。缓存的权重会出现在「本地」下。',
+      vllmBrowseNoHits: '未找到 Hugging Face 模型。',
+      vllmSetFailed: '无法将此设为本地模型',
+      vllmCachedPill: '已缓存'
     },
     providers: {
       connectAccount: '连接账号',

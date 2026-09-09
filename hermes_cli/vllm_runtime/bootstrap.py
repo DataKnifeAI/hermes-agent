@@ -124,7 +124,7 @@ def activate_vllm_provider(config: dict | None = None) -> str:
         providers = {}
     entry = dict(providers.get("vllm") or {}) if isinstance(providers.get("vllm"), dict) else {}
     entry.update({
-        "name": "vLLM",
+        "name": "Local",
         "base_url": write_url.rstrip("/"),
         "model": served,
         "discover_models": True,

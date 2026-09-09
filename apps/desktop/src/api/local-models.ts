@@ -162,6 +162,76 @@ export function useVllm(): Promise<{ base_url: string; ok: boolean }> {
   })
 }
 
+export interface VllmInventoryModel {
+  active: boolean
+  added_by_you?: boolean
+  cached: boolean
+  display_name: string
+  fits?: boolean | null
+  id: string
+  min_vram_bytes?: number
+  quantization?: string
+  recommended: boolean
+  served_model_name: string
+  size_bytes: number
+  size_label: string
+}
+
+export function getVllmModels(): Promise<{ models: VllmInventoryModel[] }> {
+  return hermesApi<{ models: VllmInventoryModel[] }>({
+    ...profileScoped(),
+    path: '/api/local-models/vllm/models'
+  })
+}
+
+export function searchVllmModels(q: string, limit = 20): Promise<{ hits: HFSearchHit[] }> {
+  return hermesApi<{ hits: HFSearchHit[] }>({
+    ...profileScoped(),
+    path: `/api/local-models/vllm/search?q=${encodeURIComponent(q)}&limit=${limit}`
+  })
+}
+
+export function setVllmModel(model: string): Promise<{ model: string; ok: boolean; served_model_name: string }> {
+  return hermesApi<{ model: string; ok: boolean; served_model_name: string }>({
+    ...profileScoped(),
+    body: { model },
+    method: 'POST',
+    path: '/api/local-models/vllm/set'
+  })
+}
+
+export function deleteVllmModel(modelId: string): Promise<{ ok: boolean }> {
+  return hermesApi<{ ok: boolean }>({
+    ...profileScoped(),
+    method: 'DELETE',
+    path: `/api/local-models/vllm/models/${encodeURIComponent(modelId)}`
+  })
+}
+
+export interface VllmVersionCheck {
+  configured_tag: string
+  installed: string
+  latest: string
+  tag: string
+  update_available: boolean
+}
+
+export function checkVllmUpdate(): Promise<VllmVersionCheck> {
+  return hermesApi<VllmVersionCheck>({
+    ...profileScoped(),
+    method: 'POST',
+    path: '/api/local-models/vllm/check-update'
+  })
+}
+
+export function updateVllm(): Promise<{ job_id: string }> {
+  return hermesApi<{ job_id: string }>({
+    ...profileScoped(),
+    method: 'POST',
+    path: '/api/local-models/vllm/update'
+  })
+}
+
 // ── Hugging Face browser + sideload ─────────────────────────────
 
 export interface HFSearchHit {
@@ -170,6 +240,7 @@ export interface HFSearchHit {
   likes: number
   updated: string
   gated: boolean
+  cached?: boolean
 }
 
 export interface HFFileGroup {

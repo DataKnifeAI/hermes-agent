@@ -217,6 +217,7 @@ def test_activate_writes_loopback_v1_and_preserves_remote(tmp_path, monkeypatch)
     cfg = load_config()
     assert cfg["model"]["provider"] == "vllm"
     assert cfg["model"]["default"]
+    assert (cfg.get("providers") or {}).get("vllm", {}).get("name") == "Local"
     assert url.endswith("/v1")
     host = url.split("://", 1)[-1].split(":")[0]
     assert host in ("127.0.0.1", "localhost")
@@ -274,6 +275,49 @@ def test_ensure_vllm_runtime_fake_server(tmp_path, monkeypatch):
     finally:
         boot.shutdown_vllm_runtime()
         hermes_constants._default_hermes_root_memo = None
+
+
+def test_inventory_lists_and_deletes_only_hf_cache(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    kept = hub / "models--org--kept"
+    doomed = hub / "models--org--doomed"
+    kept.mkdir(parents=True)
+    doomed.mkdir(parents=True)
+    (kept / "w").write_bytes(b"aa")
+    (doomed / "w").write_bytes(b"bb")
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    from hermes_cli.vllm_runtime.inventory import delete_cached_repo, list_cached_repos
+
+    ids = {r["id"] for r in list_cached_repos()}
+    assert ids == {"org/kept", "org/doomed"}
+    delete_cached_repo("org/doomed")
+    assert not doomed.exists()
+    assert kept.is_dir()
+
+
+def test_installed_version_uses_isolated_python(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    fake_py = tmp_path / "venv-python"
+    fake_py.write_text("", encoding="utf-8")
+    seen: list[list[str]] = []
+
+    def _out(cmd, text=True, timeout=30):
+        seen.append(list(cmd))
+        return "0.10.0\n"
+
+    monkeypatch.setattr(venv_mod, "venv_python", lambda: fake_py)
+    monkeypatch.setattr(venv_mod, "_assert_isolated", lambda py: None)
+    monkeypatch.setattr(venv_mod.subprocess, "check_output", _out)
+    assert venv_mod.installed_vllm_version() == "0.10.0"
+    assert seen and seen[0][0] == str(fake_py)
+    assert str(Path(sys.prefix).resolve()) not in " ".join(seen[0])
 
 
 def test_vllm_runtimes_are_machine_scoped(tmp_path, monkeypatch):

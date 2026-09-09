@@ -1180,7 +1180,7 @@ export const en: Translations = {
       vram: label => `${label} GPU memory`,
       ram: label => `${label} RAM`,
       unifiedMemory: 'Unified memory',
-      modelsTitle: 'Models',
+      modelsTitle: 'Local',
       recommended: 'Recommended',
       /* The Recommended badge's tooltip, keyed by the resolver branch that
          made the pick. Qualitative on purpose: predictions order candidates,
@@ -1292,7 +1292,21 @@ export const en: Translations = {
       vllmUseDone: url => `New chats use vLLM at ${url}.`,
       vllmRecommendFailed: 'Could not pick a vLLM model for this GPU',
       vllmNotFeasible: reason => `This GPU cannot run managed vLLM yet (${reason}).`,
-      occupancyTitle: 'Another LLM is using the GPU'
+      occupancyTitle: 'Another LLM is using the GPU',
+      vllmVersionMissing: 'vLLM is not installed in the isolated environment yet.',
+      vllmVersionDetail: ver => `Installed ${ver} in the isolated venv — not Hermes' own Python.`,
+      vllmCheckUpdate: 'Check for update',
+      vllmCheckingUpdate: 'Checking…',
+      vllmUpdateAvailable: (latest, current) =>
+        `vLLM ${latest} is on PyPI — you're on ${current}. Update installs into the isolated venv.`,
+      vllmUpToDate: ver => `vLLM ${ver} is the latest release on PyPI.`,
+      vllmCheckFailed: 'Could not check PyPI for a vLLM update',
+      vllmVenvDetail: path => `Isolated venv · ${path}`,
+      vllmBrowseHint:
+        'Search Hugging Face for models vLLM can serve (safetensors / AWQ). Cached weights appear under Local.',
+      vllmBrowseNoHits: 'No Hugging Face models found.',
+      vllmSetFailed: 'Could not set this as the local model',
+      vllmCachedPill: 'Cached'
     },
     providers: {
       connectAccount: 'Connect an account',

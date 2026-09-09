@@ -1311,6 +1311,7 @@ export interface LocalModelsStatus {
   models: { id: string; size_bytes: number; size_label: string }[]
   models_dir: string
   venv_ready?: boolean
+  venv_path?: string
   occupancy?: LocalOccupancyHit[]
   occupancy_message?: null | string
   served_model_name?: null | string
@@ -1364,7 +1365,7 @@ export interface LocalCatalogModel {
 
 export interface LocalRuntimeJob {
   job_id: string
-  kind: 'model-activate' | 'model-download' | 'quickstart' | 'runtime-install' | 'vllm-install'
+  kind: 'model-activate' | 'model-download' | 'quickstart' | 'runtime-install' | 'vllm-install' | 'vllm-update'
   target: string
   model_id: string | null
   status: 'running' | 'done' | 'error'

@@ -2,8 +2,9 @@
 
 llama.cpp (``hermes_cli.local_runtime``) and vLLM (``hermes_cli.vllm_runtime``)
 each own one supervised server. This module is the only place that knows both:
-switching ``local_runtime.engine`` stops the other process before starting the
-new one. One GPU, one resident weights file.
+starting an engine stops the other first. Persisting ``local_runtime.engine``
+(the settings dropdown) does not stop a running supervisor. One GPU, one
+resident weights file.
 
 CLI, Desktop, and ``hermes serve`` all call these helpers — Desktop is not a
 special case.

@@ -234,3 +234,109 @@ def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False) -> P
         raise RuntimeError(f"vLLM install finished but {exe} is missing")
     _write_manifest(py)
     return exe
+
+
+def installed_vllm_version() -> str:
+    """Version of the ``vllm`` package inside the isolated venv — never Hermes ``sys.prefix``."""
+    py = venv_python()
+    if not py.is_file():
+        return ""
+    _assert_isolated(py)
+    try:
+        return subprocess.check_output(
+            [str(py), "-c", "import importlib.metadata as m; print(m.version('vllm'))"],
+            text=True, timeout=30,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _parse_pep440_head(s: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for chunk in str(s).split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits or 0))
+    return tuple(parts)
+
+
+def latest_vllm_pypi_version(*, timeout_s: float = 8) -> str:
+    """Current vLLM release on PyPI. Empty on network failure."""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(
+        "https://pypi.org/pypi/vllm/json",
+        headers={"User-Agent": "hermes-local-models"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+            data = json.load(r)
+    except (OSError, json.JSONDecodeError, TimeoutError):
+        return ""
+    info = data.get("info") if isinstance(data, dict) else None
+    if not isinstance(info, dict):
+        return ""
+    return str(info.get("version") or "").strip()
+
+
+def version_check_path() -> Path:
+    return runtimes_root() / "version-check.json"
+
+
+def read_version_check() -> dict:
+    path = version_check_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_version_check(installed: str, latest: str) -> dict:
+    payload = {
+        "installed": installed,
+        "latest": latest,
+        "update_available": bool(
+            installed and latest and _parse_pep440_head(latest) > _parse_pep440_head(installed)
+        ),
+    }
+    path = version_check_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
+def vllm_version_fields(*, check: bool = False) -> dict:
+    """Status extras: installed tag, last (or fresh) PyPI check, update flag."""
+    installed = installed_vllm_version()
+    if check:
+        latest = latest_vllm_pypi_version()
+        if latest:
+            return {"tag": installed, "configured_tag": latest, **write_version_check(installed, latest)}
+        remembered = read_version_check()
+        return {
+            "tag": installed,
+            "configured_tag": str(remembered.get("latest") or installed),
+            "update_available": False,
+            "installed": installed,
+            "latest": "",
+        }
+    remembered = read_version_check()
+    latest = str(remembered.get("latest") or "")
+    update = bool(remembered.get("update_available"))
+    if installed and latest:
+        update = _parse_pep440_head(latest) > _parse_pep440_head(installed)
+    return {
+        "tag": installed,
+        "configured_tag": latest or installed,
+        "update_available": update,
+        "installed": installed,
+        "latest": latest,
+    }

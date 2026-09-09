@@ -24,6 +24,7 @@ import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
+import { isLocalProviderSlug } from '@/lib/local-provider'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -253,7 +254,7 @@ export function ModelCatalogMenu({
           provider.slug.toLowerCase() !== 'moa' &&
           // Strict --local gate: staged local models exist on disk, but
           // without the flag the GUI doesn't offer them.
-          (localModelsEnabled || provider.slug !== LOCAL_PROVIDER_SLUG)
+          (localModelsEnabled || !isLocalProviderSlug(provider.slug))
       ) ?? [],
     [providers, localModelsEnabled]
   )
@@ -266,7 +267,7 @@ export function ModelCatalogMenu({
   // exists, else as their own trailing 'Local' group (first download —
   // nothing staged yet, so the catalog has no local provider row).
   const shownDownloads = q ? downloads.filter(job => foldIncludes(job.target || '', q)) : downloads
-  const hasLocalGroup = pickerProviders.some(provider => provider.slug === LOCAL_PROVIDER_SLUG)
+  const hasLocalGroup = pickerProviders.some(provider => isLocalProviderSlug(provider.slug))
 
   // Resolve visibility HERE, against the catalog we actually fetched: an empty
   // provider list would otherwise resolve to an empty key set that reads as
@@ -481,7 +482,11 @@ export function ModelCatalogMenu({
                   textValue=""
                 >
                   <span className="truncate">
-                    <HighlightMatches foldSeparators query={search} text={group.provider.name} />
+                    <HighlightMatches
+                      foldSeparators
+                      query={search}
+                      text={isLocalProviderSlug(group.provider.slug) ? copyPicker.localDownloadsHeading : group.provider.name}
+                    />
                   </span>
                   <DisclosureCaret
                     className="shrink-0 text-(--ui-text-tertiary) opacity-0 transition group-hover/label:opacity-100"
@@ -603,7 +608,7 @@ export function ModelCatalogMenu({
                     )
                   })}
                 {!collapsed &&
-                  slug === LOCAL_PROVIDER_SLUG &&
+                  isLocalProviderSlug(slug) &&
                   shownDownloads.map(job => (
                     <DownloadingModelRow jobId={job.jobId} key={job.jobId} target={job.target} />
                   ))}
@@ -670,10 +675,6 @@ export function ModelCatalogMenu({
 
 /** Re-exported so callers building a footer row match the catalog's rows. */
 export { dropdownMenuRow }
-
-// The backend's provider row for staged local models (inventory.py's
-// _local_runtime_row). Downloads-in-flight attach to this group.
-const LOCAL_PROVIDER_SLUG = 'llamacpp'
 
 // A model still downloading: visible so the user knows it's coming (and
 // where it will land), disabled so it can't be selected early, with the

@@ -1120,6 +1120,18 @@ export interface Translations {
       vllmRecommendFailed: string
       vllmNotFeasible: (reason: string) => string
       occupancyTitle: string
+      vllmVersionMissing: string
+      vllmVersionDetail: (ver: string) => string
+      vllmCheckUpdate: string
+      vllmCheckingUpdate: string
+      vllmUpdateAvailable: (latest: string, current: string) => string
+      vllmUpToDate: (ver: string) => string
+      vllmCheckFailed: string
+      vllmVenvDetail: (path: string) => string
+      vllmBrowseHint: string
+      vllmBrowseNoHits: string
+      vllmSetFailed: string
+      vllmCachedPill: string
     }
     providers: {
       connectAccount: string

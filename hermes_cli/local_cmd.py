@@ -77,17 +77,13 @@ def cmd_local_status(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 def cmd_local_engine(args: argparse.Namespace) -> int:
     from cli import save_config_value
-    from hermes_cli.local_engines import stop_llama_engine, stop_vllm_engine
 
     name = getattr(args, "engine_name", None)
     if not name:
         print(_engine())
         return 0
+    # Persist only. Starting the other engine is what stops this one.
     save_config_value("local_runtime.engine", name)
-    if name == "vllm":
-        stop_llama_engine()
-    else:
-        stop_vllm_engine()
     print(f"engine: {name}")
     return 0
 

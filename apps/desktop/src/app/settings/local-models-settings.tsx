@@ -4,9 +4,11 @@ import { useNavigate } from 'react-router'
 
 import { NEW_CHAT_ROUTE } from '@/app/routes'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tip } from '@/components/ui/tooltip'
 import {
   activateLocalModel,
+  checkVllmUpdate,
   deleteLocalModel,
   downloadBrowsedModel,
   downloadLocalModel,
@@ -14,6 +16,7 @@ import {
   getLocalCatalog,
   getLocalHardware,
   getLocalModelsStatus,
+  getVllmModels,
   getVllmRecommend,
   type HFFileGroup,
   type HFSearchHit,
@@ -25,7 +28,8 @@ import {
   setLocalEngine,
   setLocalServer,
   sideloadLocalModel,
-  useVllm,
+  updateVllm,
+  type VllmInventoryModel,
   type VllmRecommend
 } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -54,7 +58,9 @@ import {
 import { notify, notifyError } from '@/store/notifications'
 import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus } from '@/types/hermes'
 
+import { CONTROL_TEXT } from './constants'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
+import { VllmModelsPane } from './vllm-models-pane'
 
 function ProgressBar({ percent }: { percent: number | undefined }) {
   return (
@@ -94,16 +100,15 @@ function EngineSelect({
   return (
     <label className="flex flex-col items-start gap-1 text-left">
       <span className="text-[0.72rem] text-muted-foreground">{copy.engineLabel}</span>
-      <select
-        aria-label={copy.engineLabel}
-        className="desktop-input-chrome h-8 min-w-44 rounded-[2.5px] border px-2.5 text-xs text-foreground outline-none disabled:opacity-50"
-        disabled={disabled}
-        onChange={event => onChange(event.target.value as LocalEngine)}
-        value={engine}
-      >
-        <option value="llamacpp">{copy.engineLlama}</option>
-        <option value="vllm">{copy.engineVllm}</option>
-      </select>
+      <Select disabled={disabled} onValueChange={next => onChange(next as LocalEngine)} value={engine}>
+        <SelectTrigger aria-label={copy.engineLabel} className={cn('min-w-44', CONTROL_TEXT)}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="llamacpp">{copy.engineLlama}</SelectItem>
+          <SelectItem value="vllm">{copy.engineVllm}</SelectItem>
+        </SelectContent>
+      </Select>
     </label>
   )
 }
@@ -136,6 +141,8 @@ export function LocalModelsSettings() {
   const [configure, setConfigure] = useState(false)
   const [engineBusy, setEngineBusy] = useState(false)
   const [recommend, setRecommend] = useState<VllmRecommend | null>(null)
+  const [vllmModels, setVllmModels] = useState<VllmInventoryModel[] | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   // Jobs live in the app-level store (they must survive this pane
   // unmounting); the pane just renders the slice it cares about.
   const jobs = useStore($localRuntimeJobs)
@@ -146,11 +153,14 @@ export function LocalModelsSettings() {
         setStatus(next)
 
         if (engineOf(next) === 'vllm') {
-          setCatalog([])
+          void getVllmModels()
+            .then(data => setVllmModels(data.models))
+            .catch(() => setVllmModels([]))
 
           return
         }
 
+        setVllmModels(null)
         void getLocalCatalog()
           .then(data => setCatalog(data.models))
           .catch(() => setCatalog([]))
@@ -244,12 +254,6 @@ export function LocalModelsSettings() {
 
     try {
       await setLocalEngine(next)
-
-      if (next === 'vllm') {
-        setCatalog([])
-        setConfigure(false)
-      }
-
       refresh()
     } catch (err) {
       notifyError(err, copy.quickstartFailed)
@@ -278,18 +282,33 @@ export function LocalModelsSettings() {
     }
   }
 
-  async function handleVllmUse() {
+  async function handleVllmCheckUpdate() {
+    setCheckingUpdate(true)
+
     try {
-      const result = await useVllm()
+      const result = await checkVllmUpdate()
+      refresh()
       notify({
         durationMs: 3_500,
-        kind: 'success',
-        message: copy.vllmUseDone(result.base_url),
+        kind: result.update_available ? 'info' : 'success',
+        message: result.update_available
+          ? copy.vllmUpdateAvailable(result.latest || result.configured_tag, result.installed || result.tag)
+          : copy.vllmUpToDate(result.installed || result.tag || copy.engineVllm),
         title: copy.title
       })
-      refresh()
     } catch (err) {
-      notifyError(err, copy.vllmUseFailed)
+      notifyError(err, copy.vllmCheckFailed)
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }
+
+  async function handleVllmUpdate() {
+    try {
+      await updateVllm()
+      watchLocalRuntimeJobs()
+    } catch (err) {
+      notifyError(err, copy.installFailed)
     }
   }
 
@@ -612,27 +631,16 @@ export function LocalModelsSettings() {
                     {copy.stopServer}
                   </Button>
                 ) : (
-                  <div className="flex items-center gap-2">
-                    {status.runtime_installed && (
-                      <Button
-                        disabled={serverBusy}
-                        onClick={() => void handleVllmUse()}
-                        size="sm"
-                      >
-                        {copy.vllmUseAction}
-                      </Button>
-                    )}
-                    <Button
-                      className={cn(serverBusy && '[&_svg]:animate-spin')}
-                      disabled={serverBusy || !status.runtime_installed}
-                      onClick={() => void handleServer('start')}
-                      size="sm"
-                      variant="outline"
-                    >
-                      {serverBusy ? <Loader2 /> : <Zap />}
-                      {copy.startServer}
-                    </Button>
-                  </div>
+                  <Button
+                    className={cn(serverBusy && '[&_svg]:animate-spin')}
+                    disabled={serverBusy || !status.runtime_installed}
+                    onClick={() => void handleServer('start')}
+                    size="sm"
+                    variant="outline"
+                  >
+                    {serverBusy ? <Loader2 /> : <Zap />}
+                    {copy.startServer}
+                  </Button>
                 )
               }
               description={
@@ -652,6 +660,33 @@ export function LocalModelsSettings() {
                     : copy.vllmInstallTitle
               }
             />
+            {status.runtime_installed && status.tag && (
+              <ListRow
+                action={
+                  <div className="flex items-center gap-2">
+                    <Button disabled={checkingUpdate} onClick={() => void handleVllmCheckUpdate()} size="sm" variant="outline">
+                      {checkingUpdate ? <Loader2 className="animate-spin" /> : null}
+                      {checkingUpdate ? copy.vllmCheckingUpdate : copy.vllmCheckUpdate}
+                    </Button>
+                    {status.update_available && !rJob && (
+                      <Button onClick={() => void handleVllmUpdate()} size="sm">
+                        <Download />
+                        {copy.updateAction}
+                      </Button>
+                    )}
+                  </div>
+                }
+                description={
+                  status.update_available
+                    ? copy.vllmUpdateAvailable(status.configured_tag, status.tag)
+                    : copy.vllmVersionDetail(status.tag)
+                }
+                title={status.tag ? `vLLM ${status.tag}` : copy.engineVllm}
+              />
+            )}
+            {status.venv_path && (
+              <p className="text-[0.72rem] text-muted-foreground">{copy.vllmVenvDetail(status.venv_path)}</p>
+            )}
             {!status.runtime_installed && !rJob && (
               <ListRow
                 action={
@@ -667,11 +702,11 @@ export function LocalModelsSettings() {
             {rJob && (
               <ListRow
                 below={<ProgressBar percent={rJob.percent} />}
-                description={rJob.detail || status.start_phase || copy.installing}
+                description={rJob.detail || status.start_phase || (rJob.kind === 'vllm-update' ? copy.updating : copy.installing)}
                 title={
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-3.5 animate-spin" />
-                    {copy.installing}
+                    {rJob.kind === 'vllm-update' ? copy.updating : copy.installing}
                   </span>
                 }
               />
@@ -776,7 +811,7 @@ export function LocalModelsSettings() {
           />
         )}
 
-        {(lastError?.kind === 'runtime-install' || lastError?.kind === 'vllm-install') && (
+        {(lastError?.kind === 'runtime-install' || lastError?.kind === 'vllm-install' || lastError?.kind === 'vllm-update') && (
           <p className="text-[0.75rem] text-destructive">{lastError.error}</p>
         )}
       </SettingsSection>
@@ -1099,6 +1134,7 @@ export function LocalModelsSettings() {
       )}
 
       {engine === 'llamacpp' && <BrowseSection onChanged={refresh} />}
+      {engine === 'vllm' && <VllmModelsPane models={vllmModels ?? []} onChanged={refresh} />}
     </SettingsContent>
   )
 }

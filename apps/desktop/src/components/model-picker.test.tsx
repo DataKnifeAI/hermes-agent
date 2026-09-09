@@ -109,6 +109,28 @@ describe('ModelPickerDialog download rows', () => {
     expect(item?.getAttribute('aria-disabled')).toBe('true')
   })
 
+  it('labels a vLLM provider group Local, not vLLM', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue({
+      model: 'hermes3:8b',
+      provider: 'vllm',
+      providers: [
+        {
+          slug: 'vllm',
+          name: 'vLLM',
+          models: ['hermes3:8b'],
+          is_current: true,
+          authenticated: true
+        }
+      ]
+    })
+    renderPicker({ currentModel: 'hermes3:8b', currentProvider: 'vllm' })
+
+    expect(await screen.findByText('hermes3:8b')).toBeTruthy()
+    expect(screen.getByText('Local')).toBeTruthy()
+    expect(screen.queryByText('vLLM')).toBeNull()
+    expect(screen.queryByText('llama.cpp')).toBeNull()
+  })
+
   it('shows a first-ever download under its own Local group when no local provider exists yet', async () => {
     $localRuntimeJobs.set([DOWNLOAD_JOB])
     vi.mocked(requestModelOptions).mockResolvedValue({

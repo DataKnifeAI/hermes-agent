@@ -76,38 +76,46 @@ def _vllm_log_phase() -> str | None:
 def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
     """Status for the selected vLLM engine — not llama tag / GGUF staging."""
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.inventory import catalog_models
     from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
-    from hermes_cli.vllm_runtime.venv import venv_ready
+    from hermes_cli.vllm_runtime.venv import venv_dir, venv_ready, vllm_version_fields
 
     cfg = config or {}
     section = cfg.get("local_runtime") or {}
     settings = vllm_settings(cfg)
     running = resolve_vllm_endpoint(wait_for_boot_s=0)
     served = str(settings.get("served_model_name") or "") or None
+    configured = str(settings.get("model") or "") or None
     occ = occupancy_payload()
+    versions = vllm_version_fields()
+    inventory = catalog_models(cfg)
     return {
         "engine": "vllm",
         "enabled": bool(section.get("enabled")),
         "venv_ready": venv_ready(),
         "runtime_installed": venv_ready(),
         "runtime_backend": "vllm" if venv_ready() else None,
+        "venv_path": str(venv_dir()) if venv_ready() else "",
         "server_running": running is not None,
         "server_base_url": (running or {}).get("base_url") or (
             openai_base_url(settings) if venv_ready() else None),
-        "active_model_id": served if running else None,
+        "active_model_id": served or configured,
         "served_model_name": served,
-        "model": str(settings.get("model") or "") or None,
+        "model": configured,
         "start_phase": None if running else _vllm_log_phase(),
         "last_error": occ["occupancy_message"],
         **occ,
-        # Selected-engine status must not keep llama.cpp widgets as the truth.
-        "tag": "",
-        "configured_tag": "",
-        "update_available": False,
-        "loaded_models": {},
+        "tag": versions.get("tag") or "",
+        "configured_tag": versions.get("configured_tag") or "",
+        "update_available": bool(versions.get("update_available")),
+        "loaded_models": {served: "ready"} if running and served else {},
         "loading": {},
         "placement": {},
-        "models": [],
+        "models": [
+            {"id": m["id"], "size_bytes": m.get("size_bytes") or 0,
+             "size_label": m.get("size_label") or "—"}
+            for m in inventory if m.get("cached") or m.get("active")
+        ],
         "models_dir": "",
     }
 
@@ -132,18 +140,17 @@ def recommend_payload() -> dict[str, Any]:
 
 
 def set_engine(name: str) -> dict[str, Any]:
-    """Persist ``local_runtime.engine`` then stop the other supervisor."""
+    """Persist ``local_runtime.engine`` only — a view of which pane is configured.
+
+    Does not stop a running supervisor. Starting the newly selected engine is
+    what stops the other (one GPU, one resident weights file).
+    """
     from cli import save_config_value
-    from hermes_cli.local_engines import stop_llama_engine, stop_vllm_engine
 
     engine = str(name or "").strip().lower()
     if engine not in _ENGINE_NAMES:
         raise HTTPException(status_code=400, detail="engine must be 'llamacpp' or 'vllm'")
     save_config_value("local_runtime.engine", engine)
-    if engine == "vllm":
-        stop_llama_engine()
-    else:
-        stop_vllm_engine()
     return {"ok": True, "engine": engine}
 
 
@@ -176,6 +183,10 @@ def start_active_engine() -> None:
         if sup is None:
             raise RuntimeError(
                 "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+        from hermes_cli.config import load_config
+        from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
+
+        activate_vllm_provider(load_config())
         return
     stop_vllm_engine()
     lm._start_local_server(cfg, lm._SERVER_START_FAILED)
@@ -207,3 +218,57 @@ def activate_vllm() -> dict[str, Any]:
     if state:
         verify_tool_calls(state["base_url"])
     return {"ok": True, "base_url": url}
+
+
+def vllm_models_payload(config: dict | None = None) -> dict[str, Any]:
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+
+    return {"models": catalog_models(config)}
+
+
+def set_vllm_model(hf_id: str) -> dict[str, Any]:
+    from hermes_cli.vllm_runtime.inventory import apply_vllm_model
+
+    try:
+        return apply_vllm_model(hf_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def delete_vllm_model(hf_id: str) -> dict[str, Any]:
+    from hermes_cli.vllm_runtime.inventory import delete_cached_repo
+
+    try:
+        delete_cached_repo(hf_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+def search_vllm_models(q: str, limit: int = 20) -> dict[str, Any]:
+    from hermes_cli.vllm_runtime.inventory import search_hf_models
+
+    try:
+        return {"hits": search_hf_models(q, limit)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Hugging Face search unavailable: {exc}") from exc
+
+
+def check_vllm_update() -> dict[str, Any]:
+    from hermes_cli.vllm_runtime.venv import vllm_version_fields
+
+    return vllm_version_fields(check=True)
+
+
+def apply_vllm_update() -> None:
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+    from hermes_cli.vllm_runtime.venv import ensure_vllm_venv, installed_vllm_version, write_version_check
+
+    settings = vllm_settings(load_config())
+    ensure_vllm_venv(str(settings.get("python") or ""), upgrade=True)
+    installed = installed_vllm_version()
+    if installed:
+        write_version_check(installed, installed)

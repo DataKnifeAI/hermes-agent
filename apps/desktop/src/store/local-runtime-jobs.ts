@@ -138,7 +138,9 @@ export function runningModelDownloads(jobs: readonly LocalRuntimeJob[]): LocalRu
 export function runningRuntimeInstall(jobs: readonly LocalRuntimeJob[]): LocalRuntimeJob | null {
   return (
     jobs.find(
-      j => (j.kind === 'runtime-install' || j.kind === 'vllm-install') && j.status === 'running'
+      j =>
+        (j.kind === 'runtime-install' || j.kind === 'vllm-install' || j.kind === 'vllm-update') &&
+        j.status === 'running'
     ) ?? null
   )
 }

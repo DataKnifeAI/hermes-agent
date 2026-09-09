@@ -12,7 +12,9 @@ import { LocalModelsSettings } from './local-models-settings'
 // payloads, not transport.
 vi.mock('@/hermes', () => ({
   activateLocalModel: vi.fn(),
+  checkVllmUpdate: vi.fn(),
   deleteLocalModel: vi.fn(),
+  deleteVllmModel: vi.fn(),
   downloadBrowsedModel: vi.fn(),
   downloadLocalModel: vi.fn(),
   ejectLocalModel: vi.fn(),
@@ -21,15 +23,19 @@ vi.mock('@/hermes', () => ({
   getLocalModelsJobs: vi.fn(),
   getLocalModelsStatus: vi.fn(),
   getLocalRuntimeJob: vi.fn(),
+  getVllmModels: vi.fn(),
   getVllmRecommend: vi.fn(),
   installLocalRuntime: vi.fn(),
   installVllm: vi.fn(),
   listHFRepoFiles: vi.fn(),
   quickstartLocalModels: vi.fn(),
   searchHFModels: vi.fn(),
+  searchVllmModels: vi.fn(),
   setLocalEngine: vi.fn(),
   setLocalServer: vi.fn(),
+  setVllmModel: vi.fn(),
   sideloadLocalModel: vi.fn(),
+  updateVllm: vi.fn(),
   useVllm: vi.fn()
 }))
 
@@ -162,6 +168,36 @@ beforeEach(() => {
   mocked.setLocalEngine.mockResolvedValue({ engine: 'vllm', ok: true })
   mocked.installVllm.mockResolvedValue({ job_id: 'v1' })
   mocked.useVllm.mockResolvedValue({ base_url: 'http://127.0.0.1:18435/v1', ok: true })
+  mocked.getVllmModels.mockResolvedValue({
+    models: [
+      {
+        active: true,
+        added_by_you: false,
+        cached: false,
+        display_name: 'hermes3:8b',
+        id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+        recommended: true,
+        served_model_name: 'hermes3:8b',
+        size_bytes: 0,
+        size_label: '—'
+      }
+    ]
+  })
+  mocked.searchVllmModels.mockResolvedValue({ hits: [] })
+  mocked.setVllmModel.mockResolvedValue({
+    model: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+    ok: true,
+    served_model_name: 'hermes3:8b'
+  })
+  mocked.deleteVllmModel.mockResolvedValue({ ok: true })
+  mocked.checkVllmUpdate.mockResolvedValue({
+    configured_tag: '0.10.0',
+    installed: '0.10.0',
+    latest: '0.10.0',
+    tag: '0.10.0',
+    update_available: false
+  })
+  mocked.updateVllm.mockResolvedValue({ job_id: 'vu1' })
   $localRuntimeJobs.set([])
 })
 
@@ -590,6 +626,10 @@ describe('quickstart completion navigation', () => {
 })
 
 describe('vLLM engine', () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
   it('does not call llama-only APIs while vLLM is selected', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue(VLLM_STATUS)
     renderPane()
@@ -603,35 +643,55 @@ describe('vLLM engine', () => {
     expect(mocked.sideloadLocalModel).not.toHaveBeenCalled()
     expect(mocked.ejectLocalModel).not.toHaveBeenCalled()
     expect(screen.queryByText('Qwen3.6 27B')).toBeNull()
-    expect(screen.queryByPlaceholderText(/search models/i)).toBeNull()
   })
 
-  it('shows vLLM visibility and Install→Use, not GGUF widgets', async () => {
+  it('shows a running vLLM pane with Local inventory, not GGUF widgets', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
       runtime_installed: true,
       venv_ready: true,
       server_running: true,
       server_base_url: 'http://127.0.0.1:18435/v1',
-      active_model_id: 'hermes3:8b'
+      active_model_id: 'hermes3:8b',
+      tag: '0.10.0',
+      venv_path: '/tmp/runtimes/vllm/.venv'
     })
     renderPane()
 
-    expect(await screen.findByText(/hermes3:8b/i)).toBeTruthy()
+    expect((await screen.findAllByText(/hermes3:8b/i)).length).toBeGreaterThan(0)
     expect(screen.getByText(/127\.0\.0\.1:18435/)).toBeTruthy()
     expect(screen.getByRole('button', { name: /turn off/i })).toBeTruthy()
+    expect(screen.getByText('Local')).toBeTruthy()
+    expect(screen.getAllByText(/0\.10\.0/).length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: /check for update/i })).toBeTruthy()
     expect(screen.queryByText('Install the local runtime')).toBeNull()
     expect(screen.queryByText('Qwen3.6 27B')).toBeNull()
+    await waitFor(() => {
+      expect(mocked.getVllmModels).toHaveBeenCalled()
+    })
   })
 
-  it('writes the engine through setLocalEngine when the dropdown changes', async () => {
+  it('uses the same select tokens as other settings dropdowns', async () => {
     renderPane()
     const picker = await screen.findByLabelText(/local backend/i)
-    fireEvent.change(picker, { target: { value: 'vllm' } })
+
+    expect(picker.getAttribute('data-slot')).toBe('select-trigger')
+    expect(picker.getAttribute('role')).toBe('combobox')
+    expect(picker.className.split(/\s+/)).toContain('text-xs')
+    expect(picker.className.split(/\s+/)).toContain('desktop-input-chrome')
+    expect(picker.tagName).not.toBe('SELECT')
+  })
+
+  it('writes the engine through setLocalEngine without stopping a server', async () => {
+    renderPane()
+    const picker = await screen.findByLabelText(/local backend/i)
+    fireEvent.click(picker)
+    fireEvent.click(await screen.findByRole('option', { name: 'vLLM' }))
 
     await waitFor(() => {
       expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm')
     })
+    expect(mocked.setLocalServer).not.toHaveBeenCalled()
   })
 
   it('surfaces occupancy copy on the vLLM pane', async () => {

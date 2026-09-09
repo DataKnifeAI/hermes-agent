@@ -92,6 +92,10 @@ class EngineBody(BaseModel):
     engine: str                 # "llamacpp" | "vllm"
 
 
+class VllmModelBody(BaseModel):
+    model: str                  # Hugging Face org/name id
+
+
 def _human_gb(n: int | float) -> str:
     return f"{n / (1 << 30):.1f} GB"
 
@@ -967,7 +971,7 @@ async def local_models_sideload(body: SideloadBody):
 # ── engine switch + vLLM (Install → Use) ─────────────────────
 @router.post("/api/local-models/engine")
 def local_models_set_engine(body: EngineBody):
-    """Bind the Local Models dropdown: persist engine, stop the other supervisor."""
+    """Persist which engine pane is configured. Does not stop a running supervisor."""
     return engine_mod.set_engine(body.engine)
 
 
@@ -1002,3 +1006,47 @@ async def local_models_vllm_use():
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return result
+
+
+@router.get("/api/local-models/vllm/models")
+def local_models_vllm_models():
+    """Curated HF ids plus cached hub weights — the vLLM inventory, not GGUF."""
+    return engine_mod.vllm_models_payload()
+
+
+@router.get("/api/local-models/vllm/search")
+async def local_models_vllm_search(q: str, limit: int = 20):
+    """HF text-generation search (safetensors / AWQ), not the GGUF firehose."""
+    return await run_in_threadpool(engine_mod.search_vllm_models, q, limit)
+
+
+@router.post("/api/local-models/vllm/set")
+def local_models_vllm_set(body: VllmModelBody):
+    """Make an HF id the configured vLLM model. Does not start or stop a server."""
+    return engine_mod.set_vllm_model(body.model)
+
+
+@router.delete("/api/local-models/vllm/models/{model_id:path}")
+def local_models_vllm_delete(model_id: str):
+    """Remove cached HF weights for one org/name id."""
+    return engine_mod.delete_vllm_model(urllib.parse.unquote(model_id))
+
+
+@router.post("/api/local-models/vllm/check-update")
+async def local_models_vllm_check_update():
+    """Installed isolated-venv version vs PyPI. Never probes Hermes ``sys.prefix``."""
+    return await run_in_threadpool(engine_mod.check_vllm_update)
+
+
+@router.post("/api/local-models/vllm/update")
+async def local_models_vllm_update():
+    """Upgrade ``vllm`` inside the isolated venv (uv/pip). Same job shape as install."""
+    job = _job("vllm-update", "vLLM")
+
+    def _run():
+        _step(job, "updating-venv", "Updating vLLM in the isolated environment")
+        engine_mod.apply_vllm_update()
+        _finish(job, "vLLM is up to date")
+
+    _spawn_job(job, "lr-vllm-update", _run, fail_msg="vLLM update failed: %s")
+    return {"job_id": job["job_id"]}

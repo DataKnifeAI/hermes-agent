@@ -1085,7 +1085,7 @@ export const ja = defineLocale({
       vram: label => `GPU メモリ ${label}`,
       ram: label => `RAM ${label}`,
       unifiedMemory: 'ユニファイドメモリ',
-      modelsTitle: 'モデル',
+      modelsTitle: 'ローカル',
       recommended: 'おすすめ',
       recommendedReason: {
         'best-quality-resident':
@@ -1184,7 +1184,21 @@ export const ja = defineLocale({
       vllmUseDone: url => `新しいチャットは ${url} の vLLM を使います。`,
       vllmRecommendFailed: 'この GPU 向けの vLLM モデルを選べませんでした',
       vllmNotFeasible: reason => `この GPU ではまだ管理 vLLM を実行できません（${reason}）。`,
-      occupancyTitle: '別の LLM が GPU を使用中です'
+      occupancyTitle: '別の LLM が GPU を使用中です',
+      vllmVersionMissing: '隔離環境にまだ vLLM がインストールされていません。',
+      vllmVersionDetail: ver => `隔離 venv に ${ver} をインストール済み——Hermes 自身の Python ではありません。`,
+      vllmCheckUpdate: '更新を確認',
+      vllmCheckingUpdate: '確認中…',
+      vllmUpdateAvailable: (latest, current) =>
+        `PyPI に vLLM ${latest} があります——現在は ${current}。更新は隔離 venv に入ります。`,
+      vllmUpToDate: ver => `vLLM ${ver} は PyPI の最新リリースです。`,
+      vllmCheckFailed: 'PyPI で vLLM の更新を確認できませんでした',
+      vllmVenvDetail: path => `隔離 venv · ${path}`,
+      vllmBrowseHint:
+        'vLLM が扱えるモデル（safetensors / AWQ）を Hugging Face で検索します。キャッシュ済みの重みは「ローカル」に出ます。',
+      vllmBrowseNoHits: 'Hugging Face モデルが見つかりません。',
+      vllmSetFailed: 'このモデルをローカル既定にできませんでした',
+      vllmCachedPill: 'キャッシュ済み'
     },
     providers: {
       connectAccount: 'アカウントを接続',
