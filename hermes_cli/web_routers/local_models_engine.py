@@ -36,6 +36,33 @@ _LOG_PHASES = (
 )
 
 
+_CLIENT_HINTS = (
+    "too big", "gated", "awq", "not downloaded", "gguf", "exl2",
+    "missing file", "invalid id", "tool-loop floor",
+)
+
+
+def raise_engine_http(exc: BaseException) -> None:
+    """Re-raise ``exc`` as FastAPI. Never map a client 4xx onto 502."""
+    from hermes_cli.vllm_runtime.inventory import hf_http_status_and_detail
+    from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
+    from hermes_cli.vllm_runtime.supervisor import LEFTOVER_AWQ_MSG
+
+    if isinstance(exc, HTTPException):
+        raise exc
+    if isinstance(exc, OccupyingLlmError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    mapped = hf_http_status_and_detail(exc)
+    if mapped:
+        raise HTTPException(status_code=mapped[0], detail=mapped[1]) from exc
+    text = str(exc).strip() or "local engine failed"
+    if isinstance(exc, ValueError) or any(hint in text.lower() for hint in _CLIENT_HINTS):
+        raise HTTPException(status_code=400, detail=text) from exc
+    if LEFTOVER_AWQ_MSG.lower() in text.lower():
+        raise HTTPException(status_code=400, detail=text) from exc
+    raise HTTPException(status_code=502, detail=text) from exc
+
+
 def configured_engine(config: dict | None = None) -> str:
     if config is None:
         from hermes_cli import config as config_mod
@@ -463,7 +490,7 @@ def search_vllm_models(q: str, limit: int = 20) -> dict[str, Any]:
     try:
         return {"hits": search_hf_models(q, limit)}
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Hugging Face search unavailable: {exc}") from exc
+        raise_engine_http(exc)
 
 
 def check_vllm_update() -> dict[str, Any]:

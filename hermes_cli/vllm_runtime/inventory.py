@@ -390,8 +390,54 @@ GATED_DOWNLOAD_MSG = (
     "access. Hermes will not download it unsigned."
 )
 TOO_BIG_USE_MSG = "This model is too big for this GPU at the 64k tool-loop floor"
+NEEDS_AWQ_MSG = (
+    "This full-precision checkpoint is too big for this GPU at the 64k "
+    "tool-loop floor — Download an AWQ or FP8 instruct model"
+)
+MISSING_REPO_MSG = (
+    "Hugging Face has no such repo — or a required file is missing"
+)
+HF_BAD_REQUEST_MSG = (
+    "Hugging Face rejected this repo (gated, invalid id, or a missing file)"
+)
 DOWNLOAD_VERIFY_PHASE = "verifying"
 DOWNLOAD_VERIFY_DETAIL = "Finishing download"
+_HTTP_ERROR_RE = re.compile(r"HTTP Error (\d{3})", re.I)
+_CLIENT_ERROR_RE = re.compile(r"\b([45]\d{2}) Client Error", re.I)
+
+
+def hf_http_status_and_detail(exc: BaseException) -> tuple[int, str] | None:
+    """Map urllib / huggingface_hub HTTP errors to ``(FastAPI status, detail)``.
+
+    Never returns the useless ``HTTP Error 400: Bad Request`` string. Client
+    4xx stay 4xx (gated / missing / invalid). Hub 5xx become 502.
+    """
+    code = None
+    blob = str(exc) or ""
+    if isinstance(exc, urllib.error.HTTPError):
+        code = int(exc.code)
+    else:
+        raw = getattr(exc, "status_code", None)
+        if raw is None:
+            raw = getattr(exc, "code", None)
+        if isinstance(raw, int):
+            code = raw
+    if code is None:
+        match = _HTTP_ERROR_RE.search(blob) or _CLIENT_ERROR_RE.search(blob)
+        if match:
+            code = int(match.group(1))
+    if code is None:
+        return None
+    lower = blob.lower()
+    if code in (401, 403) or "gated" in lower:
+        return 400, GATED_DOWNLOAD_MSG
+    if code == 404 or "entry not found" in lower or "repository not found" in lower:
+        return 400, MISSING_REPO_MSG
+    if 400 <= code < 500:
+        return 400, HF_BAD_REQUEST_MSG
+    if code >= 500:
+        return 502, f"Hugging Face is unavailable (HTTP {code})"
+    return None
 
 
 def unservable_reason(hid: str, tags: list[str] | None = None) -> str | None:
@@ -548,6 +594,33 @@ def classify_vllm_repo(
                 f" — downloaded weights are {_human_gb(disk)}, "
                 f"larger than the {_human_gb(listing)} Hugging Face listing"
             )
+        if fit == "too-big" and (not quant or quant in {"bf16", "fp16"}):
+            detail = NEEDS_AWQ_MSG
+    else:
+        # No listing/disk bytes: price from the *id* only. A loose AWQ tag
+        # plus an 8B token must not badge Fits (the index may be a bigger
+        # BF16 pack). Named full-precision sizes that miss the 64k floor
+        # become too-big + NEEDS_AWQ so Use is a 400, not a 502 wrapping HF.
+        id_quant = parse_quantization(hid, None)
+        tag_quant = parse_quantization("", tag_list)
+        params = parse_param_billions(hid)
+        if params is not None and id_quant in _QUANT_BYTES and total_vram > 0:
+            min_vram = estimate_min_vram_bytes(params, id_quant)
+            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
+            if fit == "too-big" and id_quant in {"bf16", "fp16"}:
+                detail = NEEDS_AWQ_MSG
+            else:
+                detail = f"Needs ~{_human_gb(min_vram)} GPU memory"
+        elif (
+            params is not None
+            and total_vram > 0
+            and not id_quant
+            and not tag_quant
+        ):
+            min_vram = estimate_min_vram_bytes(params, "bf16")
+            if total_vram < min_vram:
+                fit = "too-big"
+                detail = NEEDS_AWQ_MSG
     capabilities = _capability_tags(
         hid=hid, tag_list=tag_list, quant=quant, matched=matched,
         config=config, pipeline_tag=pipeline_tag or "",
@@ -789,6 +862,9 @@ def download_hf_repo(repo: str, job: dict | None = None) -> None:
     except Exception as exc:
         if not existed:
             _remove_fresh_cache(hid)
+        mapped = hf_http_status_and_detail(exc)
+        if mapped and mapped[0] < 500:
+            raise ValueError(mapped[1]) from exc
         if _is_gated_failure(exc):
             raise ValueError(GATED_DOWNLOAD_MSG) from exc
         raise
@@ -797,6 +873,9 @@ def download_hf_repo(repo: str, job: dict | None = None) -> None:
     except Exception as exc:
         if not existed:
             _remove_fresh_cache(hid)
+        mapped = hf_http_status_and_detail(exc)
+        if mapped and mapped[0] < 500:
+            raise ValueError(mapped[1]) from exc
         if _is_gated_failure(exc):
             raise ValueError(GATED_DOWNLOAD_MSG) from exc
         raise

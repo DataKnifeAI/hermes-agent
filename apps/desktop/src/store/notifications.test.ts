@@ -82,9 +82,37 @@ test('vLLM 400 JSON detail is the toast, not a raw Bad Request', () => {
   expect(lastMessage()).not.toMatch(/hermes:api/)
 })
 
+test('vLLM too-big needs-AWQ 400 is the toast, not the set-failed title', () => {
+  notifyError(
+    new Error(
+      'Error invoking remote method \'hermes:api\': Error: 400: {"detail":"This full-precision checkpoint is too big for this GPU at the 64k tool-loop floor — Download an AWQ or FP8 instruct model"}'
+    ),
+    'Could not set this as the local model'
+  )
+
+  expect(lastMessage()).toMatch(/AWQ/i)
+  expect(lastMessage()).toMatch(/too big/i)
+  expect(lastMessage()).not.toBe('Could not set this as the local model')
+  expect(lastMessage()).not.toMatch(/Bad Request/i)
+})
+
 test('empty-body 400 Bad Request uses the fallback, not statusText', () => {
   notifyError(new Error('400: Bad Request'), 'Local model setup failed')
 
   expect(lastMessage()).toBe('Local model setup failed')
   expect(lastMessage()).not.toMatch(/400/)
+})
+
+test('502 wrapping urllib HTTP Error 400 uses the fallback, not nested Bad Request', () => {
+  notifyError(
+    new Error(
+      'Error invoking remote method \'hermes:api\': Error: 502: {"detail":"HTTP Error 400: Bad Request"}'
+    ),
+    'Could not set this as the local model'
+  )
+
+  expect(lastMessage()).toBe('Could not set this as the local model')
+  expect(lastMessage()).not.toMatch(/Bad Request/i)
+  expect(lastMessage()).not.toMatch(/hermes:api/)
+  expect(lastMessage()).not.toMatch(/502/)
 })

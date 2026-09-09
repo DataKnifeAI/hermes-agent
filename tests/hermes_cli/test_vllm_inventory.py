@@ -9,6 +9,9 @@ from hermes_cli.vllm_runtime.inventory import (
     DOWNLOAD_VERIFY_DETAIL,
     DOWNLOAD_VERIFY_PHASE,
     GATED_DOWNLOAD_MSG,
+    HF_BAD_REQUEST_MSG,
+    NEEDS_AWQ_MSG,
+    hf_http_status_and_detail,
     _cache_name,
     _job_tqdm_class,
     _vram_from_weight_bytes,
@@ -48,6 +51,32 @@ def test_classify_unknown_when_quant_or_size_missing():
     assert tags["fit"] == "unknown"
     assert tags["fits"] is None
     assert tags["capabilities"] == []
+
+
+def test_classify_nous_8b_bf16_is_too_big_needs_awq():
+    tags = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=24 * _GIB)
+    assert tags["fit"] == "too-big"
+    assert tags["fit_detail"] == NEEDS_AWQ_MSG
+
+
+def test_classify_nous_awq_8b_fits_24gb():
+    tags = classify_vllm_repo(
+        "solidrust/Hermes-3-Llama-3.1-8B-AWQ", total_vram=24 * _GIB)
+    assert tags["fit"] == "fits-gpu"
+
+
+def test_hf_http_400_is_plain_language_not_urllib_string():
+    err = urllib.error.HTTPError(
+        "https://huggingface.co/api/models/x", 400, "Bad Request",
+        hdrs=None, fp=BytesIO())
+    mapped = hf_http_status_and_detail(err)
+    assert mapped is not None
+    status, detail = mapped
+    assert status == 400
+    assert detail == HF_BAD_REQUEST_MSG
+    assert "Bad Request" not in detail
+    wrapped = hf_http_status_and_detail(RuntimeError("HTTP Error 400: Bad Request"))
+    assert wrapped == (400, HF_BAD_REQUEST_MSG)
 
 
 def test_classify_uses_tier_floor_not_a_guess():
@@ -114,7 +143,8 @@ def test_classify_weight_bytes_when_card_has_no_params():
 
 def test_classify_capabilities_from_hf_tags_not_model_names():
     named = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=24 * _GIB)
-    assert named["fit"] == "unknown"  # 8B in id, no quant
+    assert named["fit"] == "too-big"
+    assert named["fit_detail"] == NEEDS_AWQ_MSG
     assert "tools" not in named["capabilities"]
     tagged = classify_vllm_repo(
         "acme/custom-weights",
@@ -408,8 +438,11 @@ def test_empty_or_tokenizer_cache_is_not_a_library_row(tmp_path, monkeypatch):
     assert repo_is_cached("google/gemma-3-27b-it") is False
     tags = classify_vllm_repo(
         "google/gemma-3-27b-it", total_vram=24 * _GIB, weight_bytes=0)
-    assert tags["fit"] == "unknown"
-    assert tags["fits"] is None
+    # Hollow cache is not a library row (above). Search/Use of the id still
+    # prices 27B BF16 as too-big so the toast is needs-AWQ, not a nested 400.
+    assert tags["fit"] == "too-big"
+    assert tags["fit_detail"] == NEEDS_AWQ_MSG
+    assert tags["fits"] is False
 
 
 def test_gated_download_refuses_without_cache_dir(monkeypatch, tmp_path):
@@ -435,6 +468,30 @@ def test_gated_download_refuses_without_cache_dir(monkeypatch, tmp_path):
     assert pulled == []
     assert not (hf_hub_dir() / _cache_name("google/gemma-3-27b-it")).exists()
     assert list_cached_repos() == []
+
+
+def test_download_hf_400_is_plain_language(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json",
+        lambda url, timeout=15: {"id": "org/missing", "gated": False},
+    )
+
+    def _snap(hid, job=None):
+        raise urllib.error.HTTPError(
+            "https://huggingface.co/org/missing", 400, "Bad Request",
+            hdrs=None, fp=BytesIO())
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hub_snapshot_download", _snap)
+    try:
+        download_hf_repo("org/missing")
+        raise AssertionError("400 must refuse")
+    except ValueError as exc:
+        assert str(exc) == HF_BAD_REQUEST_MSG
+        assert "Bad Request" not in str(exc)
 
 
 def test_gated_http_error_scrubs_incomplete_cache(monkeypatch, tmp_path):

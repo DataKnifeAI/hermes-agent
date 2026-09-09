@@ -77,7 +77,7 @@ function cleanErrorText(value: string) {
 }
 
 function isGenericHttpStatusText(value: string): boolean {
-  return /^(?:\d{3}:\s*)?(Bad Request|Unauthorized|Forbidden|Not Found|Internal Server Error)$/i.test(
+  return /^(?:(?:\d{3}:\s*)|(?:HTTP Error \d{3}:\s*))?(Bad Request|Unauthorized|Forbidden|Not Found|Internal Server Error)$/i.test(
     value.trim()
   )
 }

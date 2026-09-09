@@ -36,7 +36,6 @@ from hermes_cli.local_runtime import (
 )
 from hermes_cli.local_runtime.endpoint import _state_endpoint
 from hermes_cli.web_routers import local_models_engine as engine_mod
-from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +119,12 @@ def _http_error(status: int, prefix: str = ""):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
+        from hermes_cli.vllm_runtime.inventory import hf_http_status_and_detail
+
+        mapped = hf_http_status_and_detail(exc)
+        if mapped and mapped[0] < 500:
+            detail = f"{prefix}{mapped[1]}" if prefix else mapped[1]
+            raise HTTPException(status_code=mapped[0], detail=detail) from exc
         raise HTTPException(status_code=status, detail=f"{prefix}{exc}") from exc
 
 
@@ -181,8 +186,11 @@ def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *, fail
         except Exception as exc:  # noqa: BLE001
             if fail_msg:
                 logger.warning(fail_msg, exc)
+            from hermes_cli.vllm_runtime.inventory import hf_http_status_and_detail
+
+            mapped = hf_http_status_and_detail(exc)
             job["status"] = "error"
-            job["error"] = str(exc)
+            job["error"] = mapped[1] if mapped else str(exc)
         finally:
             if on_exit is not None:
                 on_exit()
@@ -857,12 +865,8 @@ async def local_models_server(body: ServerActionBody):
         raise HTTPException(status_code=400, detail="action must be 'stop' or 'start'")
     try:
         await asyncio.to_thread(_SERVER_ACTIONS[action])
-    except OccupyingLlmError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except HTTPException:
-        raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        engine_mod.raise_engine_http(exc)
     return {"ok": True, "action": action}
 
 
@@ -1042,12 +1046,8 @@ async def local_models_vllm_use(body: VllmUseBody | None = None):
             result = engine_mod.activate_vllm()
             result["needs_download"] = False
             result["already_downloaded"] = True
-    except OccupyingLlmError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except HTTPException:
-        raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        engine_mod.raise_engine_http(exc)
     return result
 
 

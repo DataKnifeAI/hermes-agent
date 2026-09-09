@@ -7,6 +7,9 @@ only — no live GPU, no GGUF I/O when engine is vllm.
 
 from __future__ import annotations
 
+import urllib.error
+from io import BytesIO
+
 import yaml
 from fastapi.testclient import TestClient
 
@@ -389,8 +392,8 @@ def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch
     assert "NousResearch/Hermes-3-Llama-3.1-8B" in repos
     assert all("gguf" not in r.lower() for r in repos)
     hermes = next(h for h in search.json()["hits"] if "Hermes-3" in h["repo"])
-    # 8B in the id, no quant on the card → unknown, never a lying Fits badge.
-    assert hermes["fit"] == "unknown"
+    # 8B BF16 on a 24 GB card is too-big, never a lying Fits badge.
+    assert hermes["fit"] != "fits-gpu"
     # Tools come from HF tags (function-calling), not the word Hermes in the id.
     assert "tools" not in hermes["capabilities"]
 
@@ -948,6 +951,107 @@ def test_vllm_use_gated_repo_is_plain_language_400(tmp_path, monkeypatch):
     assert "gated" in used.json()["detail"].lower()
     assert "Bad Request" not in used.json()["detail"]
     assert started == []
+
+
+def test_vllm_use_urllib_400_is_plain_language_400_not_502(tmp_path, monkeypatch):
+    """HF urllib 400 must not become FastAPI 502 with HTTP Error 400: Bad Request."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "solidrust/Hermes-3-Llama-3.1-8B-AWQ"
+    _write_engine(home, "vllm")
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--solidrust--Hermes-3-Llama-3.1-8B-AWQ"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"g" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+
+    def _boom(_repo):
+        raise urllib.error.HTTPError(
+            "https://huggingface.co/api/models/x", 400, "Bad Request",
+            hdrs=None, fp=BytesIO())
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.gated_repo_reason", _boom)
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 400, used.text
+    detail = used.json()["detail"]
+    assert "Bad Request" not in detail
+    assert "502" not in used.text
+
+
+def test_vllm_use_nous_bf16_is_needs_awq_400(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "NousResearch/Hermes-3-Llama-3.1-8B"
+    _write_engine(home, "vllm")
+    rec = _feasible_rec(monkeypatch)
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--NousResearch--Hermes-3-Llama-3.1-8B"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"g" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    started: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start"))
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 400, used.text
+    detail = used.json()["detail"].lower()
+    assert "awq" in detail or "too big" in detail
+    assert "Bad Request" not in used.json()["detail"]
+    assert started == []
+    assert rec.model != hid
+
+
+def test_vllm_use_nous_awq_cached_starts(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "solidrust/Hermes-3-Llama-3.1-8B-AWQ"
+    _write_engine(home, "vllm")
+    _feasible_rec(monkeypatch)
+    hub = tmp_path / "hf-hub"
+    dest = hub / "models--solidrust--Hermes-3-Llama-3.1-8B-AWQ"
+    dest.mkdir(parents=True)
+    (dest / "w.bin").write_bytes(b"g" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    started: list[str] = []
+
+    class _Sup:
+        base_url = "http://127.0.0.1:9/v1"
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start") or _Sup())
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 200, used.text
+    assert started == ["start"]
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == hid
+
+
+def test_vllm_search_hf_400_is_not_502(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+
+    def _boom(*_a, **_k):
+        raise urllib.error.HTTPError(
+            "https://huggingface.co/api/models", 400, "Bad Request",
+            hdrs=None, fp=BytesIO())
+
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory._hf_json", _boom)
+    search = client.get("/api/local-models/vllm/search?q=nous")
+    assert search.status_code == 400, search.text
+    assert "Bad Request" not in search.json()["detail"]
 
 
 def test_delete_uncached_configured_search_hit_is_not_404(tmp_path, monkeypatch):
