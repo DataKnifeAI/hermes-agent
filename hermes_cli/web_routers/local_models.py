@@ -623,6 +623,11 @@ def local_models_hardware():
         from hermes_cli.vllm_runtime.venv import installed_vllm_version
 
         out["vllm_version"] = (installed_vllm_version() or "").strip() or None
+        # Same starting/ready/stopped rule as /status — VRAM stays live smi.
+        snap = engine_mod.vllm_engine_snapshot(_load_config(), with_occupancy=False)
+        out["engine_state"] = snap["engine_state"]
+        out["pid"] = snap["pid"]
+        out["start_phase"] = snap["start_phase"]
     return out
 
 

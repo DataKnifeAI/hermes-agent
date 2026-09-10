@@ -104,6 +104,40 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.getByText(/vLLM 0\.9\.0/)).toBeTruthy()
   })
 
+  it('Show more Serving uses starting/ready — not a leftover configured model', () => {
+    renderStats({
+      status: {
+        engine_state: 'starting',
+        server_running: false,
+        served_model_name: null,
+        active_model_id: null,
+        model: 'Qwen/Qwen3-14B',
+        start_phase: 'Capturing CUDA graphs'
+      }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
+    expect(screen.getByText('starting')).toBeTruthy()
+    expect(screen.queryByText('ready')).toBeNull()
+    expect(screen.getByText('Qwen/Qwen3-14B')).toBeTruthy()
+  })
+
+  it('hides Serving when the engine is stopped', () => {
+    renderStats({
+      status: {
+        engine_state: 'stopped',
+        server_running: false,
+        served_model_name: null,
+        active_model_id: null,
+        model: 'Qwen/Qwen3-14B',
+        start_phase: 'Capturing CUDA graphs'
+      }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
+    expect(screen.queryByText('ready')).toBeNull()
+    expect(screen.queryByText('starting')).toBeNull()
+    expect(screen.queryByText('Qwen/Qwen3-14B')).toBeNull()
+  })
+
   it('prefers ram_used_bytes over total minus available', () => {
     renderStats({
       hardware: {

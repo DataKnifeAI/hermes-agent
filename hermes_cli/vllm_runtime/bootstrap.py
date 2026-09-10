@@ -140,6 +140,18 @@ def get_supervisor():
     return _SUPERVISOR
 
 
+def start_in_flight() -> bool:
+    """Serve is spawning or warming in this process. Status polls this.
+
+    ``ensure_vllm_runtime`` holds ``_START_LOCK`` through ``wait_ready``
+    (GET /v1/models). ``_SUPERVISOR`` is assigned before that wait so a
+    concurrent status read does not see "no pid → stopped".
+    """
+    if _SUPERVISOR is not None:
+        return True
+    return _START_LOCK.locked()
+
+
 def _model_section(config: dict | None) -> dict:
     model = (config or {}).get("model")
     return model if isinstance(model, dict) else {}

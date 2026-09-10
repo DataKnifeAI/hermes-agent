@@ -61,6 +61,40 @@ describe('vllmEngineChip', () => {
     expect(vllmEngineChip({ copy, status: spawned })?.label).not.toMatch(/^Ready/)
   })
 
+  it('shows Starting when a stale Stopped arrives with a live pid or start job', () => {
+    expect(
+      vllmEngineChip({
+        copy,
+        status: { ...idle, engine_state: 'stopped', pid: 88 }
+      })?.label
+    ).toBe('Starting')
+
+    expect(
+      vllmEngineChip({
+        copy,
+        jobs: [{ kind: 'quickstart', phase: 'starting-server', status: 'running' }],
+        status: idle
+      })?.label
+    ).toBe('Starting')
+
+    expect(
+      vllmEngineChip({
+        copy,
+        serverBusy: true,
+        status: idle
+      })?.label
+    ).toBe('Starting')
+  })
+
+  it('does not treat leftover start_phase as Starting when the API says stopped', () => {
+    expect(
+      vllmEngineChip({
+        copy,
+        status: { ...idle, engine_state: 'stopped', start_phase: 'Capturing CUDA graphs' }
+      })
+    ).toEqual({ label: 'Stopped', tone: 'muted' })
+  })
+
   it('labels error, install, and update without claiming Ready', () => {
     expect(
       vllmEngineChip({
@@ -72,7 +106,7 @@ describe('vllmEngineChip', () => {
     expect(
       vllmEngineChip({
         copy,
-        jobs: [{ kind: 'vllm-install', status: 'running' }],
+        jobs: [{ kind: 'vllm-install', phase: 'installing-venv', status: 'running' }],
         status: { ...idle, engine_state: 'not_installed', runtime_installed: false }
       })
     ).toEqual({ label: 'Installing', tone: 'warn' })
@@ -80,7 +114,7 @@ describe('vllmEngineChip', () => {
     expect(
       vllmEngineChip({
         copy,
-        jobs: [{ kind: 'vllm-update', status: 'running' }],
+        jobs: [{ kind: 'vllm-update', phase: 'updating-venv', status: 'running' }],
         status: idle
       })
     ).toEqual({ label: 'Updating', tone: 'warn' })

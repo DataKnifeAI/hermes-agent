@@ -6,6 +6,7 @@ import { AlertTriangle, Cpu, FolderOpen, Package, Zap } from '@/lib/icons'
 import type { LocalEngine, LocalHardware, LocalModelsStatus } from '@/types/hermes'
 
 import { Pill } from './primitives'
+import { vllmEngineState } from './vllm-engine-chip'
 
 function gbLabel(bytes: number | null | undefined): string {
   if (bytes == null || bytes < 0) {
@@ -66,13 +67,26 @@ export function LocalModelsMachineStats({
   const [detailsOpen, setDetailsOpen] = useState(false)
   const cachePath = hardware.models_dir_display || hardware.models_dir
   const runtimePath = hardware.runtime_dir_display || hardware.runtime_dir || status?.venv_path
-  const listenUrl = status?.server_base_url
-  const served = status?.served_model_name || status?.active_model_id || status?.model
-  const servingLabel = status?.server_running
-    ? copy.servingReady
-    : status?.start_phase
-      ? copy.servingStarting
-      : null
+  const engineState =
+    engine === 'vllm' && status
+      ? vllmEngineState({
+          ...status,
+          engine_state: status.engine_state ?? hardware.engine_state,
+          pid: status.pid ?? hardware.pid,
+          start_phase: status.start_phase ?? hardware.start_phase
+        })
+      : status?.server_running
+        ? 'ready'
+        : null
+  const listenUrl = engineState === 'ready' || engineState === 'starting' ? status?.server_base_url : null
+  const served =
+    engineState === 'ready'
+      ? status?.served_model_name || status?.active_model_id || null
+      : engineState === 'starting'
+        ? status?.served_model_name || status?.model || status?.start_phase || null
+        : null
+  const servingLabel =
+    engineState === 'ready' ? copy.servingReady : engineState === 'starting' ? copy.servingStarting : null
   const occupancy =
     hardware.occupancy_foreign || Boolean(status?.occupancy_message) || Boolean(status?.occupancy?.length)
   const used = hardware.vram_used_bytes
@@ -187,13 +201,15 @@ export function LocalModelsMachineStats({
             }
           />
 
-          {served && (
+          {(served || servingLabel) && (
             <StatLine
               label={copy.servingStat}
               value={
                 <span className="inline-flex flex-wrap items-center gap-1.5">
-                  <span>{served}</span>
-                  {servingLabel && <Pill tone={status?.server_running ? 'success' : 'warn'}>{servingLabel}</Pill>}
+                  {served && <span>{served}</span>}
+                  {servingLabel && (
+                    <Pill tone={engineState === 'ready' ? 'success' : 'warn'}>{servingLabel}</Pill>
+                  )}
                 </span>
               }
             />

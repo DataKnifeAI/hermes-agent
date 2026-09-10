@@ -1303,6 +1303,8 @@ export interface LocalModelsStatus {
   runtime_backend: string | null
   /** Managed vLLM only. `ready` iff GET /v1/models 200. */
   engine_state?: 'error' | 'not_installed' | 'ready' | 'starting' | 'stopped'
+  /** Live serve pid while starting or ready. Missing on older backends. */
+  pid?: null | number
   server_running: boolean
   server_base_url: string | null
   active_model_id: string | null
@@ -1359,6 +1361,10 @@ export interface LocalHardware {
   runtime_dir_display?: string
   occupancy_foreign?: boolean
   ctx_64k_feasible?: boolean | null
+  /** Same starting/ready/stopped rule as LocalModelsStatus. vLLM only. */
+  engine_state?: LocalModelsStatus['engine_state']
+  pid?: null | number
+  start_phase?: null | string
 }
 
 export interface LocalCatalogModel {

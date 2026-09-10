@@ -198,6 +198,95 @@ def _vllm_last_error() -> str | None:
     return read_last_error()
 
 
+def classify_vllm_engine_state(
+    *,
+    ready: bool,
+    starting: bool,
+    last_error: str | None,
+    installed: bool,
+) -> str:
+    """Ready only after GET /v1/models 200. Starting beats leftover last_error."""
+    if ready:
+        return "ready"
+    if starting:
+        return "starting"
+    if last_error:
+        return "error"
+    if installed:
+        return "stopped"
+    return "not_installed"
+
+
+def _vllm_start_job_running() -> bool:
+    """Quickstart legs that wait on serve — Use/server-start are not jobs."""
+    from hermes_cli.web_routers import local_models as lm
+
+    start_kinds = frozenset({"quickstart"})
+    start_phases = frozenset({"setting-default", "starting", "starting-server"})
+    with lm._JOBS_LOCK:
+        return any(
+            j.get("status") == "running"
+            and j.get("kind") in start_kinds
+            and j.get("phase") in start_phases
+            for j in lm._JOBS.values()
+        )
+
+
+def vllm_serve_starting() -> bool:
+    """In-process start lock / supervisor, or a start job, even before state pid."""
+    from hermes_cli.vllm_runtime.bootstrap import start_in_flight
+
+    return start_in_flight() or _vllm_start_job_running()
+
+
+def vllm_engine_snapshot(
+    config: dict | None = None, *, with_occupancy: bool = True,
+) -> dict[str, Any]:
+    """Shared starting/ready/stopped for status and hardware. No VRAM."""
+    from hermes_cli.vllm_runtime.bootstrap import get_supervisor
+    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.inventory import running_served_model_name
+    from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
+    from hermes_cli.vllm_runtime.venv import venv_ready
+
+    cfg = config or {}
+    settings = vllm_settings(cfg)
+    running = resolve_vllm_endpoint(wait_for_boot_s=0)
+    served = running_served_model_name() or None
+    ready = bool(served)
+    occ = occupancy_payload() if with_occupancy else {
+        "occupancy": [], "occupancy_message": None,
+    }
+    last_error = occ["occupancy_message"] or _vllm_last_error()
+    installed = venv_ready()
+    sup = get_supervisor()
+    proc = getattr(sup, "proc", None) if sup is not None else None
+    proc_live = proc is not None and getattr(proc, "poll", lambda: 0)() is None
+    pid = (running or {}).get("pid")
+    if pid is None and proc_live:
+        pid = getattr(proc, "pid", None)
+    starting = (not ready) and (
+        running is not None or proc_live or vllm_serve_starting()
+    )
+    engine_state = classify_vllm_engine_state(
+        ready=ready, starting=starting, last_error=last_error, installed=installed,
+    )
+    return {
+        "engine_state": engine_state,
+        "installed": installed,
+        "last_error": last_error,
+        "occupancy": occ,
+        "pid": pid,
+        "ready": ready,
+        "running": running,
+        "served": served,
+        "settings": settings,
+        "start_phase": None if ready else _vllm_log_phase(),
+        "server_base_url": (running or {}).get("base_url") or (
+            openai_base_url(settings) if installed else None),
+    }
+
+
 def occupancy_payload() -> dict[str, Any]:
     from hermes_cli.vllm_runtime.occupancy import (
         discover_occupying_llms, occupancy_stop_message)
@@ -230,34 +319,16 @@ def _vllm_log_phase() -> str | None:
 
 def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
     """Status for the selected vLLM engine — not llama tag / GGUF staging."""
-    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
-    from hermes_cli.vllm_runtime.inventory import catalog_models, running_served_model_name
-    from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
-    from hermes_cli.vllm_runtime.venv import venv_dir, venv_ready, vllm_version_fields
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.venv import venv_dir, vllm_version_fields
 
     cfg = config or {}
     section = cfg.get("local_runtime") or {}
-    settings = vllm_settings(cfg)
-    running = resolve_vllm_endpoint(wait_for_boot_s=0)
-    # Live serve only after GET /v1/models 200 — spawn-time state is not ready.
-    served = running_served_model_name() or None
-    ready = bool(served)
-    configured = str(settings.get("model") or "") or None
-    occ = occupancy_payload()
-    last_error = occ["occupancy_message"] or _vllm_last_error()
-    installed = venv_ready()
-    # Ready is the healthy endpoint only. A live pid with no /v1/models
-    # name is still starting — never "ready" on spawn.
-    if ready:
-        engine_state = "ready"
-    elif running is not None:
-        engine_state = "starting"
-    elif last_error:
-        engine_state = "error"
-    elif installed:
-        engine_state = "stopped"
-    else:
-        engine_state = "not_installed"
+    snap = vllm_engine_snapshot(cfg)
+    installed = snap["installed"]
+    ready = snap["ready"]
+    served = snap["served"]
+    occ = snap["occupancy"]
     versions = vllm_version_fields()
     inventory = catalog_models(cfg)
     return {
@@ -267,15 +338,15 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
         "runtime_installed": installed,
         "runtime_backend": "vllm" if installed else None,
         "venv_path": str(venv_dir()) if installed else "",
-        "engine_state": engine_state,
+        "engine_state": snap["engine_state"],
+        "pid": snap["pid"],
         "server_running": ready,
-        "server_base_url": (running or {}).get("base_url") or (
-            openai_base_url(settings) if installed else None),
+        "server_base_url": snap["server_base_url"],
         "active_model_id": served,
         "served_model_name": served,
-        "model": configured,
-        "start_phase": None if ready else _vllm_log_phase(),
-        "last_error": last_error,
+        "model": str(snap["settings"].get("model") or "") or None,
+        "start_phase": snap["start_phase"],
+        "last_error": snap["last_error"],
         **occ,
         "tag": versions.get("tag") or "",
         "configured_tag": versions.get("configured_tag") or "",

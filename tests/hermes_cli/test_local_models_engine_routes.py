@@ -624,15 +624,80 @@ def test_vllm_engine_state_ready_iff_healthy_endpoint(tmp_path, monkeypatch):
     warming = client.get("/api/local-models/status").json()
     assert warming["server_running"] is False
     assert warming["engine_state"] == "starting"
+    assert warming["engine_state"] != "stopped"
     assert (warming["engine_state"] == "ready") is warming["server_running"]
 
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.vllm_serve_starting",
+        lambda: False)
     idle = client.get("/api/local-models/status").json()
     assert idle["server_running"] is False
     assert idle["engine_state"] == "stopped"
     assert (idle["engine_state"] == "ready") is idle["server_running"]
+
+
+def test_vllm_engine_state_spawned_not_healthy_is_starting(tmp_path, monkeypatch):
+    """In-process supervisor with no /v1/models is starting — not stopped."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "Qwen/Qwen3-14B",
+        "served_model_name": "qwen3:14b",
+    }})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "")
+
+    class _Warm:
+        pid = 88
+
+        def poll(self):
+            return None
+
+    class _Sup:
+        proc = _Warm()
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda: _Sup())
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine._vllm_last_error",
+        lambda: "stale leftover")
+
+    status = client.get("/api/local-models/status").json()
+    assert status["engine_state"] == "starting"
+    assert status["engine_state"] != "stopped"
+    assert status["server_running"] is False
+    assert status["pid"] == 88
+
+    hardware = client.get("/api/local-models/hardware").json()
+    assert hardware["engine_state"] == "starting"
+    assert hardware["engine_state"] != "stopped"
+    assert hardware["pid"] == 88
+
+
+def test_classify_vllm_engine_state_invariants():
+    from hermes_cli.web_routers.local_models_engine import classify_vllm_engine_state
+
+    assert classify_vllm_engine_state(
+        ready=True, starting=True, last_error="x", installed=True) == "ready"
+    assert classify_vllm_engine_state(
+        ready=False, starting=True, last_error="x", installed=True) == "starting"
+    assert classify_vllm_engine_state(
+        ready=False, starting=False, last_error="x", installed=True) == "error"
+    assert classify_vllm_engine_state(
+        ready=False, starting=False, last_error=None, installed=True) == "stopped"
 
 
 def _wait_job(client, job_id: str, timeout_s: float = 3.0) -> dict:

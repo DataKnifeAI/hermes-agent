@@ -16,24 +16,49 @@ export interface VllmEngineChip {
   tone: VllmEngineChipTone
 }
 
-function derivedState(
-  status: Pick<LocalModelsStatus, 'engine_state' | 'last_error' | 'runtime_installed' | 'server_running' | 'start_phase'>
-): LocalModelsStatus['engine_state'] {
-  if (status.engine_state) {
-    return status.engine_state
-  }
+const START_JOB_PHASES = new Set(['setting-default', 'starting', 'starting-server'])
 
-  // Older backends: Ready only after /v1/models (server_running).
-  if (status.server_running) {
+function startJobRunning(jobs: readonly Pick<LocalRuntimeJob, 'kind' | 'phase' | 'status'>[]): boolean {
+  return jobs.some(
+    j => j.status === 'running' && (j.kind === 'quickstart' ? START_JOB_PHASES.has(j.phase) : false)
+  )
+}
+
+export function vllmEngineState(
+  status: Pick<
+    LocalModelsStatus,
+    'engine_state' | 'last_error' | 'pid' | 'runtime_installed' | 'server_running' | 'start_phase'
+  >,
+  extra: { serverBusy?: boolean; startJob?: boolean } = {}
+): LocalModelsStatus['engine_state'] {
+  if (status.server_running || status.engine_state === 'ready') {
     return 'ready'
   }
 
-  if (status.start_phase) {
+  // Starting beats a stale Stopped from an older backend that mapped
+  // "not healthy yet" → stopped. Pid / start job / in-flight Use are live.
+  // Leftover log needles (start_phase) are not a live serve — only used
+  // when the backend omitted engine_state entirely.
+  if (
+    status.engine_state === 'starting' ||
+    extra.serverBusy ||
+    extra.startJob ||
+    status.pid != null ||
+    (!status.engine_state && Boolean(status.start_phase))
+  ) {
     return 'starting'
   }
 
-  if (status.last_error) {
+  if (status.engine_state === 'error' || status.last_error) {
     return 'error'
+  }
+
+  if (status.engine_state === 'stopped') {
+    return 'stopped'
+  }
+
+  if (status.engine_state === 'not_installed') {
+    return 'not_installed'
   }
 
   return status.runtime_installed ? 'stopped' : 'not_installed'
@@ -46,11 +71,11 @@ export function vllmEngineChip({
   status
 }: {
   copy: VllmEngineChipCopy
-  jobs?: readonly Pick<LocalRuntimeJob, 'kind' | 'status'>[]
+  jobs?: readonly Pick<LocalRuntimeJob, 'kind' | 'phase' | 'status'>[]
   serverBusy?: boolean
   status: Pick<
     LocalModelsStatus,
-    'engine_state' | 'last_error' | 'runtime_installed' | 'server_running' | 'start_phase'
+    'engine_state' | 'last_error' | 'pid' | 'runtime_installed' | 'server_running' | 'start_phase'
   >
 }): null | VllmEngineChip {
   if (jobs.some(j => j.kind === 'vllm-install' && j.status === 'running')) {
@@ -61,8 +86,7 @@ export function vllmEngineChip({
     return { label: copy.engineUpdating, tone: 'warn' }
   }
 
-  const state =
-    serverBusy && !status.server_running && derivedState(status) !== 'ready' ? 'starting' : derivedState(status)
+  const state = vllmEngineState(status, { serverBusy, startJob: startJobRunning(jobs) })
 
   if (state === 'ready') {
     return { label: copy.engineReady, tone: 'success' }
