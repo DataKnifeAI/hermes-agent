@@ -136,6 +136,22 @@ def _dir_bytes(path: Path) -> int:
     return total
 
 
+def _hub_repo_bytes(path: Path) -> int:
+    """Weight bytes in one HF hub cache dir.
+
+    Hub layout is ``blobs/`` plus ``snapshots/`` symlinks into those blobs.
+    ``Path.stat()`` follows the links, so walking the repo root counted
+    every shard twice and a 5.7 GiB AWQ looked like 11.4 GiB.
+    """
+    blobs = path / "blobs"
+    if blobs.is_dir():
+        return _dir_bytes(blobs)
+    snapshots = path / "snapshots"
+    if snapshots.is_dir():
+        return _dir_bytes(snapshots)
+    return _dir_bytes(path)
+
+
 def _human_gb(n: int | float) -> str:
     return f"{n / (1 << 30):.1f} GB"
 
@@ -180,7 +196,7 @@ def list_cached_repos() -> list[dict[str, Any]]:
         repo = _repo_from_cache_name(child.name)
         if not repo or not _cache_has_weights(child):
             continue
-        size = _dir_bytes(child)
+        size = _hub_repo_bytes(child)
         rows.append({
             "id": repo,
             "size_bytes": size,
@@ -241,9 +257,18 @@ def param_billions_from_safetensors(safetensors: dict | None) -> float | None:
 # vLLM CUDA graphs / activations add ~3 GiB. A percent of the weight file
 # undercounts: 15 GiB on-disk BF16 (params × 2) + 55% was 23 GiB — a lying
 # Fits on a 24 GB 4090. KV does not shrink with AWQ/GPTQ.
+# Serve still passes --kv-cache-dtype fp8, but fit KV stays BF16 so a
+# 15 GiB Nous pack cannot sneak under 24 GB (measured 8B AWQ EngineCore
+# was 19.6 GiB on a 4090 — the utilization pool, not a shrinkable KV).
 _KV_64K_LLAMA8B = 8 * (1 << 30)
 _VLLM_RUNTIME_BYTES = 3 * (1 << 30)
 _KV_AND_RUNTIME_64K = _KV_64K_LLAMA8B + _VLLM_RUNTIME_BYTES
+# vLLM pre-allocates gpu_memory_utilization of the card, then CUDA graphs
+# sit outside that pool. Measured on a 24564 MiB 4090 at util 0.75:
+# EngineCore 20082 MiB ≈ 0.75 × card + 1.6 GiB graphs. Fit compares the
+# 64k floor against this usable budget, not the sticker 24.000 GiB.
+_VLLM_GPU_UTIL = 0.75
+_VLLM_GRAPH_BYTES = 2 * (1 << 30)
 
 
 def estimate_min_vram_bytes(params_b: float, quant: str) -> int:
@@ -278,6 +303,32 @@ def _vram_from_weight_bytes(weight: int, *, config: dict | None = None) -> int:
     kv = _kv_from_config(config)
     reserve = (kv + _VLLM_RUNTIME_BYTES) if kv else _KV_AND_RUNTIME_64K
     return int(weight) + reserve
+
+
+def usable_vllm_bytes(total_vram: int, *, util: float = _VLLM_GPU_UTIL) -> int:
+    """Bytes vLLM can actually hold at the default 64k serve flags.
+
+    ``gpu_memory_utilization`` (0.75) is the engine pool; CUDA graphs add a
+    couple of GiB outside it. A 24564 MiB 4090 is 12 MiB under 24 GiB — using
+    the sticker tier floor as VRAM was a lying Too big for 14B AWQ.
+    """
+    if total_vram <= 0:
+        return 0
+    pool = int(total_vram * util)
+    return min(int(total_vram), pool + _VLLM_GRAPH_BYTES)
+
+
+def _fit_on_probe(min_vram: int, total_vram: int) -> str:
+    """Fits when the 64k floor is at or under the card — not the 0.75 pool.
+
+    Qwen3-14B-AWQ (9.3 GiB weights + 64k KV) started on a 24564 MiB 4090 at
+    64k. Comparing against ``usable_vllm_bytes`` (pool + 2 GiB graphs) called
+    that Too big by 0.3 GiB. The card is the budget; utilization is a serve
+    flag, not a shrink-to-fit.
+    """
+    if total_vram <= 0 or min_vram <= 0:
+        return "unknown"
+    return "fits-gpu" if min_vram <= total_vram else "too-big"
 
 
 def _format_param_label(params: float | None) -> str | None:
@@ -704,15 +755,10 @@ def classify_vllm_repo(
 
     if blocked and matched is None:
         detail = blocked
-    elif matched is not None:
-        min_vram = matched.min_vram_bytes
-        if total_vram > 0:
-            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
-        detail = _detail(priced_quant=quant)
     elif actual >= _MIN_WEIGHT_BYTES:
         min_vram = _vram_from_weight_bytes(actual, config=config)
         if total_vram > 0:
-            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
+            fit = _fit_on_probe(min_vram, total_vram)
         fullprec = not quant or quant in {"bf16", "fp16"}
         detail = _detail(priced_quant=quant or ("bf16" if fullprec else None),
                          fullprec_too_big=fit == "too-big" and fullprec)
@@ -735,7 +781,7 @@ def classify_vllm_repo(
         tag_quant = parse_quantization("", tag_list)
         if params is not None and id_quant in _QUANT_BYTES and total_vram > 0:
             min_vram = estimate_min_vram_bytes(params, id_quant)
-            fit = "fits-gpu" if total_vram >= min_vram else "too-big"
+            fit = _fit_on_probe(min_vram, total_vram)
             detail = _detail(
                 priced_quant=id_quant,
                 fullprec_too_big=fit == "too-big" and id_quant in {"bf16", "fp16"},
@@ -747,8 +793,8 @@ def classify_vllm_repo(
             and not tag_quant
         ):
             min_vram = estimate_min_vram_bytes(params, "bf16")
-            if total_vram < min_vram:
-                fit = "too-big"
+            fit = _fit_on_probe(min_vram, total_vram)
+            if fit == "too-big":
                 detail = _detail(priced_quant="bf16", fullprec_too_big=True)
     capabilities = _capability_tags(
         hid=hid, tag_list=tag_list, quant=quant, matched=matched,
@@ -1108,6 +1154,26 @@ def running_served_model_name() -> str:
         return ""
 
 
+def hide_catalog_row_by_default(row: dict[str, Any]) -> bool:
+    """Official catalog rows the probe says cannot run at 64k stay in the catalog.
+
+    User-added / cached extras stay visible even when Too big — the user
+    already knows they are there. Search hits are not catalog rows.
+    """
+    if row.get("added_by_you"):
+        return False
+    return row.get("fit") == "too-big" or row.get("fits") is False
+
+
+def visible_catalog_models(
+    rows: list[dict[str, Any]], *, show_unfitting: bool = False,
+) -> list[dict[str, Any]]:
+    """Same hide set for Desktop and ``hermes local ls``."""
+    if show_unfitting:
+        return list(rows)
+    return [r for r in rows if not r.get("hide_by_default")]
+
+
 def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) -> list[dict[str, Any]]:
     """Official short list + extra cached / configured HF ids. Not six defaults.
 
@@ -1158,12 +1224,14 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
             "min_vram_bytes": tags["min_vram_bytes"],
             "quantization": tags["quantization"],
             "capabilities": tags["capabilities"],
+            "hide_by_default": False,
         }
         created = meta.get("created_at")
         if created:
             out["created_at"] = created
         if extra:
             out.update(extra)
+        out["hide_by_default"] = hide_catalog_row_by_default(out)
         return out
 
     for tier in catalog_tiers():

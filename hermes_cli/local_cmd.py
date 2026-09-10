@@ -72,7 +72,29 @@ def cmd_local_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     if bench:
         status = "ok" if bench.get("ok") else "fail"
         print(f"last bench: {status} {bench.get('url') or ''}".rstrip())
+    if engine == "vllm":
+        _print_vllm_catalog(cfg, show_unfitting=bool(getattr(args, "show_unfitting", False)))
     return 0
+
+
+def _print_vllm_catalog(cfg: dict, *, show_unfitting: bool) -> None:
+    from hermes_cli.vllm_runtime.inventory import catalog_models, visible_catalog_models
+
+    rows = catalog_models(cfg)
+    hidden = sum(1 for r in rows if r.get("hide_by_default"))
+    shown = visible_catalog_models(rows, show_unfitting=show_unfitting)
+    print("models:")
+    for row in shown:
+        bits = [row["id"], row.get("fit") or "unknown"]
+        if row.get("cached"):
+            bits.append("cached")
+        if row.get("recommended"):
+            bits.append("recommended")
+        if row.get("hide_by_default"):
+            bits.append("too-big")
+        print("  " + "  ".join(bits))
+    if hidden and not show_unfitting:
+        print(f"  ({hidden} hidden — hermes local ls --show-unfitting)")
 
 
 def cmd_local_engine(args: argparse.Namespace) -> int:

@@ -19,9 +19,12 @@ def build_local_parser(subparsers, *, cmd_local: Callable) -> None:
         ),
     )
     sub = parser.add_subparsers(dest="local_command")
-    sub.add_parser(
+    status = sub.add_parser(
         "status", aliases=["list", "ls"],
-        help="Show engine, server, venv, and GPU probe (default)")
+        help="Show engine, server, venv, GPU probe, and the vLLM catalog")
+    status.add_argument(
+        "--show-unfitting", action="store_true",
+        help="Include official catalog rows that do not fit this GPU")
     engine = sub.add_parser(
         "engine", help="Show or set local_runtime.engine (llamacpp | vllm)")
     engine.add_argument(

@@ -163,8 +163,13 @@ def tier_for_model(hf_id: str) -> VllmTier | None:
     )
 
 
+# nvidia-smi reports a 4090 as 24564 MiB — 12 MiB under 24 GiB. Treat
+# advertised-N-GB cards as that class so a 24 GB probe still recommends 14B.
+_TIER_SLACK_BYTES = 512 << 20
+
+
 def _pick_tier(total_bytes: int) -> VllmTier | None:
-    matching = [t for t in TIERS if total_bytes >= t.min_vram_bytes]
+    matching = [t for t in TIERS if total_bytes + _TIER_SLACK_BYTES >= t.min_vram_bytes]
     if not matching:
         return None
     return max(matching, key=lambda t: t.min_vram_bytes)

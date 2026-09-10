@@ -14,6 +14,7 @@ from hermes_cli.vllm_runtime.inventory import (
     _KV_AND_RUNTIME_64K,
     hf_http_status_and_detail,
     _cache_name,
+    _hub_repo_bytes,
     _job_tqdm_class,
     _kv_from_config,
     _vram_from_weight_bytes,
@@ -22,12 +23,15 @@ from hermes_cli.vllm_runtime.inventory import (
     download_hf_repo,
     ensure_hf_weights,
     estimate_min_vram_bytes,
+    hide_catalog_row_by_default,
     hf_hub_dir,
     list_cached_repos,
     parse_param_billions,
     parse_quantization,
     repo_is_cached,
     resolve_weight_bytes,
+    usable_vllm_bytes,
+    visible_catalog_models,
 )
 
 
@@ -99,16 +103,23 @@ def test_local_vllm_400_is_not_hf_rejection():
     assert "Bad Request" not in detail
 
 
-def test_classify_uses_tier_floor_not_a_guess():
-    # Curated 32B row is the 40 GB tier — 24 GB must read too-big, not Fits.
+def test_classify_uses_physics_not_tier_floor():
+    # Official ids use weights+64k KV, not the 16/24/40/80 sticker buckets.
+    # A 4090 reports 24564 MiB (12 MiB under 24 GiB); the 24 GB floor was a
+    # lying Too big for 14B AWQ while community forks of the same pack Fit.
     tags = classify_vllm_repo("Qwen/Qwen3-32B-AWQ", total_vram=24 * _GIB)
     assert tags["fit"] == "too-big"
     assert tags["fits"] is False
+    assert tags["min_vram_bytes"] != 40 * _GIB
     small = classify_vllm_repo("Qwen/Qwen3-8B-AWQ", total_vram=24 * _GIB,
                                recommended_id="Qwen/Qwen3-14B-AWQ")
     assert small["fit"] == "fits-gpu"
     assert small["recommended"] is False
     assert "awq" in small["capabilities"]
+    fourteen = classify_vllm_repo(
+        "Qwen/Qwen3-14B-AWQ", total_vram=24 * _GIB, used_storage=8 * _GIB)
+    assert fourteen["fit"] == "fits-gpu"
+    assert fourteen["min_vram_bytes"] == _vram_from_weight_bytes(8 * _GIB)
 
 
 def test_classify_8b_awq_fits_24gb_from_safetensors_not_id():
@@ -651,3 +662,65 @@ def test_download_job_verifying_after_bytes_complete(monkeypatch, tmp_path):
     assert job["phase"] == DOWNLOAD_VERIFY_PHASE
     assert job["done_bytes"] == 1000
     assert "install" not in (job.get("detail") or "").lower()
+
+
+def test_official_40gb_80gb_hidden_on_24gb_probe_show_override(monkeypatch):
+    """Built-in 40/80 GB Qwen rows stay in the catalog but hide on a 24 GB card."""
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.recommend import (
+        NvidiaProbe, VllmRecommendation, catalog_tiers,
+    )
+
+    pick = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(NvidiaProbe(24 * _GIB, 24 * _GIB, "data"), pick, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.list_cached_repos", lambda: [])
+    monkeypatch.setattr("hermes_cli.vllm_runtime.supervisor.vllm_settings", lambda cfg=None: {})
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.running_served_model_name", lambda: "")
+    rows = catalog_models({})
+    by_id = {r["id"]: r for r in rows}
+    eight = by_id["Qwen/Qwen3-8B-AWQ"]
+    forty = by_id["Qwen/Qwen3-32B-AWQ"]
+    eighty = by_id["Qwen/Qwen3.8-27B-FP8"]
+    assert eight["fit"] == "fits-gpu"
+    assert eight["hide_by_default"] is False
+    assert hide_catalog_row_by_default(eight) is False
+    assert forty["fit"] == "too-big"
+    assert eighty["fit"] == "too-big"
+    assert forty["hide_by_default"] is eighty["hide_by_default"] is True
+    visible = visible_catalog_models(rows)
+    assert eight in visible
+    assert forty not in visible and eighty not in visible
+    shown = visible_catalog_models(rows, show_unfitting=True)
+    assert {r["id"] for r in shown} >= {"Qwen/Qwen3-8B-AWQ", "Qwen/Qwen3-32B-AWQ", "Qwen/Qwen3.8-27B-FP8"}
+
+
+def test_hub_cache_does_not_double_count_blobs_and_snapshots(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    repo = hub / "models--acme--awq"
+    blobs = repo / "blobs"
+    snaps = repo / "snapshots" / "abc"
+    blobs.mkdir(parents=True)
+    snaps.mkdir(parents=True)
+    payload = b"x" * (200 << 20)
+    shard = blobs / "deadbeef"
+    shard.write_bytes(payload)
+    (snaps / "model.safetensors").symlink_to(shard)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    assert _hub_repo_bytes(repo) == len(payload)
+    rows = list_cached_repos()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "acme/awq"
+    assert rows[0]["size_bytes"] == len(payload)
+    assert rows[0]["cached"] is True
+    assert rows[0]["size_bytes"] < 2 * len(payload)
+
+
+def test_usable_pool_is_below_sticker_24gib():
+    """A 4090-class card's vLLM pool is not the advertised 24.000 GiB."""
+    card = 24564 << 20
+    usable = usable_vllm_bytes(card)
+    assert usable < 24 * _GIB
+    assert usable > 16 * _GIB
+    assert estimate_min_vram_bytes(8, "awq") < usable
+    assert estimate_min_vram_bytes(8, "bf16") > usable
