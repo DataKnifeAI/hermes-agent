@@ -43,6 +43,10 @@ def test_parse_param_billions_takes_last_size_token():
     assert parse_param_billions("meta-llama/Llama-3.1-8B-Instruct") == 8
     assert parse_param_billions("Qwen/Qwen3-Coder-30B-A3B-Instruct") == 30
     assert parse_param_billions("someone/mystery-weights") is None
+    # Version ``4.3`` and the ``4bit`` suffix are not the size token.
+    assert parse_param_billions("cyankiwi/Hermes-4.3-36B-AWQ-4bit") == 36
+    assert parse_param_billions("cyankiwi/Hermes-4-70B-AWQ-4bit") == 70
+    assert parse_param_billions("cyankiwi/Hermes-4-14B-AWQ-4bit") == 14
 
 
 def test_parse_quantization_from_id_or_tags():
@@ -967,3 +971,83 @@ def test_usable_pool_is_below_sticker_24gib():
     assert usable > 16 * _GIB
     assert estimate_min_vram_bytes(8, "awq") < usable
     assert estimate_min_vram_bytes(8, "bf16") > usable
+
+
+def test_compressed_tensors_36b_70b_awq_too_big_on_24gb():
+    """cyankiwi Hermes 36B/70B AWQ-4bit cannot sneak under a 24 GB 64k floor.
+
+    Hub publishes packed I32+BF16 with a ``total`` far below the weight
+    count (≈7B / ≈13B). Pricing that as AWQ bpp + Llama KV was a lying
+    Fits. usedStorage is the shard bytes (~21 / ~40 GiB) before KV.
+    Search (no usedStorage) and the named id must agree: Too big.
+    14B AWQ-4bit, Qwen3-8B-AWQ, and Nous BF16 8B keep their contracts.
+    """
+    vram = 24 * _GIB
+    st36 = {
+        "parameters": {"I64": 896, "I32": 34_561_064_960, "BF16": 2_670_072_832},
+        "total": 6_990_206_848,
+    }
+    st70 = {
+        "parameters": {"I64": 1120, "I32": 68_451_041_280, "BF16": 4_241_760_256},
+        "total": 12_798_141_536,
+    }
+    st14 = {
+        "parameters": {"I64": 560, "I32": 13_212_057_600, "BF16": 1_969_126_400},
+        "total": 3_620_634_160,
+    }
+    ct4 = {
+        "quantization_config": {
+            "quant_method": "compressed-tensors",
+            "format": "pack-quantized",
+            "config_groups": {
+                "group_0": {"format": "pack-quantized", "weights": {"num_bits": 4}},
+            },
+        },
+    }
+    used36, used70, used14 = 22_632_759_876, 42_726_471_405, 10_555_823_417
+    hid36 = "cyankiwi/Hermes-4.3-36B-AWQ-4bit"
+    hid70 = "cyankiwi/Hermes-4-70B-AWQ-4bit"
+    hid14 = "cyankiwi/Hermes-4-14B-AWQ-4bit"
+
+    named36 = classify_vllm_repo(hid36, total_vram=vram)
+    search36 = classify_vllm_repo(
+        hid36, tags=["compressed-tensors", "instruct"], total_vram=vram,
+        safetensors=st36, config=ct4, used_storage=used36)
+    noused36 = classify_vllm_repo(
+        hid36, tags=["compressed-tensors"], total_vram=vram,
+        safetensors=st36, config=ct4)
+    named70 = classify_vllm_repo(hid70, total_vram=vram)
+    search70 = classify_vllm_repo(
+        hid70, tags=["compressed-tensors"], total_vram=vram,
+        safetensors=st70, config=ct4, used_storage=used70)
+    noused70 = classify_vllm_repo(
+        hid70, total_vram=vram, safetensors=st70, config=ct4)
+    named14 = classify_vllm_repo(hid14, total_vram=vram)
+    search14 = classify_vllm_repo(
+        hid14, tags=["compressed-tensors", "instruct"], total_vram=vram,
+        safetensors=st14, config=ct4, used_storage=used14)
+
+    for row in (named36, search36, noused36, named70, search70, noused70):
+        assert row["fit"] == "too-big"
+        assert row["fits"] is False
+        assert row["min_vram_bytes"] > vram
+    assert search36["min_vram_bytes"] > search14["min_vram_bytes"]
+    assert search70["min_vram_bytes"] > search36["min_vram_bytes"]
+    assert search36["size_bytes"] > used14
+    assert search70["size_bytes"] > search36["size_bytes"]
+    assert search36["quantization"] == search70["quantization"] == "awq"
+
+    assert named14["fit"] == search14["fit"] == "fits-gpu"
+    assert search14["min_vram_bytes"] <= vram
+    assert search14["min_vram_bytes"] > used14  # weights are not VRAM
+    assert classify_vllm_repo("Qwen/Qwen3-8B-AWQ", total_vram=vram)["fit"] == "fits-gpu"
+    nous = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=vram)
+    assert nous["fit"] == "too-big"
+    assert NEEDS_AWQ_MSG in nous["fit_detail"]
+
+    actual36, listing36 = resolve_weight_bytes(
+        hid=hid36, safetensors=st36, config=ct4, used_storage=used36)
+    underpriced = int(6_990_206_848 * 0.55)
+    assert listing36 >= used36
+    assert actual36 > underpriced
+    assert actual36 + _KV_AND_RUNTIME_64K > vram

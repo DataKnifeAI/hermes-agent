@@ -331,13 +331,29 @@ def parse_quantization(repo: str, tags: list[str] | None = None) -> str | None:
 
 
 def param_billions_from_safetensors(safetensors: dict | None) -> float | None:
-    """``safetensors.total`` / summed ``parameters`` — param count, not file bytes."""
+    """``safetensors.total`` / summed ``parameters`` — param count, not file bytes.
+
+    Packed AWQ / compressed-tensors indexes often publish ``total`` far below
+    the I32 weight count (a 36B repo with ``total`` ≈ 7B). That is not a
+    parameter count — fall through so the id's ``Nb`` token can win.
+    """
     if not isinstance(safetensors, dict):
         return None
+    params = safetensors.get("parameters")
     total = safetensors.get("total")
+    i32 = 0.0
+    if isinstance(params, dict):
+        raw_i32 = params.get("I32", params.get("i32"))
+        if isinstance(raw_i32, (int, float)):
+            i32 = float(raw_i32)
+        if (
+            _awq_packed_safetensors(params)
+            and isinstance(total, (int, float))
+            and i32 > float(total)
+        ):
+            return None
     if isinstance(total, (int, float)) and total >= 10_000_000:
         return float(total) / 1_000_000_000
-    params = safetensors.get("parameters")
     if isinstance(params, dict):
         summed = sum(v for v in params.values() if isinstance(v, (int, float)))
         if summed >= 10_000_000:
@@ -531,16 +547,42 @@ def _base_model_blob(card_data: dict | None) -> str:
     return ""
 
 
+def _compressed_tensors_bits(qcfg: dict) -> int | None:
+    """llmcompressor W4 lives in ``config_groups.*.weights.num_bits``, not ``bits``."""
+    bits = qcfg.get("bits")
+    if isinstance(bits, int) and bits > 0:
+        return bits
+    groups = qcfg.get("config_groups")
+    if not isinstance(groups, dict):
+        return None
+    for group in groups.values():
+        if not isinstance(group, dict):
+            continue
+        weights = group.get("weights")
+        if isinstance(weights, dict):
+            n = weights.get("num_bits")
+            if isinstance(n, int) and n > 0:
+                return n
+    return None
+
+
 def _quant_from_config(config: dict | None) -> str | None:
     if not isinstance(config, dict):
         return None
     qcfg = config.get("quantization_config")
     if not isinstance(qcfg, dict):
         return None
-    method = str(qcfg.get("quant_method") or "").lower()
+    method = str(qcfg.get("quant_method") or "").lower().replace("_", "-")
     bits = qcfg.get("bits")
     if method in {"awq", "gptq", "fp8", "mxfp4", "nvfp4"}:
         return method
+    if method == "compressed-tensors":
+        n = _compressed_tensors_bits(qcfg)
+        fmt = str(qcfg.get("format") or "").lower()
+        if n == 4 or "pack-quantized" in fmt:
+            return "awq"
+        if n == 8:
+            return "int8"
     if bits == 4:
         return "int4"
     if bits == 8:
@@ -552,6 +594,25 @@ def _awq_packed_safetensors(params: dict) -> bool:
     """AWQ shards store packed int32 + a BF16/F16 scale — not a unique dtype."""
     keys = {str(k).upper() for k in params}
     return "I32" in keys and bool(keys & {"BF16", "F16"})
+
+
+def _packed_awq_file_bytes(params: dict) -> int:
+    """On-disk bytes for HF's I32+BF16 AWQ index.
+
+    Hub counts 4-bit weights as I32 *elements*, not int32 values. Each is
+    0.5 bytes; scales stay BF16/F16. ``total × 0.55`` on a compressed-tensors
+    index under-prices a 21 GiB 36B pack as ~3.6 GiB (the ~7B ``total``).
+    """
+    total = 0
+    for key, value in params.items():
+        if not isinstance(value, (int, float)):
+            continue
+        kind = str(key).upper()
+        if kind == "I32":
+            total += int(value * 0.5)
+        else:
+            total += int(value) * _DTYPE_WIDTH.get(kind, 0)
+    return total
 
 
 def _quant_from_safetensors(safetensors: dict | None) -> str | None:
@@ -802,8 +863,14 @@ def weight_bytes_from_safetensors(safetensors: dict | None, quant: str | None = 
             count = float(sum(v for v in params.values() if isinstance(v, (int, float))))
         # Packed AWQ must win before unique-dtype: I32 is unmapped, so
         # I32+BF16 would otherwise look like a BF16-only pack (~4× too large).
-        if _awq_packed_safetensors(params) and count >= 10_000_000:
-            return int(count * _QUANT_BYTES["awq"])
+        # ``total × 0.55`` is wrong when total is the compressed index
+        # (36B / 70B cyankiwi packs); price the I32+scale file bytes.
+        if _awq_packed_safetensors(params):
+            packed = _packed_awq_file_bytes(params)
+            if packed >= _MIN_WEIGHT_BYTES:
+                return packed
+            if count >= 10_000_000:
+                return int(count * _QUANT_BYTES["awq"])
         # MXFP4 publishes U8 + BF16. Summing U8×1 + BF16×2 is ~21 GiB for
         # gpt-oss-20b; the snapshot is ~13 GiB. Price as MXFP4 bpp.
         if count >= 10_000_000 and quant in {"mxfp4", "nvfp4"}:
@@ -872,12 +939,23 @@ def resolve_weight_bytes(
         priced = st_bytes
     elif params is not None and strong_quant in _QUANT_BYTES:
         priced = int(params * 1_000_000_000 * _QUANT_BYTES[strong_quant])
+    # Named 36B/70B AWQ must not price from a ~7B/13B packed ``total``.
+    # Dense BF16/FP16 and MXFP4 already have their own shard math.
+    if params is not None and strong_quant in {"awq", "gptq", "int4", "int8", "fp8"}:
+        floor = int(params * 1_000_000_000 * _QUANT_BYTES[strong_quant])
+        if priced < floor:
+            priced = floor
     listing = 0
     if used >= _MIN_WEIGHT_BYTES:
-        if priced >= _MIN_WEIGHT_BYTES and used > int(priced * 1.5):
-            listing = priced
-        else:
-            listing = used
+        # gpt-oss usedStorage counts extra revisions; MXFP4 shards are
+        # smaller. Other quants (AWQ sideload / compressed-tensors) trust
+        # the larger listing — throwing it away was a lying Fits for 36B.
+        inflated_mxfp = (
+            priced >= _MIN_WEIGHT_BYTES
+            and used > int(priced * 1.5)
+            and strong_quant in {"mxfp4", "nvfp4"}
+        )
+        listing = priced if inflated_mxfp else used
     elif priced >= _MIN_WEIGHT_BYTES:
         listing = priced
     disk = int(disk_bytes or 0)
