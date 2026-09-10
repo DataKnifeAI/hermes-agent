@@ -402,6 +402,21 @@ def test_exl2_is_not_fits():
     assert unservable_reason("dphn/dolphin-2.9.1-llama-3-8b") is None
 
 
+def test_dspark_draft_is_not_servable():
+    """NVIDIA Lightning DSpark is a speculative draft — never a Fits badge."""
+    hid = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark"
+    from hermes_cli.vllm_runtime.inventory import (
+        UNSERVABLE_DSPARK_MSG, unservable_reason,
+    )
+
+    assert unservable_reason(hid) == UNSERVABLE_DSPARK_MSG
+    assert unservable_reason("org/qwen3-dflash-draft") == UNSERVABLE_DSPARK_MSG
+    assert unservable_reason("nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16") is None
+    tags = classify_vllm_repo(hid, total_vram=24 * _GIB, used_storage=8 * _GIB)
+    assert tags["fit"] == "unknown"
+    assert "speculative draft" in (tags["fit_detail"] or "").lower()
+
+
 def test_download_job_reports_bytes(monkeypatch, tmp_path):
     hub = tmp_path / "hub"
     hub.mkdir()

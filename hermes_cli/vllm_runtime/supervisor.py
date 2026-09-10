@@ -35,6 +35,12 @@ LEFTOVER_AWQ_MSG = (
     "vLLM cannot start this model as AWQ — it has no AWQ config. "
     "Stop, then Use an AWQ or FP8 instruct model"
 )
+# vLLM wraps the EngineCore AttributeError; the pane must not hang on this.
+_LOG_WRAPPER_NEEDLES = (
+    "see root cause above",
+    "engine core initialization failed",
+    "failed core proc",
+)
 _FATAL_CRASH_NEEDLES = (
     "cannot find the config file",
     "unknown quantization method",
@@ -42,6 +48,8 @@ _FATAL_CRASH_NEEDLES = (
     "exl2",
     "exllamav2",
     "gguf",
+    "draft_model_config",
+    "qwen3_dspark",
 )
 # llama.cpp's managed listen port — never share it. Sessions persist base_url per
 # engine; TIME_WAIT after a switch would also collide. Same reason llama.cpp
@@ -138,6 +146,10 @@ def humanize_serve_error(raw: str | None, *, model: str = "") -> str | None:
     lower = text.lower()
     if "cannot find the config file for awq" in lower:
         return LEFTOVER_AWQ_MSG
+    if "draft_model_config" in lower or "qwen3_dspark" in lower:
+        from hermes_cli.vllm_runtime.inventory import UNSERVABLE_DSPARK_MSG
+
+        return UNSERVABLE_DSPARK_MSG
     if "out of memory" in lower or "oom" in lower or "sigkill" in lower:
         label = model or "this model"
         return (
@@ -182,6 +194,8 @@ def last_serve_error_line(log_path: Path | None = None) -> str | None:
         if not stripped:
             continue
         lower = stripped.lower()
+        if any(needle in lower for needle in _LOG_WRAPPER_NEEDLES):
+            continue
         if (
             "validationerror" in lower
             or "value error" in lower

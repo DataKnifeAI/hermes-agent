@@ -139,6 +139,56 @@ def test_start_refuses_exl2_without_spawning(tmp_path, monkeypatch):
     assert read_last_error() == UNSERVABLE_FORMAT_MSG
 
 
+def test_start_refuses_dspark_and_log_shows_root_cause(tmp_path, monkeypatch):
+    """DSpark must not spawn; vLLM's EngineCore wrapper must not be last_error."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    hub = tmp_path / "hub"
+    hid = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark"
+    cached = hub / "models--nvidia--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark"
+    cached.mkdir(parents=True)
+    (cached / "w.bin").write_bytes(b"x" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    import hermes_constants
+    from hermes_cli.vllm_runtime.inventory import UNSERVABLE_DSPARK_MSG
+    from hermes_cli.vllm_runtime.supervisor import (
+        VllmSupervisor, humanize_serve_error, last_serve_error_line, read_last_error,
+    )
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19994)
+    fake = tmp_path / "vllm"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    spawned: list[str] = []
+    log_path = home / "runtimes" / "vllm" / "vllm-server.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text(
+        "AttributeError: 'NoneType' object has no attribute 'draft_model_config'\n"
+        "RuntimeError: Engine core initialization failed. See root cause above. "
+        "Failed core proc(s): {}\n",
+        encoding="utf-8",
+    )
+    assert "draft_model_config" in (last_serve_error_line(log_path) or "")
+    assert "root cause above" not in (last_serve_error_line(log_path) or "").lower()
+    assert humanize_serve_error(
+        last_serve_error_line(log_path), model="acme/mystery-weights"
+    ) == UNSERVABLE_DSPARK_MSG
+    sup = VllmSupervisor(
+        {"model": hid, "port": 19994},
+        executable=fake,
+        log_path=log_path,
+    )
+    monkeypatch.setattr(sup, "_spawn", lambda: spawned.append("spawn"))
+    with pytest.raises(RuntimeError, match="speculative draft"):
+        sup.start(timeout_s=1)
+    assert spawned == []
+    assert read_last_error() == UNSERVABLE_DSPARK_MSG
+
+
 def test_start_sigkill_writes_last_error_not_generic_failed(tmp_path, monkeypatch):
     """rc=-9 (OOM / port fight) must not collapse to ``vllm serve failed``."""
     home = tmp_path / ".hermes"

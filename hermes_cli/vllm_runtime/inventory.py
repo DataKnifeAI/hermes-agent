@@ -437,6 +437,12 @@ def _capability_tags(
 UNSERVABLE_FORMAT_MSG = (
     "vLLM cannot serve this format — Download an AWQ or FP8 instruct model"
 )
+# DSpark / DFlash HF ids are speculative-decode drafts. Serving one as the
+# target dies in qwen3_dspark.py: speculative_config is None.
+UNSERVABLE_DSPARK_MSG = (
+    "This is a DSpark speculative draft, not a standalone model — "
+    "Use the matching instruct checkpoint (without DSpark), or an AWQ / FP8 instruct model"
+)
 GATED_DOWNLOAD_MSG = (
     "This Hugging Face repo is gated — sign in at huggingface.co and request "
     "access. Hermes will not download it unsigned."
@@ -547,10 +553,12 @@ def hf_repo_access_issue(hid: str) -> str | None:
 
 
 def unservable_reason(hid: str, tags: list[str] | None = None) -> str | None:
-    """vLLM cannot load GGUF or EXL2 — say so instead of a lying Fits badge."""
+    """vLLM cannot load GGUF, EXL2, or a DSpark draft — say so instead of a lying Fits badge."""
     blob = f"{hid} {' '.join(tags or [])}".lower()
     if "gguf" in blob or "exl2" in blob or "exllamav2" in blob:
         return UNSERVABLE_FORMAT_MSG
+    if "dspark" in blob or "dflash" in blob:
+        return UNSERVABLE_DSPARK_MSG
     return None
 
 
