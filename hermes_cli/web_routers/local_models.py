@@ -1093,7 +1093,7 @@ def local_models_set_engine(body: EngineBody):
 
 @router.get("/api/local-models/vllm/recommend")
 def local_models_vllm_recommend():
-    """VRAM-tier pick for managed vLLM (same helper as ``hermes local recommend``)."""
+    """VRAM-tier pick for managed vLLM (same helper as Desktop recommend)."""
     return engine_mod.recommend_payload()
 
 

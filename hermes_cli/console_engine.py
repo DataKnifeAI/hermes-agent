@@ -290,9 +290,6 @@ _CLI_FAMILIES: dict[str, tuple[_CliSurface, str]] = {
         _sub("mcp", "build_mcp_parser", "cmd_mcp"),
         "list, catalog, test, *add, *remove, *install, *login, *reauth, *configure, *picker"),
     "memory": (_sub("memory", "build_memory_parser", "cmd_memory"), "status, *off, *reset"),
-    "local": (
-        _sub("local", "build_local_parser", "cmd_local"),
-        "status, *engine, recommend, *install, *start, *stop, bench, *use"),
     "auth": (
         _sub("auth", "build_auth_parser", "cmd_auth"),
         "list, status, *reset, *priority, *refresh, *add, *remove, *logout, spotify status, *spotify login, "

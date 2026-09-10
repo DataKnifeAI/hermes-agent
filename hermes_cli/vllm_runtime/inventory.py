@@ -1493,7 +1493,7 @@ def hide_catalog_row_by_default(row: dict[str, Any]) -> bool:
 def visible_catalog_models(
     rows: list[dict[str, Any]], *, show_unfitting: bool = False,
 ) -> list[dict[str, Any]]:
-    """Same hide set for Desktop and ``hermes local ls``."""
+    """Same hide set for Desktop (Show models that don't fit)."""
     if show_unfitting:
         return list(rows)
     return [r for r in rows if not r.get("hide_by_default")]

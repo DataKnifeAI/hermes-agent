@@ -30,15 +30,16 @@ def _check_managed_local_engine(should_fix: bool, f: Finding) -> None:  # noqa: 
         if venv_ready():
             check_ok("vLLM venv", "isolated runtimes/vllm/.venv")
         else:
-            check_warn("vLLM venv", "missing — hermes local install")
+            check_warn("vLLM venv", "missing — Desktop Local Models → Install")
             if engine == "vllm":
-                f.issues.append("vLLM venv missing — run `hermes local install`")
+                f.issues.append(
+                    "vLLM venv missing — install from Desktop Settings → Providers → Local Models")
 
     endpoint = resolve_vllm_endpoint(wait_for_boot_s=0)
     if endpoint:
         check_ok("/v1/models", endpoint.get("base_url", ""))
     elif engine == "vllm":
-        check_warn("/v1/models", "managed vLLM not running — hermes local start")
+        check_warn("/v1/models", "managed vLLM not running — start from Desktop Local Models")
 
     bench = last_bench()
     if not bench:

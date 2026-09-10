@@ -46,22 +46,15 @@ hand-edit a serve line.
 Desktop **Use** is what serves a cached model and sets it as the default
 for new chats.
 
-Headless / CLI can install and start the same engine:
-
-```bash
-hermes local engine vllm
-hermes local install
-hermes local start
-hermes local stop     # frees VRAM so you can play games
-```
-
-`hermes local` and the Desktop page write `local_runtime.engine` and the
+The Desktop page writes `local_runtime.engine` and the
 `local_runtime.vllm` block for you. There is no `HERMES_VLLM_*` env var.
+Headless CLI (`hermes local`) is a follow-up, not the ship path — see
+[issue #8](https://github.com/DataKnifeAI/hermes-agent/issues/8).
 
 Stop the managed server when you want the GPU back. Hermes never kills a
 foreign LLM (Ollama, LM Studio, a `vllm serve` you started yourself) —
-if another process is occupying the GPU, Desktop and `hermes local start`
-show that message and wait for you to stop it.
+if another process is occupying the GPU, Desktop shows that message and
+waits for you to stop it.
 
 vLLM **Find more models** search asks Hugging Face for `safetensors`,
 card, and tag metadata. **Fits your GPU** / **Too big** fire when a
@@ -98,7 +91,7 @@ build spilled to system RAM simply can't run that model.
 On **llama.cpp**, models that don't fit stay visible with the reason, so
 you always know what a hardware upgrade would unlock. On **vLLM**,
 official rows that don't fit are hidden until you click **Show models
-that don't fit**, or run `hermes local ls --show-unfitting`.
+that don't fit**.
 
 ## How memory management works
 
@@ -166,7 +159,7 @@ local_runtime:
   tag: b10362        # pinned llama.cpp release; Hermes updates it with
                      # each release after re-validation
   port: 0            # llama.cpp: 0 = try 18434, then an ephemeral port
-  vllm:              # written by Desktop / `hermes local` when engine is vllm
+  vllm:              # written by Desktop when engine is vllm
     port: 0          # 0 = try 18435, then an ephemeral port (never 18434)
     model: Qwen/Qwen3-8B-AWQ
     served_model_name: qwen3:8b

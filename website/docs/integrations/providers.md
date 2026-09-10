@@ -806,8 +806,7 @@ List available models with `ollama list`. Pull any model from the [Ollama librar
 Settings → Providers → Local Models, then **Install → Use**. Hermes owns
 the isolated venv and a loopback server on port 18435 — see
 [Local Models](/user-guide/local-models). You do not `pip install vllm`
-for that path. Headless: `hermes local engine vllm` then
-`hermes local install` / `start`.
+for that path.
 
 **Advanced — your own process or a remote GPU box:**
 

@@ -1,7 +1,7 @@
 # Managed vLLM as a first-class local engine
 
 Status: **implemented** (Desktop is the ship surface)
-Audience: Desktop + CLI local-inference work
+Audience: Desktop local-inference work. CLI wrapper: `feat/hermes-local-cli` / [#8](https://github.com/DataKnifeAI/hermes-agent/issues/8).
 
 ## What shipped
 
@@ -13,8 +13,8 @@ port **18434**). vLLM is the managed sibling on Linux NVIDIA
 Official catalog is Qwen3 AWQ (8B on 16 GB, 14B on 24 GB, plus larger
 tiers). Hermes keeps a **64k** tool-loop floor — cards that cannot hold
 it stay infeasible; there is no silent ctx shrink. vLLM **hides**
-unfitting official rows until Desktop **Show models that don't fit** or
-`hermes local ls --show-unfitting`. llama.cpp still shows them.
+unfitting official rows until Desktop **Show models that don't fit**.
+llama.cpp still shows them.
 
 Logs live under the profile Hermes home (`get_hermes_home()/logs/`,
 user-facing `{display_hermes_home()}/logs/vllm-server.log`). Never
@@ -53,8 +53,16 @@ supervised server.
 
 ## Follow-up (not this work)
 
-CLI `hermes local use` still only pins the provider. Desktop **Use**
-serves the cached id. `hermes local status` does not print
-Starting/Ready / In use (`engine_state`). `hermes local start` can still
-fail the tool-call bench even when serve is up. Do not rename
-`hermes local use`; do not change CLI start semantics in a cleanup PR.
+The `hermes local` argparse UX was split to **`feat/hermes-local-cli`**
+([#8](https://github.com/DataKnifeAI/hermes-agent/issues/8)). This branch
+is Desktop + engine + HTTP API only.
+
+Gaps on that follow-up:
+
+- CLI `hermes local use` still only pins the provider. Desktop **Use**
+  serves the cached id.
+- `hermes local status` does not print Starting/Ready / In use
+  (`engine_state`).
+- `hermes local start` can still fail the tool-call bench even when
+  serve is up. Do not rename `use`; do not change CLI start semantics
+  in a drive-by.
