@@ -237,6 +237,15 @@ def param_billions_from_safetensors(safetensors: dict | None) -> float | None:
     return None
 
 
+# Llama-3.1-8B BF16 KV at 64k is 8 GiB (2 × 32 × 8 × 128 × 65536 × 2).
+# vLLM CUDA graphs / activations add ~3 GiB. A percent of the weight file
+# undercounts: 15 GiB on-disk BF16 (params × 2) + 55% was 23 GiB — a lying
+# Fits on a 24 GB 4090. KV does not shrink with AWQ/GPTQ.
+_KV_64K_LLAMA8B = 8 * (1 << 30)
+_VLLM_RUNTIME_BYTES = 3 * (1 << 30)
+_KV_AND_RUNTIME_64K = _KV_64K_LLAMA8B + _VLLM_RUNTIME_BYTES
+
+
 def estimate_min_vram_bytes(params_b: float, quant: str) -> int:
     """Conservative 64k-floor VRAM from param count + known quant. Not a promise."""
     bpp = _QUANT_BYTES.get(quant)
@@ -246,11 +255,54 @@ def estimate_min_vram_bytes(params_b: float, quant: str) -> int:
     return _vram_from_weight_bytes(weight)
 
 
-def _vram_from_weight_bytes(weight: int) -> int:
-    # 64k KV + vLLM working set. Quantization shrinks the weight file, not the
-    # KV tensor, so a small % of disk undercounts BF16 8B and 32B-class AWQ.
-    reserve = max(8 * (1 << 30), int(weight * 0.55))
-    return weight + reserve
+def _kv_from_config(config: dict | None, *, elem_bytes: int = 2) -> int | None:
+    """64k K+V bytes from HF config. None when layers/heads/head_dim are missing."""
+    if not isinstance(config, dict) or elem_bytes <= 0:
+        return None
+    layers = config.get("num_hidden_layers") or config.get("n_layer")
+    kv_heads = config.get("num_key_value_heads")
+    attn = config.get("num_attention_heads") or config.get("n_head")
+    if kv_heads is None:
+        kv_heads = attn
+    hidden = config.get("hidden_size") or config.get("d_model")
+    head_dim = config.get("head_dim")
+    if head_dim is None and isinstance(hidden, int) and isinstance(attn, int) and attn > 0:
+        head_dim = hidden // attn
+    if not all(isinstance(v, int) and v > 0 for v in (layers, kv_heads, head_dim)):
+        return None
+    return 2 * int(layers) * int(kv_heads) * int(head_dim) * 65536 * int(elem_bytes)
+
+
+def _vram_from_weight_bytes(weight: int, *, config: dict | None = None) -> int:
+    """weights + 64k KV + vLLM working set. KV is not a fraction of the file."""
+    kv = _kv_from_config(config)
+    reserve = (kv + _VLLM_RUNTIME_BYTES) if kv else _KV_AND_RUNTIME_64K
+    return int(weight) + reserve
+
+
+def _format_param_label(params: float | None) -> str | None:
+    if params is None:
+        return None
+    if abs(params - round(params)) < 0.05:
+        return f"{int(round(params))}B"
+    return f"{params:g}B"
+
+
+def _fit_why_label(hid: str, quant: str | None, params: float | None, min_vram: int) -> str:
+    """Hover fragment: ``BF16 8B + 64k KV needs ~27.0 GB``."""
+    dtype = (quant or "").upper() or None
+    size = _format_param_label(params) or _format_param_label(parse_param_billions(hid))
+    if dtype and size:
+        head = f"{dtype} {size} + 64k KV"
+    elif dtype:
+        head = f"{dtype} + 64k KV"
+    elif size:
+        head = f"{size} + 64k KV"
+    else:
+        head = "64k KV"
+    if min_vram:
+        return f"{head} needs ~{_human_gb(min_vram)}"
+    return head
 
 
 def _base_model_blob(card_data: dict | None) -> str:
@@ -603,7 +655,8 @@ def classify_vllm_repo(
 
     ``fit`` is ``fits-gpu``, ``too-big``, or ``unknown``. Search and cache
     both use weight-file bytes + 64k KV (``_vram_from_weight_bytes``) —
-    never raw GB on disk as VRAM, never an ``8B`` token over a larger pack.
+    never raw GB on disk as VRAM, never an ``8B`` token over a larger pack,
+    never a percent of the weight file as KV.
     """
     from hermes_cli.vllm_runtime.recommend import tier_for_model
 
@@ -616,6 +669,12 @@ def classify_vllm_repo(
         or _quant_from_config(config)
         or _quant_from_safetensors(safetensors)
     )
+    params = (
+        param_billions_from_safetensors(safetensors)
+        or parse_param_billions(hid)
+        or parse_param_billions(" ".join(tag_list))
+        or parse_param_billions(_base_model_blob(card_data))
+    )
     disk = int(weight_bytes or 0)
     actual, listing = resolve_weight_bytes(
         hid=hid, tags=tag_list, card_data=card_data, config=config,
@@ -626,18 +685,29 @@ def classify_vllm_repo(
     min_vram = 0
     fit = "unknown"
     detail = ""
+
+    def _detail(*, priced_quant: str | None, fullprec_too_big: bool = False) -> str:
+        why = _fit_why_label(hid, priced_quant, params, min_vram)
+        if fullprec_too_big:
+            return f"{NEEDS_AWQ_MSG} ({why})" if why else NEEDS_AWQ_MSG
+        if min_vram:
+            return f"Needs ~{_human_gb(min_vram)} GPU memory ({why})"
+        return ""
+
     if blocked and matched is None:
         detail = blocked
     elif matched is not None:
         min_vram = matched.min_vram_bytes
         if total_vram > 0:
             fit = "fits-gpu" if total_vram >= min_vram else "too-big"
-        detail = f"Needs ~{_human_gb(min_vram)} GPU memory" if min_vram else ""
+        detail = _detail(priced_quant=quant)
     elif actual >= _MIN_WEIGHT_BYTES:
-        min_vram = _vram_from_weight_bytes(actual)
+        min_vram = _vram_from_weight_bytes(actual, config=config)
         if total_vram > 0:
             fit = "fits-gpu" if total_vram >= min_vram else "too-big"
-        detail = f"Needs ~{_human_gb(min_vram)} GPU memory" if min_vram else ""
+        fullprec = not quant or quant in {"bf16", "fp16"}
+        detail = _detail(priced_quant=quant or ("bf16" if fullprec else None),
+                         fullprec_too_big=fit == "too-big" and fullprec)
         if (
             fit == "too-big"
             and disk >= _MIN_WEIGHT_BYTES
@@ -648,8 +718,6 @@ def classify_vllm_repo(
                 f" — downloaded weights are {_human_gb(disk)}, "
                 f"larger than the {_human_gb(listing)} Hugging Face listing"
             )
-        if fit == "too-big" and (not quant or quant in {"bf16", "fp16"}):
-            detail = NEEDS_AWQ_MSG
     else:
         # No listing/disk bytes: price from the *id* only. A loose AWQ tag
         # plus an 8B token must not badge Fits (the index may be a bigger
@@ -657,14 +725,13 @@ def classify_vllm_repo(
         # become too-big + NEEDS_AWQ so Use is a 400, not a 502 wrapping HF.
         id_quant = parse_quantization(hid, None)
         tag_quant = parse_quantization("", tag_list)
-        params = parse_param_billions(hid)
         if params is not None and id_quant in _QUANT_BYTES and total_vram > 0:
             min_vram = estimate_min_vram_bytes(params, id_quant)
             fit = "fits-gpu" if total_vram >= min_vram else "too-big"
-            if fit == "too-big" and id_quant in {"bf16", "fp16"}:
-                detail = NEEDS_AWQ_MSG
-            else:
-                detail = f"Needs ~{_human_gb(min_vram)} GPU memory"
+            detail = _detail(
+                priced_quant=id_quant,
+                fullprec_too_big=fit == "too-big" and id_quant in {"bf16", "fp16"},
+            )
         elif (
             params is not None
             and total_vram > 0
@@ -674,7 +741,7 @@ def classify_vllm_repo(
             min_vram = estimate_min_vram_bytes(params, "bf16")
             if total_vram < min_vram:
                 fit = "too-big"
-                detail = NEEDS_AWQ_MSG
+                detail = _detail(priced_quant="bf16", fullprec_too_big=True)
     capabilities = _capability_tags(
         hid=hid, tag_list=tag_list, quant=quant, matched=matched,
         config=config, pipeline_tag=pipeline_tag or "",

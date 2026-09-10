@@ -387,11 +387,20 @@ def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch
     assert cfg["local_runtime"]["enabled"] is False
     assert not (read_last_error() or "")
 
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, TIERS, VllmRecommendation
+
+    rec = VllmRecommendation(
+        NvidiaProbe(24 * (1 << 30), 24 * (1 << 30), "data"),
+        next(t for t in TIERS if t.id == "24gb"), True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.inventory._hf_json",
         lambda url: [
             {"id": "NousResearch/Hermes-3-Llama-3.1-8B", "downloads": 9,
-             "likes": 2, "lastModified": "2026-01-01", "gated": False, "tags": []},
+             "likes": 2, "lastModified": "2026-01-01", "gated": False, "tags": [],
+             "safetensors": {"parameters": {"BF16": 8_030_261_248},
+                             "total": 8_030_261_248},
+             "usedStorage": 15 * (1 << 30)},
             {"id": "someone/Qwen-GGUF", "downloads": 99, "likes": 1,
              "lastModified": "", "gated": False, "tags": ["gguf"]},
         ])
@@ -402,7 +411,9 @@ def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch
     assert all("gguf" not in r.lower() for r in repos)
     hermes = next(h for h in search.json()["hits"] if "Hermes-3" in h["repo"])
     # 8B BF16 on a 24 GB card is too-big, never a lying Fits badge.
-    assert hermes["fit"] != "fits-gpu"
+    # 15 GiB shards + 64k KV used to price under 24 GiB (percent-of-disk).
+    assert hermes["fit"] == "too-big"
+    assert "64k KV" in (hermes.get("fit_detail") or "")
     # Tools come from HF tags (function-calling), not the word Hermes in the id.
     assert "tools" not in hermes["capabilities"]
 

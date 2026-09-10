@@ -11,9 +11,11 @@ from hermes_cli.vllm_runtime.inventory import (
     GATED_DOWNLOAD_MSG,
     HF_BAD_REQUEST_MSG,
     NEEDS_AWQ_MSG,
+    _KV_AND_RUNTIME_64K,
     hf_http_status_and_detail,
     _cache_name,
     _job_tqdm_class,
+    _kv_from_config,
     _vram_from_weight_bytes,
     classify_vllm_repo,
     created_at_from_hf,
@@ -56,7 +58,10 @@ def test_classify_unknown_when_quant_or_size_missing():
 def test_classify_nous_8b_bf16_is_too_big_needs_awq():
     tags = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=24 * _GIB)
     assert tags["fit"] == "too-big"
-    assert tags["fit_detail"] == NEEDS_AWQ_MSG
+    assert NEEDS_AWQ_MSG in tags["fit_detail"]
+    assert "BF16" in tags["fit_detail"]
+    assert "8B" in tags["fit_detail"]
+    assert "64k KV" in tags["fit_detail"]
 
 
 def test_classify_nous_awq_8b_fits_24gb():
@@ -159,7 +164,8 @@ def test_classify_weight_bytes_when_card_has_no_params():
 def test_classify_capabilities_from_hf_tags_not_model_names():
     named = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=24 * _GIB)
     assert named["fit"] == "too-big"
-    assert named["fit_detail"] == NEEDS_AWQ_MSG
+    assert NEEDS_AWQ_MSG in named["fit_detail"]
+    assert "BF16 8B + 64k KV" in named["fit_detail"]
     assert "tools" not in named["capabilities"]
     tagged = classify_vllm_repo(
         "acme/custom-weights",
@@ -451,21 +457,50 @@ def test_download_completes_when_hub_tqdm_omits_total(monkeypatch, tmp_path):
 def test_estimate_min_vram_matches_weight_plus_kv():
     assert estimate_min_vram_bytes(8, "awq") == _vram_from_weight_bytes(
         int(8 * 1_000_000_000 * 0.55))
+    assert estimate_min_vram_bytes(8, "awq") < 24 * _GIB
+    assert estimate_min_vram_bytes(8, "bf16") > 24 * _GIB
     actual, listing = resolve_weight_bytes(hid="org/Qwen3-8B-AWQ", used_storage=5 * _GIB)
     assert actual == listing == 5 * _GIB
 
 
+def test_vram_is_weights_plus_64k_kv_not_percent_of_disk():
+    """15 GiB BF16 shards (params × 2) + 64k KV must exceed a 24 GB card.
+
+    A 55%-of-file reserve priced that pack at ~23 GiB and badged Fits.
+    """
+    disk = 15 * _GIB
+    need = _vram_from_weight_bytes(disk)
+    assert need == disk + _KV_AND_RUNTIME_64K
+    assert need > 24 * _GIB
+    assert _vram_from_weight_bytes(5 * _GIB) < 24 * _GIB
+    llama = {
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "hidden_size": 4096,
+    }
+    assert _kv_from_config(llama) == 8 * _GIB
+    assert _vram_from_weight_bytes(16 * _GIB, config=llama) == 16 * _GIB + _KV_AND_RUNTIME_64K
+
+
 def test_nous_full_precision_too_big_on_24gb():
-    """Search listing and the same bytes on disk must both refuse 8B BF16 on 24 GB."""
+    """Search listing, 15 GiB shards, and the same bytes on disk must agree."""
     hid = "NousResearch/Hermes-3-Llama-3.1-8B"
-    st = {"parameters": {"BF16": 8_000_000_000}, "total": 8_000_000_000}
+    st = {"parameters": {"BF16": 8_030_261_248}, "total": 8_030_261_248}
+    # Real BF16 shards are params × 2 (~15 GiB), not the 2.2 bpp listing.
+    shards = 15 * _GIB
+    named = classify_vllm_repo(hid, total_vram=24 * _GIB)
     search = classify_vllm_repo(hid, total_vram=24 * _GIB, safetensors=st)
-    listed = classify_vllm_repo(hid, total_vram=24 * _GIB, used_storage=16 * _GIB)
-    cached = classify_vllm_repo(hid, total_vram=24 * _GIB, weight_bytes=16 * _GIB)
-    assert search["fit"] == listed["fit"] == cached["fit"] == "too-big"
-    assert search["fits"] is False
+    listed = classify_vllm_repo(hid, total_vram=24 * _GIB, used_storage=shards)
+    cached = classify_vllm_repo(hid, total_vram=24 * _GIB, weight_bytes=shards)
+    assert named["fit"] == search["fit"] == listed["fit"] == cached["fit"] == "too-big"
+    assert named["fits"] is search["fits"] is listed["fits"] is cached["fits"] is False
     assert listed["min_vram_bytes"] == cached["min_vram_bytes"]
-    assert listed["min_vram_bytes"] == _vram_from_weight_bytes(16 * _GIB)
+    assert listed["min_vram_bytes"] == _vram_from_weight_bytes(shards)
+    assert listed["min_vram_bytes"] > 24 * _GIB
+    assert "BF16 8B + 64k KV" in listed["fit_detail"]
+    assert "BF16 8B + 64k KV" in search["fit_detail"]
+    assert "BF16 8B + 64k KV" in named["fit_detail"]
 
 
 def test_large_awq_too_big_on_24gb_without_catalog_id():
@@ -491,7 +526,8 @@ def test_empty_or_tokenizer_cache_is_not_a_library_row(tmp_path, monkeypatch):
     # Hollow cache is not a library row (above). Search/Use of the id still
     # prices 27B BF16 as too-big so the toast is needs-AWQ, not a nested 400.
     assert tags["fit"] == "too-big"
-    assert tags["fit_detail"] == NEEDS_AWQ_MSG
+    assert NEEDS_AWQ_MSG in tags["fit_detail"]
+    assert "27B" in tags["fit_detail"]
     assert tags["fits"] is False
 
 
