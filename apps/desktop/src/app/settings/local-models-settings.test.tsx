@@ -336,11 +336,19 @@ describe('LocalModelsSettings', () => {
     expect(await screen.findByText(/NVIDIA GeForce RTX 5090/)).toBeTruthy()
     expect(screen.getByText(/6\.0 GB \/ 32\.0 GB used/)).toBeTruthy()
     expect(screen.getByText(/26\.0 GB free/)).toBeTruthy()
+    expect(screen.getByText(/56\.0 GB \/ 256\.0 GB used/)).toBeTruthy()
+    expect(screen.queryByText(/this engine 5\.0 GB/)).toBeNull()
+    expect(screen.queryByText(/~\/\.hermes\/models/)).toBeNull()
+    expect(screen.queryByText(/64k context fits this GPU/)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
     expect(screen.getByText(/this engine 5\.0 GB/)).toBeTruthy()
     expect(screen.getByText(/~\/\.hermes\/models/)).toBeTruthy()
     expect(screen.getByText(/17\.6 GB on disk/)).toBeTruthy()
-    expect(screen.getByText(/256\.0 GB RAM/)).toBeTruthy()
     expect(screen.getByText(/64k context fits this GPU/)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /^show less$/i }))
+    expect(screen.queryByText(/64k context fits this GPU/)).toBeNull()
   })
 
   it('tracks a download job to completion and refreshes', async () => {
@@ -690,6 +698,8 @@ describe('vLLM engine', () => {
     expect(screen.getByText('Local')).toBeTruthy()
     expect(screen.getAllByText(/0\.10\.0/).length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: /check for update/i })).toBeTruthy()
+    expect(screen.queryByText(/Download a model, then Use/i)).toBeNull()
+    expect(screen.queryByText(/Hermes starts and manages the server for you/i)).toBeNull()
     expect(screen.queryByText('Install the local runtime')).toBeNull()
     expect(screen.queryByText('Qwen3.6 27B')).toBeNull()
     await waitFor(() => {
@@ -905,7 +915,8 @@ describe('vLLM engine', () => {
     expect(await screen.findByText('Fits your GPU')).toBeTruthy()
     expect(screen.getByText('Released Mar 2025')).toBeTruthy()
     expect(screen.getByText('5.0 GB')).toBeTruthy()
-    expect(screen.getByText('Too big for this machine')).toBeTruthy()
+    expect(screen.queryByText('Qwen/Qwen3-32B-AWQ')).toBeNull()
+    expect(screen.getByRole('button', { name: /show models that don't fit/i })).toBeTruthy()
     expect(screen.getByText('Fit unknown')).toBeTruthy()
     expect(screen.getByText('Recommended')).toBeTruthy()
     expect(screen.getAllByText('AWQ').length).toBeGreaterThan(0)
@@ -919,8 +930,10 @@ describe('vLLM engine', () => {
       expect(mocked.downloadVllmModel).toHaveBeenCalledWith('solidrust/Hermes-3-Llama-3.1-8B-AWQ')
     })
 
-    const tooBigDownload = screen.getByRole('button', { name: /^download$/i })
-    expect((tooBigDownload as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /show models that don't fit/i }))
+    expect(screen.getByText('Qwen/Qwen3-32B-AWQ')).toBeTruthy()
+    expect(screen.getByText('Too big for this machine')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^download$/i })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: /^use$/i }))
     await waitFor(() => {
@@ -1129,8 +1142,11 @@ describe('vLLM engine', () => {
 
     expect(await screen.findAllByText('Too big for this machine')).not.toHaveLength(0)
     expect(screen.queryByRole('button', { name: /^use$/i })).toBeNull()
-    const tooBigDownload = screen.getByRole('button', { name: /^download$/i })
-    expect((tooBigDownload as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByText('Qwen/Qwen3-32B-AWQ')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /show models that don't fit/i }))
+    expect(screen.getByText('Qwen/Qwen3-32B-AWQ')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^download$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^use$/i })).toBeNull()
   })
 
   it('shows Finishing download after HF bytes hit 100%, not an install hang', async () => {
@@ -1194,6 +1210,11 @@ describe('vLLM engine', () => {
 
     expect(await screen.findByText('Engine up to date')).toBeTruthy()
     expect(screen.getByRole('button', { name: /check for update/i })).toBeTruthy()
+    expect(screen.getByText('vLLM 0.28.0')).toBeTruthy()
+    expect(screen.queryByText(/the latest release on PyPI/i)).toBeNull()
+    expect(screen.queryByText(/installed at/i)).toBeNull()
+    expect(screen.queryByText(/Download a model, then Use/i)).toBeNull()
+    expect(screen.queryByText(/Hermes starts and manages the server for you/i)).toBeNull()
   })
 
   it('shows Engine update available with the same update action as llama.cpp', async () => {

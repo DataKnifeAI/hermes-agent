@@ -67,6 +67,77 @@ def test_status_default_engine_is_llamacpp(tmp_path, monkeypatch):
     data = client.get("/api/local-models/status").json()
     assert data["engine"] == "llamacpp"
     assert isinstance(data["server_running"], bool)
+    assert data.get("vllm_version") in (None, "")
+
+
+def test_status_vllm_version_from_isolated_venv(tmp_path, monkeypatch):
+    """Status carries the isolated-venv package version — not Hermes on PATH."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    reported = "9.9.9"
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: reported)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+
+    data = client.get("/api/local-models/status").json()
+    assert data["engine"] == "vllm"
+    assert data["vllm_version"] == reported
+    assert data["vllm_version"] == data["tag"]
+
+
+def test_status_vllm_version_null_when_venv_missing(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: False)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: "")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+
+    data = client.get("/api/local-models/status").json()
+    assert data["engine"] == "vllm"
+    assert data.get("vllm_version") in (None, "")
+
+
+def test_hardware_vllm_version_from_isolated_venv(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    reported = "9.9.9"
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: reported)
+
+    data = client.get("/api/local-models/hardware").json()
+    assert data["engine"] == "vllm"
+    assert data["vllm_version"] == reported
+
+
+def test_hardware_vllm_version_null_when_not_installed(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: "")
+
+    data = client.get("/api/local-models/hardware").json()
+    assert data["engine"] == "vllm"
+    assert data.get("vllm_version") in (None, "")
 
 
 def test_status_reports_vllm_not_llama_gguf(tmp_path, monkeypatch):

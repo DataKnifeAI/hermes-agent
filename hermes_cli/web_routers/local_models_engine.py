@@ -265,6 +265,8 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
         "tag": versions.get("tag") or "",
         "configured_tag": versions.get("configured_tag") or "",
         "update_available": bool(versions.get("update_available")),
+        # Isolated venv only — never PATH / Hermes' own version.
+        "vllm_version": (str(versions.get("installed") or versions.get("tag") or "").strip() or None),
         "loaded_models": {served: "ready"} if ready else {},
         "loading": {},
         "placement": {},

@@ -1100,6 +1100,7 @@ export const ja = defineLocale({
       ctx64kTight: '64k VRAM 下限を下回っています',
       occupancyWarn: '別の LLM がこの GPU を使用中です',
       ram: label => `RAM ${label}`,
+      ramUsed: (used, total) => `${used} / ${total} 使用中`,
       unifiedMemory: 'ユニファイドメモリ',
       modelsTitle: 'ローカル',
       recommended: 'おすすめ',
@@ -1225,7 +1226,11 @@ export const ja = defineLocale({
         'Hugging Face を検索できます。ここでダウンロードしたモデルは分かる範囲でマシンに合わせますが、当方でのテストは行われていません。',
       vllmBrowseNoHits: 'Hugging Face モデルが見つかりません。',
       vllmSetFailed: 'このモデルをローカル既定にできませんでした',
-      vllmCachedPill: 'ダウンロード済み'
+      vllmCachedPill: 'ダウンロード済み',
+      showUnfitting: '収まらないモデルを表示',
+      hideUnfitting: '収まらないモデルを隠す',
+      showMore: 'さらに表示',
+      showLess: '折りたたむ'
     },
     providers: {
       connectAccount: 'アカウントを接続',

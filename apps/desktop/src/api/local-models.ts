@@ -199,6 +199,7 @@ export interface VllmInventoryModel {
   fit?: 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
   fit_detail?: string
   fits?: boolean | null
+  hide_by_default?: boolean
   id: string
   min_vram_bytes?: number
   quantization?: string

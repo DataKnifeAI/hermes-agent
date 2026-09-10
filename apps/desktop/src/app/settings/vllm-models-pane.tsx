@@ -12,7 +12,7 @@ import {
   useVllm
 } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { Check, CheckCircle2, Cpu, Download, Loader2, Search, Trash2 } from '@/lib/icons'
+import { Check, CheckCircle2, Cpu, Download, Eye, EyeOff, Loader2, Search, Trash2 } from '@/lib/icons'
 import { $localRuntimeJobs, runningDownloadFor, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
 import { notify, notifyError, readableError } from '@/store/notifications'
 
@@ -92,6 +92,18 @@ function fitRank(model: VllmInventoryModel): number {
   }
 
   return 2
+}
+
+function hideByDefault(model: VllmInventoryModel): boolean {
+  if (model.added_by_you) {
+    return false
+  }
+
+  if (typeof model.hide_by_default === 'boolean') {
+    return model.hide_by_default
+  }
+
+  return fitOf(model) === 'too-big'
 }
 
 function isServedModel(
@@ -260,7 +272,10 @@ export function VllmModelsPane({
   const jobs = useStore($localRuntimeJobs)
   const [deleting, setDeleting] = useState<null | string>(null)
   const [setting, setSetting] = useState<null | string>(null)
+  const [showUnfitting, setShowUnfitting] = useState(false)
   const anyDownloadRunning = jobs.some(j => j.kind === 'model-download' && j.status === 'running')
+  const hiddenCount = models.filter(hideByDefault).length
+  const visible = models.filter(model => showUnfitting || !hideByDefault(model))
 
   async function handleUse(model: VllmInventoryModel) {
     setSetting(model.id)
@@ -322,24 +337,26 @@ export function VllmModelsPane({
     }
   }
 
-  const sorted = [...models].sort((a, b) => fitRank(a) - fitRank(b))
+  const sorted = [...visible].sort((a, b) => fitRank(a) - fitRank(b))
 
   return (
     <>
-      <SettingsSection icon={Search} meta={`${models.length}`} title={copy.modelsTitle}>
+      <SettingsSection icon={Search} meta={`${visible.length}`} title={copy.modelsTitle}>
         <div className="grid gap-1">
           {sorted.map(model => {
             const busy = setting === model.id
             const dJob = runningDownloadFor(jobs, model.id)
             const fit = fitOf(model)
             const tooBig = fit === 'too-big'
+            const officialTooBig = hideByDefault(model)
 
             return (
               <ListRow
+                className={officialTooBig ? 'opacity-45' : undefined}
                 action={
                   <div className="flex items-center justify-end gap-2">
                     {!model.cached ? (
-                      dJob ? undefined : (
+                      dJob ? undefined : officialTooBig ? undefined : (
                         <Button
                           disabled={anyDownloadRunning}
                           onClick={() => void handleDownload(model)}
@@ -411,6 +428,12 @@ export function VllmModelsPane({
             )
           })}
         </div>
+        {hiddenCount > 0 && (
+          <Button className="mt-2" onClick={() => setShowUnfitting(v => !v)} size="sm" variant="ghost">
+            {showUnfitting ? <EyeOff /> : <Eye />}
+            {showUnfitting ? copy.hideUnfitting : copy.showUnfitting}
+          </Button>
+        )}
       </SettingsSection>
       <VllmBrowseSection activeModelId={activeModelId} onChanged={onChanged} servedModelName={servedModelName} />
     </>

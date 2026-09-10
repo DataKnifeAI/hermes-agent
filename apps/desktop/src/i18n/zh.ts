@@ -1396,6 +1396,7 @@ export const zh: Translations = {
       ctx64kTight: '低于 64k 显存下限',
       occupancyWarn: '另有 LLM 正在占用此 GPU',
       ram: label => `${label} 内存`,
+      ramUsed: (used, total) => `已用 ${used} / ${total}`,
       unifiedMemory: '统一内存',
       modelsTitle: '本地',
       recommended: '推荐',
@@ -1511,7 +1512,11 @@ export const zh: Translations = {
       vllmBrowseHint: '搜索 Hugging Face。在这里下载的模型会在我们能判断时按你的机器适配，但未经我们测试。',
       vllmBrowseNoHits: '未找到 Hugging Face 模型。',
       vllmSetFailed: '无法将此设为本地模型',
-      vllmCachedPill: '已下载'
+      vllmCachedPill: '已下载',
+      showUnfitting: '显示装不下的模型',
+      hideUnfitting: '隐藏装不下的模型',
+      showMore: '显示更多',
+      showLess: '收起'
     },
     providers: {
       connectAccount: '连接账号',

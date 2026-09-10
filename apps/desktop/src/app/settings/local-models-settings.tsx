@@ -709,6 +709,7 @@ export function LocalModelsSettings() {
   // Up to date = the authority (status) says the configured tag is what's
   // serving. Shown whenever true — not only right after an update.
   const updateApplied = status.runtime_installed && !status.update_available && status.tag === status.configured_tag
+  const vllmVersion = (status.vllm_version || (engine === 'vllm' ? status.tag : '') || '').trim()
 
   return (
     <SettingsContent>
@@ -722,7 +723,7 @@ export function LocalModelsSettings() {
           ) : undefined
         }
         icon={Zap}
-        meta={engine === 'vllm' ? copy.engineVllm : status.tag}
+        meta={engine === 'vllm' ? (vllmVersion ? `${copy.engineVllm} ${vllmVersion}` : copy.engineVllm) : status.tag}
         title={copy.runtimeTitle}
       >
         <div className="mb-3">
@@ -763,7 +764,7 @@ export function LocalModelsSettings() {
                   : status.server_running
                     ? `${status.served_model_name ?? status.active_model_id ?? ''} · ${status.server_base_url ?? ''}`
                     : status.runtime_installed
-                      ? copy.vllmReadyDetail(status.served_model_name ?? recommend?.model ?? copy.engineVllm)
+                      ? undefined
                       : copy.vllmInstallDetail
               }
               title={
@@ -793,7 +794,7 @@ export function LocalModelsSettings() {
                 description={
                   status.update_available
                     ? copy.vllmUpdateAvailable(status.configured_tag, status.tag)
-                    : copy.vllmUpToDate(status.tag)
+                    : undefined
                 }
                 title={
                   <span className="inline-flex items-center gap-2">
@@ -812,9 +813,6 @@ export function LocalModelsSettings() {
                   </span>
                 }
               />
-            )}
-            {status.venv_path && (
-              <p className="text-[0.72rem] text-muted-foreground">{copy.vllmVenvDetail(status.venv_path)}</p>
             )}
             {status.runtime_installed && (
               <div className="mt-3 flex justify-start py-2">

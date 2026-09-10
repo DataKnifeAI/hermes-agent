@@ -1315,6 +1315,8 @@ export interface LocalModelsStatus {
   runtime_dir_display?: string
   venv_ready?: boolean
   venv_path?: string
+  /** Isolated-venv `vllm` package version. Null/absent when not installed. */
+  vllm_version?: null | string
   occupancy?: LocalOccupancyHit[]
   occupancy_message?: null | string
   served_model_name?: null | string
@@ -1329,6 +1331,10 @@ export interface LocalHardware {
   vram_usable_bytes: number
   ram_total_bytes: number
   ram_available_bytes: number
+  /** Physical RAM in use (total − available). Missing on older backends. */
+  ram_used_bytes?: number | null
+  /** Isolated-venv vLLM version when engine is vLLM. */
+  vllm_version?: null | string
   vram_label: string
   gpu_name: string | null
   gpu_util_percent: number | null

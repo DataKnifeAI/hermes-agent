@@ -1060,6 +1060,7 @@ export const zhHant = defineLocale({
       ctx64kTight: '低於 64k 顯示記憶體下限',
       occupancyWarn: '另有 LLM 正在占用此 GPU',
       ram: label => `${label} 記憶體`,
+      ramUsed: (used, total) => `已用 ${used} / ${total}`,
       unifiedMemory: '統一記憶體',
       modelsTitle: '本地',
       recommended: '推薦',
@@ -1178,7 +1179,11 @@ export const zhHant = defineLocale({
       vllmBrowseHint: '搜尋 Hugging Face。在這裡下載的模型會在我們能判斷時依你的機器適配，但未經我們測試。',
       vllmBrowseNoHits: '找不到 Hugging Face 模型。',
       vllmSetFailed: '無法將此設為本機模型',
-      vllmCachedPill: '已下載'
+      vllmCachedPill: '已下載',
+      showUnfitting: '顯示裝不下的模型',
+      hideUnfitting: '隱藏裝不下的模型',
+      showMore: '顯示更多',
+      showLess: '收起'
     },
     providers: {
       connectAccount: '連結帳號',

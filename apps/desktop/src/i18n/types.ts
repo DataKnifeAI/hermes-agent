@@ -1039,6 +1039,7 @@ export interface Translations {
       ctx64kTight: string
       occupancyWarn: string
       ram: (label: string) => string
+      ramUsed: (used: string, total: string) => string
       unifiedMemory: string
       modelsTitle: string
       recommended: string
@@ -1158,6 +1159,10 @@ export interface Translations {
       vllmBrowseNoHits: string
       vllmSetFailed: string
       vllmCachedPill: string
+      showUnfitting: string
+      hideUnfitting: string
+      showMore: string
+      showLess: string
     }
     providers: {
       connectAccount: string

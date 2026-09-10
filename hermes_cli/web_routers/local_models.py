@@ -516,6 +516,7 @@ def local_models_status():
         "models_dir": str(mdir),
         "models_dir_display": engine_mod.display_user_path(mdir),
         "venv_ready": False,
+        "vllm_version": None,
         "occupancy": [],
         "occupancy_message": None,
         "served_model_name": None,
@@ -591,14 +592,16 @@ def local_models_hardware():
     """
     budget = hardware.probe_budget()
     ram_total, ram_avail = hardware._ram_bytes()
+    ram_used = max(0, ram_total - ram_avail) if ram_total else None
     engine = engine_mod.configured_engine(_load_config())
     out = {
         "uma": budget.uma, "vram_total_bytes": budget.total_device_bytes, "vram_usable_bytes": budget.usable_vram_bytes,
-        "ram_total_bytes": ram_total, "ram_available_bytes": ram_avail, "vram_label": _human_gb(budget.total_device_bytes),
+        "ram_total_bytes": ram_total, "ram_available_bytes": ram_avail, "ram_used_bytes": ram_used,
+        "vram_label": _human_gb(budget.total_device_bytes),
         "gpu_name": None, "gpu_util_percent": None, "vram_used_bytes": None,
         "vram_free_bytes": None, "vram_engine_bytes": None, "vram_other_bytes": None,
         "gpu_driver_version": None, "cuda_compute_capability": None,
-        "occupancy_foreign": False, "ctx_64k_feasible": None,
+        "occupancy_foreign": False, "ctx_64k_feasible": None, "vllm_version": None,
     }
     smi = _quiet(_nvidia_smi_facts, {})
     smi_total = smi.pop("vram_total_bytes", None)
@@ -615,6 +618,10 @@ def local_models_hardware():
     out.update(_quiet(gpu_vram_attribution, {
         "vram_engine_bytes": None, "vram_other_bytes": None, "occupancy_foreign": False,
     }))
+    if engine == "vllm":
+        from hermes_cli.vllm_runtime.venv import installed_vllm_version
+
+        out["vllm_version"] = (installed_vllm_version() or "").strip() or None
     return out
 
 

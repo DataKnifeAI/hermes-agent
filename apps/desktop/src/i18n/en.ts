@@ -1195,6 +1195,7 @@ export const en: Translations = {
       ctx64kTight: 'Below the 64k VRAM floor',
       occupancyWarn: 'Another LLM is using this GPU',
       ram: label => `${label} RAM`,
+      ramUsed: (used, total) => `${used} / ${total} used`,
       unifiedMemory: 'Unified memory',
       modelsTitle: 'Local',
       recommended: 'Recommended',
@@ -1333,7 +1334,11 @@ export const en: Translations = {
         'Search Hugging Face. Models you download here are sized to your machine when we can tell, but not tested by us.',
       vllmBrowseNoHits: 'No Hugging Face models found.',
       vllmSetFailed: 'Could not set this as the local model',
-      vllmCachedPill: 'Downloaded'
+      vllmCachedPill: 'Downloaded',
+      showUnfitting: "Show models that don't fit",
+      hideUnfitting: "Hide models that don't fit",
+      showMore: 'Show more',
+      showLess: 'Show less'
     },
     providers: {
       connectAccount: 'Connect an account',

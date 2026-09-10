@@ -76,9 +76,14 @@ def test_hardware_plain_facts(client):
     assert data["vram_total_bytes"] >= 0
     # GPU fields are None-able (non-NVIDIA machines) but must exist.
     assert "gpu_name" in data and "gpu_util_percent" in data and "vram_used_bytes" in data
+    assert "ram_used_bytes" in data and "vllm_version" in data
     # Used without total is useless — when both are present, used cannot exceed total.
     if data["vram_used_bytes"] is not None:
         assert data["vram_used_bytes"] <= data["vram_total_bytes"]
+    if data["ram_used_bytes"] is not None:
+        assert data["ram_used_bytes"] <= data["ram_total_bytes"]
+    if data["vllm_version"] is not None:
+        assert isinstance(data["vllm_version"], str) and data["vllm_version"]
     if data.get("vram_free_bytes") is not None:
         assert data["vram_free_bytes"] <= data["vram_total_bytes"]
     if data.get("vram_engine_bytes") is not None and data.get("vram_other_bytes") is not None:
