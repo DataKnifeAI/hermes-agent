@@ -181,6 +181,93 @@ def test_vllm_boot_in_flight_real_gate(tmp_path, monkeypatch):
     assert home  # HERMES_HOME isolation
 
 
+def test_stale_loopback_custom_pin_follows_live_vllm(tmp_path, monkeypatch):
+    """A session pinned to 18435 after an ephemeral rebind must hit the live port."""
+    home = _home(tmp_path, monkeypatch)
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    state_path().parent.mkdir(parents=True, exist_ok=True)
+    state_path().write_text(json.dumps({
+        "base_url": "http://127.0.0.1:53351/v1",
+        "pid": os.getpid(),
+        "served_model_name": "qwen3:14b",
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.load_config",
+        lambda: {
+            "local_runtime": {"enabled": True, "engine": "vllm"},
+            "model": {"provider": "vllm", "default": "qwen3:14b",
+                      "base_url": "http://127.0.0.1:53351/v1"},
+            "providers": {},
+        })
+
+    from hermes_cli.runtime_provider import _resolve_named_custom_runtime
+
+    runtime = _resolve_named_custom_runtime(
+        requested_provider="custom",
+        explicit_base_url="http://127.0.0.1:18435/v1",
+        target_model="qwen3:8b")
+    assert runtime is not None
+    assert "53351" in runtime["base_url"]
+    assert "18435" not in runtime["base_url"]
+    assert runtime["source"] == "local-runtime"
+    assert home
+
+
+def test_follow_live_managed_vllm_leaves_foreign_and_remote(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    from hermes_cli.vllm_runtime import endpoint as ep
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    state_path().parent.mkdir(parents=True, exist_ok=True)
+    state_path().write_text(json.dumps({
+        "base_url": "http://127.0.0.1:53351/v1",
+        "pid": os.getpid(),
+        "served_model_name": "qwen3:14b",
+    }), encoding="utf-8")
+
+    assert ep.follow_live_managed_vllm("http://127.0.0.1:18434/v1", "qwen3:8b") is None
+    assert ep.follow_live_managed_vllm("http://127.0.0.1:11434/v1", "qwen3:8b") is None
+    assert ep.follow_live_managed_vllm("http://gpu-box.example:8000/v1", "qwen3:8b") is None
+    followed = ep.follow_live_managed_vllm("http://127.0.0.1:18435/v1", "qwen3:8b")
+    assert followed is not None
+    assert followed["base_url"] == "http://127.0.0.1:53351/v1"
+    assert followed["served_model_name"] == "qwen3:14b"
+    assert home
+
+
+def test_session_override_does_not_restamp_stale_vllm_port(tmp_path, monkeypatch):
+    """``_resolve_agent_model_runtime`` re-applies persisted base_url — must not undo follow."""
+    _home(tmp_path, monkeypatch)
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    state_path().parent.mkdir(parents=True, exist_ok=True)
+    state_path().write_text(json.dumps({
+        "base_url": "http://127.0.0.1:53351/v1",
+        "pid": os.getpid(),
+        "served_model_name": "qwen3:14b",
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **k: {
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "base_url": "http://127.0.0.1:53351/v1",
+            "api_key": "no-key-required",
+            "source": "local-runtime",
+        })
+
+    from tui_gateway.server import _resolve_agent_model_runtime
+
+    model, runtime = _resolve_agent_model_runtime(
+        {"model": "qwen3:8b", "provider": "custom",
+         "base_url": "http://127.0.0.1:18435/v1"},
+        None)
+    assert "53351" in runtime["base_url"]
+    assert "18435" not in runtime["base_url"]
+    assert model == "qwen3:14b"
+
+
 def test_vllm_endpoint_wait_zero_does_not_kick(tmp_path, monkeypatch):
     _home(tmp_path, monkeypatch)
     from hermes_cli.vllm_runtime import endpoint as ep

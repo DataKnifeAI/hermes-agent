@@ -2216,6 +2216,21 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
             raise RuntimeError("Auth fallback resolved without a model")
         return resolution.selected_model, resolution.runtime
     resolution.runtime.update({k: v for k, v in overrides.items() if v})
+    # Managed vLLM may rebind (18435 busy → ephemeral). Session pins persist
+    # provider=custom + the old loopback URL; stamping that back connection-refuses.
+    try:
+        from hermes_cli.vllm_runtime.endpoint import follow_live_managed_vllm
+
+        pinned_url = str(overrides.get("base_url") or resolution.runtime.get("base_url") or "")
+        followed = follow_live_managed_vllm(pinned_url, model)
+    except Exception:
+        followed = None
+    if followed:
+        resolution.runtime["base_url"] = followed["base_url"]
+        if followed.get("api_key") and not resolution.runtime.get("api_key"):
+            resolution.runtime["api_key"] = followed["api_key"]
+        if served := followed.get("served_model_name"):
+            model = served
     return model, resolution.runtime
 
 

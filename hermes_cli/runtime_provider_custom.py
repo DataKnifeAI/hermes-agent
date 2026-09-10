@@ -525,6 +525,11 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     if requested_norm and requested_norm != "custom" and rp._resolves_to_custom(requested_norm):
         requested_norm = "custom"
     if requested_norm == "custom" and explicit_base_url:
+        from hermes_cli.vllm_runtime.endpoint import follow_live_managed_vllm, is_loopback_url
+
+        if is_loopback_url(explicit_base_url) and follow_live_managed_vllm(
+                explicit_base_url, target_model or ""):
+            return _resolve_vllm_runtime(requested_provider or "vllm", explicit_api_key)
         return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
     custom_provider = rp._get_named_custom_provider(requested_provider)
     if not custom_provider:

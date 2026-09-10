@@ -64,6 +64,7 @@ def _state_endpoint() -> dict | None:
         "base_url": base_url,
         "api_key": state.get("api_key", ""),
         "pid": state.get("pid"),
+        "served_model_name": str(state.get("served_model_name") or "").strip(),
     }
 
 
@@ -91,6 +92,76 @@ def resolve_vllm_endpoint(config: dict | None = None,
             if managed:
                 return managed
     return None
+
+
+# llama.cpp + Ollama defaults — a session pinned there is not managed vLLM.
+_FOREIGN_LOOPBACK_PORTS = frozenset({18434, 11434})
+
+
+def _url_port(url: str) -> int | None:
+    try:
+        parsed = urlparse((url or "").strip())
+    except ValueError:
+        return None
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return None
+
+
+def _engine_is_vllm(config: dict | None = None) -> bool:
+    with suppress(Exception):
+        config = _load_config_if_none(config)
+        from hermes_cli.local_engines import engine_from_config
+
+        return engine_from_config(config) == "vllm"
+    return False
+
+
+def follow_live_managed_vllm(
+    base_url: str,
+    model: str = "",
+    config: dict | None = None,
+) -> dict | None:
+    """Rewrite a stale loopback pin to the live managed serve.
+
+    Sessions persist ``provider: custom`` + the port from first Use. After an
+    ephemeral rebind (18435 busy → 53351) that pin connection-refuses. Follow
+    ``server.json`` when the pin is loopback, not llama.cpp/Ollama, and either
+    the default managed port or the active engine is vLLM.
+    """
+    pinned = (base_url or "").strip().rstrip("/")
+    if not pinned or not is_loopback_url(pinned):
+        return None
+    live = resolve_vllm_endpoint(config, wait_for_boot_s=0)
+    if not live:
+        return None
+    live_url = str(live.get("base_url") or "").strip().rstrip("/")
+    if not live_url:
+        return None
+    port = _url_port(pinned)
+    if port in _FOREIGN_LOOPBACK_PORTS:
+        return None
+    from hermes_cli.vllm_runtime.supervisor import DEFAULT_LISTEN_PORT
+
+    if port != DEFAULT_LISTEN_PORT and not _engine_is_vllm(config):
+        return None
+    served = str(live.get("served_model_name") or "").strip()
+    if not served:
+        from hermes_cli.vllm_runtime.supervisor import state_served_model_name
+
+        served = state_served_model_name()
+    if pinned.lower() == live_url.lower() and (not served or served == (model or "").strip()):
+        return None
+    return {
+        "base_url": live_url,
+        "api_key": live.get("api_key") or "",
+        "served_model_name": served,
+        "pid": live.get("pid"),
+    }
 
 
 def _load_config_if_none(config: dict | None) -> dict | None:
