@@ -1061,6 +1061,7 @@ export const zhHant = defineLocale({
       occupancyWarn: '另有 LLM 正在占用此 GPU',
       ram: label => `${label} 記憶體`,
       ramUsed: (used, total) => `已用 ${used} / ${total}`,
+      ramAvailable: avail => `${avail} 可用`,
       unifiedMemory: '統一記憶體',
       modelsTitle: '本地',
       recommended: '推薦',

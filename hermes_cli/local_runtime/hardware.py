@@ -61,8 +61,75 @@ def _stdout(*argv: str) -> str:
     ).stdout
 
 
+def _parse_proc_meminfo(text: str) -> dict[str, int]:
+    """Parse /proc/meminfo text into KiB values keyed by field name."""
+    fields: dict[str, int] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, rest = line.split(":", 1)
+        parts = rest.split()
+        if not parts:
+            continue
+        with suppress(ValueError):
+            fields[key] = int(parts[0])
+    return fields
+
+
+def _ram_from_meminfo(fields: dict[str, int]) -> tuple[int, int, int] | None:
+    """(total, used, available) bytes matching ``free``'s Mem line.
+
+    ``getconf _AVPHYS_PAGES`` is MemFree. Subtracting that from MemTotal counts
+    reclaimable cache as used (~57 GB on a box ``free -h`` reports ~31 GB used).
+
+    procps-ng 4.x: used = MemTotal − MemAvailable. Older kernels without
+    MemAvailable fall back to total − free − buffers − cache (Cached +
+    SReclaimable). Never report MemAvailable as used, and never treat MemFree
+    as available when cache is large.
+    """
+    total_kib = fields.get("MemTotal") or 0
+    if total_kib <= 0:
+        return None
+    total = total_kib * 1024
+    avail_kib = fields.get("MemAvailable") or 0
+    free_kib = fields.get("MemFree") or 0
+    buffers_kib = fields.get("Buffers") or 0
+    cache_kib = (fields.get("Cached") or 0) + (fields.get("SReclaimable") or 0)
+    if avail_kib > 0:
+        avail = avail_kib * 1024
+        used = max(0, total - avail)
+    else:
+        avail = free_kib * 1024
+        used = max(0, (total_kib - free_kib - buffers_kib - cache_kib) * 1024)
+    if used > total:
+        used = total
+    return total, used, avail
+
+
+def _linux_ram_stats() -> tuple[int, int, int] | None:
+    with suppress(OSError):
+        return _ram_from_meminfo(_parse_proc_meminfo(Path("/proc/meminfo").read_text()))
+    return None
+
+
+def _ram_stats() -> tuple[int, int, int]:
+    """(total, used, available) physical memory in bytes."""
+    if sys.platform.startswith("linux"):
+        stats = _linux_ram_stats()
+        if stats is not None:
+            return stats
+    total, avail = _ram_bytes_os()
+    return total, max(0, total - avail) if total else 0, avail
+
+
 def _ram_bytes() -> tuple[int, int]:
     """(total, available) physical memory, cross-platform stdlib."""
+    total, _used, avail = _ram_stats()
+    return total, avail
+
+
+def _ram_bytes_os() -> tuple[int, int]:
+    """(total, available) without /proc/meminfo — Windows, macOS, getconf fallback."""
     try:
         import ctypes
 

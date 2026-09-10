@@ -591,8 +591,9 @@ def local_models_hardware():
     Polled by the pane and statusbar. Sync def: shells out to nvidia-smi — threadpool.
     """
     budget = hardware.probe_budget()
-    ram_total, ram_avail = hardware._ram_bytes()
-    ram_used = max(0, ram_total - ram_avail) if ram_total else None
+    ram_total, ram_used, ram_avail = hardware._ram_stats()
+    if not ram_total:
+        ram_used = None
     engine = engine_mod.configured_engine(_load_config())
     out = {
         "uma": budget.uma, "vram_total_bytes": budget.total_device_bytes, "vram_usable_bytes": budget.usable_vram_bytes,

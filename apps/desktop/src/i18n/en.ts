@@ -1196,6 +1196,7 @@ export const en: Translations = {
       occupancyWarn: 'Another LLM is using this GPU',
       ram: label => `${label} RAM`,
       ramUsed: (used, total) => `${used} / ${total} used`,
+      ramAvailable: avail => `${avail} available`,
       unifiedMemory: 'Unified memory',
       modelsTitle: 'Local',
       recommended: 'Recommended',

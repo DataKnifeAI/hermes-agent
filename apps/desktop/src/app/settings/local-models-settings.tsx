@@ -815,8 +815,8 @@ export function LocalModelsSettings() {
               />
             )}
             {status.runtime_installed && (
-              <div className="mt-3 flex justify-start py-2">
-                <Button onClick={() => void handleQuickstart()} size="sm" variant="ghost">
+              <div className="mt-1 flex justify-start">
+                <Button className="h-auto px-0" onClick={() => void handleQuickstart()} size="sm" variant="ghost">
                   {copy.recommendedSetup}
                 </Button>
               </div>

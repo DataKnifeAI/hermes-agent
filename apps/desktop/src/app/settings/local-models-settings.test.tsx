@@ -1555,7 +1555,7 @@ describe('vLLM engine', () => {
     expect(screen.getAllByRole('button', { name: /^use$/i })).toHaveLength(1)
   })
 
-  it('left-aligns Restore recommended setup with padding', async () => {
+  it('left-aligns Restore recommended setup as a tight ghost action', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
       models: [{ id: 'acme/sideload-awq', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
@@ -1586,6 +1586,8 @@ describe('vLLM engine', () => {
     const restore = await screen.findByRole('button', { name: /restore recommended setup/i })
     const wrap = restore.closest('.justify-start')
     expect(wrap).toBeTruthy()
-    expect(wrap!.className.split(/\s+/)).toEqual(expect.arrayContaining(['mt-3', 'flex', 'justify-start', 'py-2']))
+    expect(wrap!.className.split(/\s+/)).toEqual(expect.arrayContaining(['mt-1', 'flex', 'justify-start']))
+    expect(wrap!.className.split(/\s+/)).not.toEqual(expect.arrayContaining(['py-2', 'mt-3']))
+    expect(restore.className.split(/\s+/)).toEqual(expect.arrayContaining(['h-auto', 'px-0']))
   })
 })

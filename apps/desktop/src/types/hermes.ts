@@ -1331,7 +1331,7 @@ export interface LocalHardware {
   vram_usable_bytes: number
   ram_total_bytes: number
   ram_available_bytes: number
-  /** Physical RAM in use (total − available). Missing on older backends. */
+  /** Physical RAM in use, matching `free` used (not MemFree / cache). Missing on older backends. */
   ram_used_bytes?: number | null
   /** Isolated-venv vLLM version when engine is vLLM. */
   vllm_version?: null | string

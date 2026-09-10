@@ -137,9 +137,16 @@ export function LocalModelsMachineStats({
         icon={<Package className="size-3.5" />}
         label="RAM"
         value={
-          ramUsed != null && hardware.ram_total_bytes
-            ? copy.ramUsed(gbLabel(ramUsed), gbLabel(hardware.ram_total_bytes))
-            : copy.ram(gbLabel(hardware.ram_total_bytes))
+          <span className="grid gap-0.5">
+            <span>
+              {ramUsed != null && hardware.ram_total_bytes
+                ? copy.ramUsed(gbLabel(ramUsed), gbLabel(hardware.ram_total_bytes))
+                : copy.ram(gbLabel(hardware.ram_total_bytes))}
+            </span>
+            {detailsOpen && hardware.ram_available_bytes != null && (
+              <span className="text-muted-foreground">{copy.ramAvailable(gbLabel(hardware.ram_available_bytes))}</span>
+            )}
+          </span>
         }
       />
 

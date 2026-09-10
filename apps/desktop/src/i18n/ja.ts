@@ -1101,6 +1101,7 @@ export const ja = defineLocale({
       occupancyWarn: '別の LLM がこの GPU を使用中です',
       ram: label => `RAM ${label}`,
       ramUsed: (used, total) => `${used} / ${total} 使用中`,
+      ramAvailable: avail => `${avail} 利用可能`,
       unifiedMemory: 'ユニファイドメモリ',
       modelsTitle: 'ローカル',
       recommended: 'おすすめ',

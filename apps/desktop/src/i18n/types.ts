@@ -1040,6 +1040,7 @@ export interface Translations {
       occupancyWarn: string
       ram: (label: string) => string
       ramUsed: (used: string, total: string) => string
+      ramAvailable: (avail: string) => string
       unifiedMemory: string
       modelsTitle: string
       recommended: string

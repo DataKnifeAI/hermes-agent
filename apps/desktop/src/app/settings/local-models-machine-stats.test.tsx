@@ -70,6 +70,7 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.getByText('NVIDIA GeForce RTX 5090')).toBeTruthy()
     expect(screen.getByText(/6\.0 GB \/ 32\.0 GB used/)).toBeTruthy()
     expect(screen.getByText(/56\.0 GB \/ 256\.0 GB used/)).toBeTruthy()
+    expect(screen.queryByText(/200\.0 GB available/)).toBeNull()
     expect(screen.queryByText(/driver 560/)).toBeNull()
     expect(screen.queryByText(/this engine/)).toBeNull()
     expect(screen.queryByText(/~\/\.hermes\/models/)).toBeNull()
@@ -78,6 +79,7 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.queryByText(/64k context/)).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
+    expect(screen.getByText(/200\.0 GB available/)).toBeTruthy()
     expect(screen.getByText(/driver 560/)).toBeTruthy()
     expect(screen.getByText(/this engine 5\.0 GB/)).toBeTruthy()
     expect(screen.getByText(/~\/\.hermes\/models/)).toBeTruthy()
@@ -100,5 +102,17 @@ describe('LocalModelsMachineStats', () => {
     renderStats({ status: { tag: '0.9.0', vllm_version: null } })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
     expect(screen.getByText(/vLLM 0\.9\.0/)).toBeTruthy()
+  })
+
+  it('prefers ram_used_bytes over total minus available', () => {
+    renderStats({
+      hardware: {
+        ram_used_bytes: 12 * 2 ** 30,
+        ram_available_bytes: 200 * 2 ** 30,
+        ram_total_bytes: 256 * 2 ** 30
+      }
+    })
+    expect(screen.getByText(/12\.0 GB \/ 256\.0 GB used/)).toBeTruthy()
+    expect(screen.queryByText(/56\.0 GB \/ 256\.0 GB used/)).toBeNull()
   })
 })

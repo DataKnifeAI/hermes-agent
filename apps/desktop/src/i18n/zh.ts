@@ -1397,6 +1397,7 @@ export const zh: Translations = {
       occupancyWarn: '另有 LLM 正在占用此 GPU',
       ram: label => `${label} 内存`,
       ramUsed: (used, total) => `已用 ${used} / ${total}`,
+      ramAvailable: avail => `${avail} 可用`,
       unifiedMemory: '统一内存',
       modelsTitle: '本地',
       recommended: '推荐',
