@@ -1491,6 +1491,116 @@ describe('vLLM engine', () => {
     expect(screen.getByRole('button', { name: /^use$/i })).toBeTruthy()
   })
 
+  it('shows Starting on the runtime chip until /v1/models is ready', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      engine_state: 'starting',
+      model: 'NousResearch/Hermes-3-Llama-3.1-8B',
+      served_model_name: null,
+      active_model_id: null,
+      server_running: false,
+      start_phase: 'Capturing CUDA graphs',
+      models: [{ id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByText('Starting')).toBeTruthy()
+    expect(screen.queryByText(/^Ready(?:\s·|$)/)).toBeNull()
+    expect(screen.queryByText(/Ready · vllm/i)).toBeNull()
+  })
+
+  it('shows Ready · model on the runtime chip only when serving', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      engine_state: 'ready',
+      served_model_name: 'qwen3:14b',
+      active_model_id: 'qwen3:14b',
+      server_running: true,
+      models: [{ id: 'Qwen/Qwen3-14B', size_bytes: 9 * 2 ** 30, size_label: '9.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: true,
+          added_by_you: false,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'qwen3:14b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-14B',
+          recommended: true,
+          served_model_name: 'qwen3:14b',
+          size_bytes: 9 * 2 ** 30,
+          size_label: '9.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByText('Ready · qwen3:14b')).toBeTruthy()
+  })
+
+  it('shows Stopped on the runtime chip when the engine is idle', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      engine_state: 'stopped',
+      served_model_name: null,
+      active_model_id: null,
+      server_running: false,
+      models: [{ id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByText('Stopped')).toBeTruthy()
+    expect(screen.queryByText(/Ready · vllm/i)).toBeNull()
+  })
+
   it('shows In use on the served cached model and Use on other cached rows', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,

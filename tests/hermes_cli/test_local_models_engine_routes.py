@@ -585,9 +585,54 @@ def test_vllm_status_active_empty_until_models_200(tmp_path, monkeypatch):
 
     data = client.get("/api/local-models/status").json()
     assert data["server_running"] is False
+    assert data["engine_state"] == "starting"
     assert data["active_model_id"] is None
     assert data["served_model_name"] is None
     assert data["model"] == "NousResearch/Hermes-3-Llama-3.1-8B"
+
+
+def test_vllm_engine_state_ready_iff_healthy_endpoint(tmp_path, monkeypatch):
+    """engine_state is ready only when GET /v1/models advertised a name."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "Qwen/Qwen3-14B",
+        "served_model_name": "qwen3:14b",
+    }})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine._vllm_last_error",
+        lambda: None)
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 7})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "qwen3:14b")
+    healthy = client.get("/api/local-models/status").json()
+    assert healthy["server_running"] is True
+    assert healthy["engine_state"] == "ready"
+    assert (healthy["engine_state"] == "ready") is healthy["server_running"]
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "")
+    warming = client.get("/api/local-models/status").json()
+    assert warming["server_running"] is False
+    assert warming["engine_state"] == "starting"
+    assert (warming["engine_state"] == "ready") is warming["server_running"]
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    idle = client.get("/api/local-models/status").json()
+    assert idle["server_running"] is False
+    assert idle["engine_state"] == "stopped"
+    assert (idle["engine_state"] == "ready") is idle["server_running"]
 
 
 def _wait_job(client, job_id: str, timeout_s: float = 3.0) -> dict:

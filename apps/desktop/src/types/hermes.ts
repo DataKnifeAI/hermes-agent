@@ -1301,6 +1301,8 @@ export interface LocalModelsStatus {
   update_available: boolean
   runtime_installed: boolean
   runtime_backend: string | null
+  /** Managed vLLM only. `ready` iff GET /v1/models 200. */
+  engine_state?: 'error' | 'not_installed' | 'ready' | 'starting' | 'stopped'
   server_running: boolean
   server_base_url: string | null
   active_model_id: string | null

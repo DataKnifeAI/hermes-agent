@@ -1166,6 +1166,13 @@ export const en: Translations = {
       runtimeTitle: 'Local runtime',
       runtimeReady: backend => `Ready · ${backend}`,
       serverRunning: 'Running',
+      engineReady: 'Ready',
+      engineReadyNamed: model => `Ready · ${model}`,
+      engineStarting: 'Starting',
+      engineStopped: 'Stopped',
+      engineFailed: 'Failed',
+      engineInstalling: 'Installing',
+      engineUpdating: 'Updating',
       runtimeInstalled: 'llama.cpp runtime installed',
       runtimeInstalledDetail: (tag, backend) =>
         `Build ${tag}, ${backend} backend. Hermes starts and manages the server for you.`,

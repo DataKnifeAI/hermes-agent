@@ -1071,6 +1071,13 @@ export const ja = defineLocale({
       runtimeTitle: 'ローカルランタイム',
       runtimeReady: backend => `準備完了 · ${backend}`,
       serverRunning: '実行中',
+      engineReady: '準備完了',
+      engineReadyNamed: model => `準備完了 · ${model}`,
+      engineStarting: '起動中',
+      engineStopped: '停止中',
+      engineFailed: '失敗',
+      engineInstalling: 'インストール中',
+      engineUpdating: '更新中',
       runtimeInstalled: 'llama.cpp ランタイムをインストール済み',
       runtimeInstalledDetail: (tag, backend) =>
         `ビルド ${tag}、${backend} バックエンド。サーバーは Hermes が起動・管理します。`,

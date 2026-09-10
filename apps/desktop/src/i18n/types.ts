@@ -1012,6 +1012,13 @@ export interface Translations {
       runtimeTitle: string
       runtimeReady: (backend: string) => string
       serverRunning: string
+      engineReady: string
+      engineReadyNamed: (model: string) => string
+      engineStarting: string
+      engineStopped: string
+      engineFailed: string
+      engineInstalling: string
+      engineUpdating: string
       runtimeInstalled: string
       runtimeInstalledDetail: (tag: string, backend: string) => string
       installTitle: string

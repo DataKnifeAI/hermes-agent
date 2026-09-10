@@ -244,23 +244,38 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
     ready = bool(served)
     configured = str(settings.get("model") or "") or None
     occ = occupancy_payload()
+    last_error = occ["occupancy_message"] or _vllm_last_error()
+    installed = venv_ready()
+    # Ready is the healthy endpoint only. A live pid with no /v1/models
+    # name is still starting — never "ready" on spawn.
+    if ready:
+        engine_state = "ready"
+    elif running is not None:
+        engine_state = "starting"
+    elif last_error:
+        engine_state = "error"
+    elif installed:
+        engine_state = "stopped"
+    else:
+        engine_state = "not_installed"
     versions = vllm_version_fields()
     inventory = catalog_models(cfg)
     return {
         "engine": "vllm",
         "enabled": bool(section.get("enabled")),
-        "venv_ready": venv_ready(),
-        "runtime_installed": venv_ready(),
-        "runtime_backend": "vllm" if venv_ready() else None,
-        "venv_path": str(venv_dir()) if venv_ready() else "",
+        "venv_ready": installed,
+        "runtime_installed": installed,
+        "runtime_backend": "vllm" if installed else None,
+        "venv_path": str(venv_dir()) if installed else "",
+        "engine_state": engine_state,
         "server_running": ready,
         "server_base_url": (running or {}).get("base_url") or (
-            openai_base_url(settings) if venv_ready() else None),
+            openai_base_url(settings) if installed else None),
         "active_model_id": served,
         "served_model_name": served,
         "model": configured,
         "start_phase": None if ready else _vllm_log_phase(),
-        "last_error": occ["occupancy_message"] or _vllm_last_error(),
+        "last_error": last_error,
         **occ,
         "tag": versions.get("tag") or "",
         "configured_tag": versions.get("configured_tag") or "",

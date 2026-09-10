@@ -62,6 +62,7 @@ import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus }
 import { CONTROL_TEXT } from './constants'
 import { LocalModelsMachineStats } from './local-models-machine-stats'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
+import { vllmEngineChip } from './vllm-engine-chip'
 import { VllmModelsPane } from './vllm-models-pane'
 
 function ProgressBar({ percent }: { percent: number | undefined }) {
@@ -282,11 +283,11 @@ export function LocalModelsSettings() {
       }
 
       if (!cancelled) {
-        timer = window.setTimeout(() => void tick(), 4_000)
+        timer = window.setTimeout(() => void tick(), 5_000)
       }
     }
 
-    timer = window.setTimeout(() => void tick(), 4_000)
+    timer = window.setTimeout(() => void tick(), 5_000)
 
     return () => {
       cancelled = true
@@ -710,18 +711,21 @@ export function LocalModelsSettings() {
   // serving. Shown whenever true — not only right after an update.
   const updateApplied = status.runtime_installed && !status.update_available && status.tag === status.configured_tag
   const vllmVersion = (status.vllm_version || (engine === 'vllm' ? status.tag : '') || '').trim()
+  const vllmChip =
+    engine === 'vllm'
+      ? vllmEngineChip({ copy, jobs, serverBusy, status })
+      : status.runtime_installed
+        ? {
+            label: status.server_running ? copy.serverRunning : copy.runtimeReady(status.runtime_backend ?? ''),
+            tone: 'primary' as const
+          }
+        : null
 
   return (
     <SettingsContent>
       {/* ── Runtime ── */}
       <SettingsSection
-        aside={
-          status.runtime_installed ? (
-            <Pill tone="primary">
-              {status.server_running ? copy.serverRunning : copy.runtimeReady(status.runtime_backend ?? '')}
-            </Pill>
-          ) : undefined
-        }
+        aside={vllmChip ? <Pill tone={vllmChip.tone}>{vllmChip.label}</Pill> : undefined}
         icon={Zap}
         meta={engine === 'vllm' ? (vllmVersion ? `${copy.engineVllm} ${vllmVersion}` : copy.engineVllm) : status.tag}
         title={copy.runtimeTitle}
