@@ -736,20 +736,9 @@ export function LocalModelsSettings() {
 
         {engine === 'vllm' ? (
           <>
-            <ListRow
-              action={
-                status.server_running ? (
-                  <Button
-                    className={cn(serverBusy && '[&_svg]:animate-spin')}
-                    disabled={serverBusy}
-                    onClick={() => void handleServer('stop')}
-                    size="sm"
-                    variant="outline"
-                  >
-                    {serverBusy ? <Loader2 /> : <StopFilled />}
-                    {copy.stopServer}
-                  </Button>
-                ) : (
+            {!status.server_running && (
+              <ListRow
+                action={
                   <Button
                     className={cn(serverBusy && '[&_svg]:animate-spin')}
                     disabled={serverBusy || !status.runtime_installed}
@@ -760,29 +749,21 @@ export function LocalModelsSettings() {
                     {serverBusy ? <Loader2 /> : <Zap />}
                     {copy.startServer}
                   </Button>
-                )
-              }
-              description={
-                status.occupancy_message || status.last_error
-                  ? (status.occupancy_message ?? status.last_error)
-                  : status.server_running
-                    ? `${status.served_model_name ?? status.active_model_id ?? ''} · ${status.server_base_url ?? ''}`
+                }
+                description={
+                  status.occupancy_message || status.last_error
+                    ? (status.occupancy_message ?? status.last_error)
                     : status.runtime_installed
                       ? undefined
                       : copy.vllmInstallDetail
-              }
-              title={
-                status.server_running
-                  ? copy.serverRunning
-                  : status.runtime_installed
-                    ? copy.vllmReadyTitle
-                    : copy.vllmInstallTitle
-              }
-            />
+                }
+                title={status.runtime_installed ? copy.vllmReadyTitle : copy.vllmInstallTitle}
+              />
+            )}
             {status.runtime_installed && status.tag && (
               <ListRow
                 action={
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-end gap-2">
                     <Button disabled={checkingUpdate} onClick={() => void handleVllmCheckUpdate()} size="sm" variant="outline">
                       {checkingUpdate ? <Loader2 className="animate-spin" /> : <RefreshCw />}
                       {checkingUpdate ? copy.vllmCheckingUpdate : copy.vllmCheckUpdate}
@@ -791,6 +772,18 @@ export function LocalModelsSettings() {
                       <Button onClick={() => void handleVllmUpdate()} size="sm">
                         <Download />
                         {copy.updateAction}
+                      </Button>
+                    )}
+                    {status.server_running && (
+                      <Button
+                        className={cn(serverBusy && '[&_svg]:animate-spin')}
+                        disabled={serverBusy}
+                        onClick={() => void handleServer('stop')}
+                        size="sm"
+                        variant="outline"
+                      >
+                        {serverBusy ? <Loader2 /> : <StopFilled />}
+                        {copy.stopServer}
                       </Button>
                     )}
                   </div>
