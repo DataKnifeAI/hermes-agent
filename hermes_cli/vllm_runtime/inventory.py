@@ -315,7 +315,58 @@ def parse_param_billions(text: str) -> float | None:
         return None
 
 
-def parse_quantization(repo: str, tags: list[str] | None = None) -> str | None:
+def _quant_method_of(config: dict | None) -> str | None:
+    """Raw HF ``quantization_config.quant_method`` (awq, compressed-tensors, …)."""
+    if not isinstance(config, dict):
+        return None
+    qcfg = config.get("quantization_config")
+    if not isinstance(qcfg, dict):
+        return None
+    method = str(qcfg.get("quant_method") or "").lower().replace("_", "-")
+    return method or None
+
+
+def cached_model_config(repo: str) -> dict | None:
+    """Hub-cache ``config.json`` for ``repo``. None when weights are not local."""
+    hid = (repo or "").strip()
+    if not hid or "/" not in hid:
+        return None
+    root = hf_hub_dir() / _cache_name(hid)
+    snap = _current_snapshot(root)
+    paths = []
+    if snap is not None:
+        paths.append(snap / "config.json")
+    paths.append(root / "config.json")
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def repo_quant_method(repo: str, config: dict | None = None) -> str | None:
+    """``quant_method`` from ``config`` or the hub-cache snapshot."""
+    cfg = config if isinstance(config, dict) else cached_model_config(repo)
+    return _quant_method_of(cfg)
+
+
+def parse_quantization(
+    repo: str,
+    tags: list[str] | None = None,
+    *,
+    config: dict | None = None,
+) -> str | None:
+    method = _quant_method_of(config) if config is not None else None
+    # llmcompressor packs often put AWQ in the id; vLLM reads config.json.
+    if method == "compressed-tensors":
+        return None
+    if method in {"awq", "gptq", "fp8", "mxfp4", "nvfp4"}:
+        return method
     blob = f"{repo} {' '.join(tags or [])}".lower()
     for token, quant in _QUANT_TOKENS:
         if token in blob:
@@ -572,7 +623,7 @@ def _quant_from_config(config: dict | None) -> str | None:
     qcfg = config.get("quantization_config")
     if not isinstance(qcfg, dict):
         return None
-    method = str(qcfg.get("quant_method") or "").lower().replace("_", "-")
+    method = _quant_method_of(config) or ""
     bits = qcfg.get("bits")
     if method in {"awq", "gptq", "fp8", "mxfp4", "nvfp4"}:
         return method
@@ -1569,12 +1620,12 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     else:
         save_config_value("local_runtime.vllm.model", hid)
         save_config_value("local_runtime.vllm.served_model_name", served_name_for(hid))
-        # Recommend writes --quantization awq. A search hit that is not AWQ
-        # (Dolphin BF16, etc.) then dies with "Cannot find the config file for awq".
-        parsed = parse_quantization(hid)
+        # Serve flag follows config.json quant_method, not an AWQ token in
+        # the id (cyankiwi Hermes-*-AWQ-4bit is compressed-tensors).
+        method = repo_quant_method(hid)
         save_config_value(
             "local_runtime.vllm.quantization",
-            parsed if parsed in {"awq", "gptq"} else "",
+            method if method in {"awq", "gptq"} else "",
         )
     return {"ok": True, "model": hid, "served_model_name": served_name_for(hid)}
 

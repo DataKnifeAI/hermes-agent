@@ -106,6 +106,43 @@ def test_serve_argv_drops_leftover_awq_on_non_awq_id():
     assert kept[kept.index("--quantization") + 1] == "awq"
 
 
+def _hub_quant_config(tmp_path, monkeypatch, hid: str, quant_method: str) -> None:
+    hub = tmp_path / "hf-hub"
+    root = hub / ("models--" + hid.replace("/", "--"))
+    snap = root / "snapshots" / "main"
+    snap.mkdir(parents=True)
+    (root / "refs").mkdir(parents=True)
+    (root / "refs" / "main").write_text("main", encoding="utf-8")
+    (snap / "config.json").write_text(
+        json.dumps({"quantization_config": {"quant_method": quant_method}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+
+
+def test_serve_argv_skips_awq_for_compressed_tensors_id(tmp_path, monkeypatch):
+    """AWQ in the id is not AutoAWQ — llmcompressor packs must not pass --quantization awq."""
+    hid = "cyankiwi/Hermes-4-14B-AWQ-4bit"
+    _hub_quant_config(tmp_path, monkeypatch, hid, "compressed-tensors")
+    argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": hid,
+        "quantization": "awq",
+        "port": 18435,
+    })
+    assert "--quantization" not in argv
+
+
+def test_serve_argv_keeps_awq_for_official_qwen_autoawq(tmp_path, monkeypatch):
+    hid = "Qwen/Qwen3-14B-AWQ"
+    _hub_quant_config(tmp_path, monkeypatch, hid, "awq")
+    argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": hid,
+        "quantization": "awq",
+        "port": 18435,
+    })
+    assert argv[argv.index("--quantization") + 1] == "awq"
+
+
 def test_start_refuses_exl2_without_spawning(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()

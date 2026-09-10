@@ -1755,6 +1755,47 @@ def test_vllm_use_failed_restore_falls_back_to_recommend(tmp_path, monkeypatch):
     assert "SIGKILL" in (read_last_error() or "")
 
 
+def test_server_start_refuses_while_use_in_flight(tmp_path, monkeypatch):
+    """Turn on must not spawn a second serve while Use is switching."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    started: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start"))
+    from hermes_cli.web_routers.local_models_engine import mark_vllm_switch
+
+    with mark_vllm_switch():
+        r = client.post("/api/local-models/server", json={"action": "start"})
+    assert r.status_code == 409, r.text
+    assert "already starting" in r.json()["detail"]
+    assert started == []
+
+
+def test_vllm_switch_in_flight_reports_starting(tmp_path, monkeypatch):
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine._vllm_last_error",
+        lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda: None)
+    from hermes_cli.web_routers.local_models_engine import mark_vllm_switch
+
+    with mark_vllm_switch():
+        data = client.get("/api/local-models/status").json()
+    assert data["engine_state"] == "starting"
+    assert data["engine_state"] != "stopped"
+
+
 def test_server_start_vllm_succeeds_when_already_running(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
@@ -1884,6 +1925,36 @@ def test_apply_search_hit_clears_leftover_awq(tmp_path, monkeypatch):
     apply_vllm_model("dphn/dolphin-2.9.1-llama-3-8b")
     vllm = load_config()["local_runtime"]["vllm"]
     assert vllm["model"] == "dphn/dolphin-2.9.1-llama-3-8b"
+    assert not (vllm.get("quantization") or "").strip()
+
+
+def test_apply_compressed_tensors_awq_id_clears_quantization(tmp_path, monkeypatch):
+    """Hermes-*-AWQ-4bit is compressed-tensors — do not write --quantization awq."""
+    _, home = _client(tmp_path, monkeypatch)
+    hid = "cyankiwi/Hermes-4-14B-AWQ-4bit"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "Qwen/Qwen3-14B-AWQ",
+        "quantization": "awq",
+        "kv_cache_dtype": "fp8",
+    }})
+    hub = tmp_path / "hf-hub"
+    root = hub / ("models--" + hid.replace("/", "--"))
+    snap = root / "snapshots" / "main"
+    snap.mkdir(parents=True)
+    (root / "refs").mkdir(parents=True)
+    (root / "refs" / "main").write_text("main", encoding="utf-8")
+    (snap / "config.json").write_text(
+        '{"quantization_config": {"quant_method": "compressed-tensors"}}',
+        encoding="utf-8",
+    )
+    (snap / "w.bin").write_bytes(b"y" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.inventory import apply_vllm_model
+
+    apply_vllm_model(hid)
+    vllm = load_config()["local_runtime"]["vllm"]
+    assert vllm["model"] == hid
     assert not (vllm.get("quantization") or "").strip()
 
 

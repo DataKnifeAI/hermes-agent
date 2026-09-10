@@ -942,6 +942,8 @@ async def local_models_server(body: ServerActionBody):
     action = (body.action or "").strip().lower()
     if action not in _SERVER_ACTIONS:
         raise HTTPException(status_code=400, detail="action must be 'stop' or 'start'")
+    if action == "start":
+        engine_mod.refuse_duplicate_vllm_start()
     try:
         await asyncio.to_thread(_SERVER_ACTIONS[action])
     except Exception as exc:  # noqa: BLE001

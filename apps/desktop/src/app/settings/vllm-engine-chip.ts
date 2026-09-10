@@ -64,6 +64,50 @@ export function vllmEngineState(
   return status.runtime_installed ? 'stopped' : 'not_installed'
 }
 
+export type VllmEnginePowerAction = 'start' | 'stop' | null
+
+export interface VllmEnginePower {
+  action: VllmEnginePowerAction
+  disabled: boolean
+  label: string
+}
+
+export function vllmEnginePower({
+  copy,
+  jobs = [],
+  serverBusy = false,
+  status
+}: {
+  copy: Pick<VllmEngineChipCopy, 'engineStarting'> & { startServer: string; stopServer: string }
+  jobs?: readonly Pick<LocalRuntimeJob, 'kind' | 'phase' | 'status'>[]
+  serverBusy?: boolean
+  status: Pick<
+    LocalModelsStatus,
+    'engine_state' | 'last_error' | 'pid' | 'runtime_installed' | 'server_running' | 'start_phase'
+  >
+}): VllmEnginePower {
+  const state = vllmEngineState(status, { serverBusy, startJob: startJobRunning(jobs) })
+
+  if (state === 'ready') {
+    return { action: 'stop', disabled: serverBusy, label: copy.stopServer }
+  }
+
+  if (state === 'starting') {
+    // Previous serve still healthy → Turn off stays. Never offer Turn on.
+    if (status.server_running) {
+      return { action: 'stop', disabled: serverBusy, label: copy.stopServer }
+    }
+
+    return { action: null, disabled: true, label: copy.engineStarting }
+  }
+
+  if (state === 'not_installed') {
+    return { action: null, disabled: true, label: copy.startServer }
+  }
+
+  return { action: 'start', disabled: serverBusy, label: copy.startServer }
+}
+
 export function vllmEngineChip({
   copy,
   jobs = [],

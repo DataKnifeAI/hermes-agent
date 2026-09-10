@@ -124,17 +124,25 @@ def configured_unservable_reason(settings: dict | None) -> str | None:
 
 
 def serve_quantization(settings: dict) -> str:
-    """Drop leftover ``--quantization`` when the HF id does not claim that method.
+    """CLI ``--quantization`` only when config.json ``quant_method`` is AutoAWQ/GPTQ.
 
-    Recommend writes ``awq``. Using a BF16 search hit (Dolphin) then passes
-    ``--quantization awq`` and vLLM dies looking for an AWQ config file.
+    Recommend writes ``awq``. An id that merely contains AWQ (llmcompressor
+    Hermes-*-AWQ-4bit) is compressed-tensors — passing ``awq`` dies. A BF16
+    search hit (Dolphin) with leftover ``awq`` dies looking for an AWQ file.
     """
+    hid = configured_model_id(settings)
+    from hermes_cli.vllm_runtime.inventory import (
+        cached_model_config, parse_quantization, repo_quant_method)
+
+    method = repo_quant_method(hid, cached_model_config(hid))
+    if method == "compressed-tensors":
+        return ""
+    if method in {"awq", "gptq"}:
+        return method
     quant = str(settings.get("quantization") or "").strip()
     if not quant:
         return ""
-    from hermes_cli.vllm_runtime.inventory import parse_quantization
-
-    parsed = parse_quantization(configured_model_id(settings))
+    parsed = parse_quantization(hid)
     return quant if parsed == quant else ""
 
 

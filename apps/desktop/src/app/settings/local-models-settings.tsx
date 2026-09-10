@@ -62,7 +62,7 @@ import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus }
 import { CONTROL_TEXT } from './constants'
 import { LocalModelsMachineStats } from './local-models-machine-stats'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
-import { vllmEngineChip } from './vllm-engine-chip'
+import { vllmEngineChip, vllmEnginePower } from './vllm-engine-chip'
 import { VllmModelsPane } from './vllm-models-pane'
 
 function ProgressBar({ percent }: { percent: number | undefined }) {
@@ -720,6 +720,7 @@ export function LocalModelsSettings() {
             tone: 'primary' as const
           }
         : null
+  const vllmPower = engine === 'vllm' ? vllmEnginePower({ copy, jobs, serverBusy, status }) : null
 
   return (
     <SettingsContent>
@@ -751,14 +752,24 @@ export function LocalModelsSettings() {
                       </Button>
                     )}
                     <Button
-                      className={cn(serverBusy && '[&_svg]:animate-spin')}
-                      disabled={serverBusy}
-                      onClick={() => void handleServer(status.server_running ? 'stop' : 'start')}
+                      className={cn((serverBusy || vllmPower?.action == null) && '[&_svg]:animate-spin')}
+                      disabled={vllmPower?.disabled ?? serverBusy}
+                      onClick={() => {
+                        if (vllmPower?.action) {
+                          void handleServer(vllmPower.action)
+                        }
+                      }}
                       size="sm"
                       variant="outline"
                     >
-                      {serverBusy ? <Loader2 /> : status.server_running ? <StopFilled /> : <Zap />}
-                      {status.server_running ? copy.stopServer : copy.startServer}
+                      {serverBusy || vllmPower?.action == null ? (
+                        <Loader2 />
+                      ) : vllmPower.action === 'stop' ? (
+                        <StopFilled />
+                      ) : (
+                        <Zap />
+                      )}
+                      {vllmPower?.label ?? copy.startServer}
                     </Button>
                   </div>
                 }

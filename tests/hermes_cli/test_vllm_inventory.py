@@ -57,6 +57,14 @@ def test_parse_quantization_from_id_or_tags():
     assert parse_quantization("openai/gpt-oss-20b") == "mxfp4"
     assert parse_quantization("openai/gpt-oss-20b", ["8-bit", "mxfp4"]) == "mxfp4"
     assert parse_quantization("org/mystery", ["8-bit"]) == "int8"
+    assert parse_quantization(
+        "cyankiwi/Hermes-4-14B-AWQ-4bit",
+        config={"quantization_config": {"quant_method": "compressed-tensors"}},
+    ) is None
+    assert parse_quantization(
+        "Qwen/Qwen3-14B-AWQ",
+        config={"quantization_config": {"quant_method": "awq"}},
+    ) == "awq"
 
 
 def test_classify_unknown_when_quant_or_size_missing():

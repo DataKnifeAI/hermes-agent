@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { vllmEngineChip, type VllmEngineChipCopy } from './vllm-engine-chip'
+import { vllmEngineChip, vllmEnginePower, type VllmEngineChipCopy } from './vllm-engine-chip'
 
 const copy: VllmEngineChipCopy = {
   engineFailed: 'Failed',
@@ -93,6 +93,37 @@ describe('vllmEngineChip', () => {
         status: { ...idle, engine_state: 'stopped', start_phase: 'Capturing CUDA graphs' }
       })
     ).toEqual({ label: 'Stopped', tone: 'muted' })
+  })
+
+  it('follows engine_state for the Engine-row power button', () => {
+    const powerCopy = { ...copy, startServer: 'Turn on', stopServer: 'Turn off' }
+
+    expect(
+      vllmEnginePower({
+        copy: powerCopy,
+        status: { ...idle, engine_state: 'starting', start_phase: 'Capturing CUDA graphs' }
+      })
+    ).toEqual({ action: null, disabled: true, label: 'Starting' })
+
+    expect(
+      vllmEnginePower({
+        copy: powerCopy,
+        status: { ...idle, engine_state: 'ready', server_running: true, served_model_name: 'qwen3:14b' }
+      })
+    ).toEqual({ action: 'stop', disabled: false, label: 'Turn off' })
+
+    expect(vllmEnginePower({ copy: powerCopy, status: idle })).toEqual({
+      action: 'start',
+      disabled: false,
+      label: 'Turn on'
+    })
+
+    expect(
+      vllmEnginePower({
+        copy: powerCopy,
+        status: { ...idle, engine_state: 'error', last_error: 'CUDA OOM' }
+      })
+    ).toEqual({ action: 'start', disabled: false, label: 'Turn on' })
   })
 
   it('labels error, install, and update without claiming Ready', () => {

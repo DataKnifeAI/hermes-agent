@@ -1541,7 +1541,10 @@ describe('vLLM engine', () => {
     })
     renderPane()
 
-    expect(await screen.findByText('Starting')).toBeTruthy()
+    const starting = await screen.findByRole('button', { name: /^starting$/i })
+    expect(starting).toBeTruthy()
+    expect((starting as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByRole('button', { name: /^turn on$/i })).toBeNull()
     expect(screen.queryByText(/^Ready(?:\s·|$)/)).toBeNull()
     expect(screen.queryByText(/Ready · vllm/i)).toBeNull()
   })
@@ -1580,6 +1583,7 @@ describe('vLLM engine', () => {
 
     expect(await screen.findByText('Ready')).toBeTruthy()
     expect(screen.queryByText(/Ready ·/)).toBeNull()
+    expect((screen.getByRole('button', { name: /^turn off$/i }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('shows Stopped on the runtime chip when the engine is idle', async () => {
@@ -1616,6 +1620,7 @@ describe('vLLM engine', () => {
 
     expect(await screen.findByText('Stopped')).toBeTruthy()
     expect(screen.queryByText(/Ready · vllm/i)).toBeNull()
+    expect((screen.getByRole('button', { name: /^turn on$/i }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('shows In use on the served cached model and Use on other cached rows', async () => {

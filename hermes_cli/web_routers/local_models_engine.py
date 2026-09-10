@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +55,9 @@ _VLLM_RESTORE_KEYS = (
     "gpu_memory_utilization", "quantization", "kv_cache_dtype",
     "tool_call_parser",
 )
+_ALREADY_STARTING = "vLLM is already starting"
+_SWITCH_LOCK = threading.Lock()
+_switch_in_flight = 0
 
 
 def raise_engine_http(exc: BaseException) -> None:
@@ -232,11 +237,35 @@ def _vllm_start_job_running() -> bool:
         )
 
 
+@contextmanager
+def mark_vllm_switch():
+    """Use/switch is in flight — status is Starting; Turn on must not spawn."""
+    global _switch_in_flight
+    with _SWITCH_LOCK:
+        _switch_in_flight += 1
+    try:
+        yield
+    finally:
+        with _SWITCH_LOCK:
+            _switch_in_flight -= 1
+
+
+def vllm_switch_in_flight() -> bool:
+    with _SWITCH_LOCK:
+        return _switch_in_flight > 0
+
+
 def vllm_serve_starting() -> bool:
-    """In-process start lock / supervisor, or a start job, even before state pid."""
+    """In-process start lock / supervisor, Use switch, or a start job."""
     from hermes_cli.vllm_runtime.bootstrap import start_in_flight
 
-    return start_in_flight() or _vllm_start_job_running()
+    return start_in_flight() or _vllm_start_job_running() or vllm_switch_in_flight()
+
+
+def refuse_duplicate_vllm_start() -> None:
+    """Turn on must not start a second serve while Use / warmup is live."""
+    if configured_engine() == "vllm" and vllm_serve_starting():
+        raise HTTPException(status_code=409, detail=_ALREADY_STARTING)
 
 
 def vllm_engine_snapshot(
@@ -692,24 +721,25 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
-    previous = dict(vllm_settings(load_config()))
-    current = str(previous.get("model") or "").strip()
-    running = resolve_vllm_endpoint(wait_for_boot_s=0) is not None
-    set_vllm_model(hid)
-    if running and current != hid:
-        # New weights need a new serve. Same-id reuse leaves a healthy process up.
-        stop_vllm_engine()
-    try:
-        start_active_engine(recover=False)
-        result = activate_vllm()
-    except Exception:
-        recover_vllm_after_failed_start(
-            failed_id=hid, previous=previous, was_running=running)
-        raise
-    result["model"] = hid
-    result["needs_download"] = False
-    result["already_downloaded"] = True
-    return result
+    with mark_vllm_switch():
+        previous = dict(vllm_settings(load_config()))
+        current = str(previous.get("model") or "").strip()
+        running = resolve_vllm_endpoint(wait_for_boot_s=0) is not None
+        set_vllm_model(hid)
+        if running and current != hid:
+            # New weights need a new serve. Same-id reuse leaves a healthy process up.
+            stop_vllm_engine()
+        try:
+            start_active_engine(recover=False)
+            result = activate_vllm()
+        except Exception:
+            recover_vllm_after_failed_start(
+                failed_id=hid, previous=previous, was_running=running)
+            raise
+        result["model"] = hid
+        result["needs_download"] = False
+        result["already_downloaded"] = True
+        return result
 
 
 def activate_vllm() -> dict[str, Any]:
