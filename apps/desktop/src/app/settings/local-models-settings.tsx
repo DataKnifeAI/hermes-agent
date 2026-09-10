@@ -736,30 +736,6 @@ export function LocalModelsSettings() {
 
         {engine === 'vllm' ? (
           <>
-            {!status.server_running && (
-              <ListRow
-                action={
-                  <Button
-                    className={cn(serverBusy && '[&_svg]:animate-spin')}
-                    disabled={serverBusy || !status.runtime_installed}
-                    onClick={() => void handleServer('start')}
-                    size="sm"
-                    variant="outline"
-                  >
-                    {serverBusy ? <Loader2 /> : <Zap />}
-                    {copy.startServer}
-                  </Button>
-                }
-                description={
-                  status.occupancy_message || status.last_error
-                    ? (status.occupancy_message ?? status.last_error)
-                    : status.runtime_installed
-                      ? undefined
-                      : copy.vllmInstallDetail
-                }
-                title={status.runtime_installed ? copy.vllmReadyTitle : copy.vllmInstallTitle}
-              />
-            )}
             {status.runtime_installed && status.tag && (
               <ListRow
                 action={
@@ -774,18 +750,16 @@ export function LocalModelsSettings() {
                         {copy.updateAction}
                       </Button>
                     )}
-                    {status.server_running && (
-                      <Button
-                        className={cn(serverBusy && '[&_svg]:animate-spin')}
-                        disabled={serverBusy}
-                        onClick={() => void handleServer('stop')}
-                        size="sm"
-                        variant="outline"
-                      >
-                        {serverBusy ? <Loader2 /> : <StopFilled />}
-                        {copy.stopServer}
-                      </Button>
-                    )}
+                    <Button
+                      className={cn(serverBusy && '[&_svg]:animate-spin')}
+                      disabled={serverBusy}
+                      onClick={() => void handleServer(status.server_running ? 'stop' : 'start')}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {serverBusy ? <Loader2 /> : status.server_running ? <StopFilled /> : <Zap />}
+                      {status.server_running ? copy.stopServer : copy.startServer}
+                    </Button>
                   </div>
                 }
                 description={
