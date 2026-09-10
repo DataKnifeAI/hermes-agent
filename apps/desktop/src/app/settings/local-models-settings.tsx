@@ -60,6 +60,7 @@ import { notify, notifyError } from '@/store/notifications'
 import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus } from '@/types/hermes'
 
 import { CONTROL_TEXT } from './constants'
+import { LocalModelsMachineStats } from './local-models-machine-stats'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
 import { VllmModelsPane } from './vllm-models-pane'
 
@@ -193,14 +194,42 @@ export function LocalModelsSettings() {
   }, [])
 
   // Snappy first paint: status + catalog immediately; hardware (may shell out
-  // to nvidia-smi) backfills and pops in-place. The job watcher also kicks
-  // here so reopening the pane rediscovers work started before.
+  // to nvidia-smi) backfills and pops in-place. Keep polling while this pane
+  // is open so VRAM used/free is live, same 5s cadence as the statusbar.
   useEffect(() => {
     refresh()
     watchLocalRuntimeJobs()
-    void getLocalHardware()
-      .then(setHardware)
-      .catch(() => setHardware(null))
+
+    let cancelled = false
+    let timer: number | null = null
+
+    const pollHardware = async () => {
+      try {
+        const next = await getLocalHardware()
+
+        if (!cancelled) {
+          setHardware(next)
+        }
+      } catch {
+        if (!cancelled) {
+          setHardware(null)
+        }
+      }
+
+      if (!cancelled) {
+        timer = window.setTimeout(() => void pollHardware(), 5_000)
+      }
+    }
+
+    void pollHardware()
+
+    return () => {
+      cancelled = true
+
+      if (timer !== null) {
+        window.clearTimeout(timer)
+      }
+    }
   }, [refresh])
 
   const selectedEngine = engineOf(status)
@@ -928,26 +957,7 @@ export function LocalModelsSettings() {
       {/* ── This machine ── */}
       <SettingsSection icon={Monitor} title={copy.hardwareTitle}>
         {hardware ? (
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 py-1 text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
-            {hardware.gpu_name && (
-              <span className="inline-flex items-center gap-1.5">
-                <Zap className="size-3.5" />
-                {hardware.gpu_name}
-              </span>
-            )}
-
-            <span className="inline-flex items-center gap-1.5">
-              <Cpu className="size-3.5" />
-              {copy.vram(gbLabel(hardware.vram_total_bytes))}
-            </span>
-
-            <span className="inline-flex items-center gap-1.5">
-              <Package className="size-3.5" />
-              {copy.ram(gbLabel(hardware.ram_total_bytes))}
-            </span>
-
-            {hardware.uma && <Pill>{copy.unifiedMemory}</Pill>}
-          </div>
+          <LocalModelsMachineStats engine={engine} hardware={hardware} status={status} />
         ) : (
           <p className="py-1 text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
             {copy.hardwareLoading}

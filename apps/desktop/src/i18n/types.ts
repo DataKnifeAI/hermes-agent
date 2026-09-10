@@ -1022,6 +1022,22 @@ export interface Translations {
       hardwareTitle: string
       hardwareLoading: string
       vram: (label: string) => string
+      vramUsed: (used: string, total: string) => string
+      vramFree: (free: string) => string
+      vramEngine: (label: string) => string
+      vramOther: (label: string) => string
+      gpuDriver: (version: string) => string
+      gpuCompute: (cap: string) => string
+      modelsPath: string
+      storageUsed: (used: string, free: string) => string
+      runtimePath: string
+      engineStat: string
+      servingStat: string
+      servingReady: string
+      servingStarting: string
+      ctx64kFits: string
+      ctx64kTight: string
+      occupancyWarn: string
       ram: (label: string) => string
       unifiedMemory: string
       modelsTitle: string

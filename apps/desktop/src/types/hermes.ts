@@ -1310,6 +1310,9 @@ export interface LocalModelsStatus {
   placement?: Record<string, LocalModelPlacement>
   models: { id: string; size_bytes: number; size_label: string }[]
   models_dir: string
+  models_dir_display?: string
+  runtime_dir?: string
+  runtime_dir_display?: string
   venv_ready?: boolean
   venv_path?: string
   occupancy?: LocalOccupancyHit[]
@@ -1330,6 +1333,24 @@ export interface LocalHardware {
   gpu_name: string | null
   gpu_util_percent: number | null
   vram_used_bytes: number | null
+  /** Live free VRAM from nvidia-smi. Missing on older backends / non-NVIDIA. */
+  vram_free_bytes?: number | null
+  /** VRAM held by this install's managed llama.cpp/vLLM pids. */
+  vram_engine_bytes?: number | null
+  /** VRAM held by every other compute app on the GPU. */
+  vram_other_bytes?: number | null
+  gpu_driver_version?: string | null
+  cuda_compute_capability?: string | null
+  engine?: LocalEngine
+  models_dir?: string
+  models_dir_display?: string
+  models_storage_bytes?: number
+  disk_free_bytes?: number
+  disk_total_bytes?: number
+  runtime_dir?: string
+  runtime_dir_display?: string
+  occupancy_foreign?: boolean
+  ctx_64k_feasible?: boolean | null
 }
 
 export interface LocalCatalogModel {

@@ -7,12 +7,19 @@ dispatch, llama-only guards, and vLLM install/use/recommend jobs.
 
 from __future__ import annotations
 
+import os
+import shutil
+import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
 
 from hermes_cli.local_engines import engine_from_config
 from hermes_cli.vllm_runtime.supervisor import READY_TIMEOUT_S
+
+_STORAGE_TTL_S = 30.0
+_storage_cache: tuple[float, str, int] | None = None
 
 _LLAMA_ONLY_DETAIL = (
     "This action is for llama.cpp GGUF models. "
@@ -80,6 +87,103 @@ def configured_engine(config: dict | None = None) -> str:
 
         config = config_mod.load_config()
     return engine_from_config(config)
+
+
+def display_user_path(path: Path) -> str:
+    """User-facing path. Profile home uses ``display_hermes_home()``; else ``~/…``."""
+    from hermes_constants import display_hermes_home, get_default_hermes_root, get_hermes_home
+
+    raw = Path(path).expanduser()
+    try:
+        resolved = raw.resolve(strict=False)
+    except OSError:
+        resolved = raw
+
+    def _tilde(p: Path) -> str | None:
+        try:
+            return "~/" + p.relative_to(Path.home()).as_posix()
+        except ValueError:
+            return None
+
+    roots: list[tuple[Path, str]] = [
+        (get_hermes_home(), display_hermes_home()),
+    ]
+    default_root = get_default_hermes_root()
+    roots.append((default_root, _tilde(default_root) or str(default_root)))
+    for root, prefix in roots:
+        try:
+            rel = resolved.relative_to(Path(root).resolve(strict=False))
+        except ValueError:
+            continue
+        if str(rel) == ".":
+            return prefix
+        return f"{prefix}/{rel.as_posix()}"
+    return _tilde(resolved) or str(resolved)
+
+
+def _dir_bytes_cached(path: Path) -> int:
+    """Walk ``path`` at most once per TTL — statusbar polls hardware every 5s."""
+    global _storage_cache
+    key = str(path)
+    now = time.monotonic()
+    cached = _storage_cache
+    if cached is not None and cached[1] == key and now - cached[0] < _STORAGE_TTL_S:
+        return cached[2]
+    total = 0
+    if path.is_dir():
+        for root, _dirs, files in os.walk(path, followlinks=False):
+            for name in files:
+                try:
+                    total += (Path(root) / name).stat().st_size
+                except OSError:
+                    continue
+    _storage_cache = (now, key, total)
+    return total
+
+
+def _volume_bytes(path: Path) -> tuple[int, int]:
+    """(free, total) on the volume that holds ``path``. Cheap statvfs."""
+    probe = path if path.exists() else path.parent
+    try:
+        usage = shutil.disk_usage(probe)
+    except OSError:
+        return 0, 0
+    return int(usage.free), int(usage.total)
+
+
+def ctx_64k_feasible(total_bytes: int | None) -> bool | None:
+    """Whether this card meets the official vLLM 64k catalog floor. None if unknown."""
+    if not total_bytes:
+        return None
+    from hermes_cli.vllm_runtime.recommend import TIERS
+
+    floor = min(t.min_vram_bytes for t in TIERS if t.feasible_at_64k)
+    return int(total_bytes) >= floor
+
+
+def cache_and_runtime_fields(engine: str) -> dict[str, Any]:
+    """Download cache + runtime tree for the selected engine. One shape, both engines."""
+    from hermes_cli.local_runtime import binaries, bootstrap
+    from hermes_cli.vllm_runtime.inventory import hf_hub_dir
+    from hermes_cli.vllm_runtime.venv import runtimes_root as vllm_runtimes_root
+
+    if engine == "vllm":
+        cache = hf_hub_dir()
+        runtime = vllm_runtimes_root()
+    else:
+        cache = bootstrap.models_dir()
+        runtime = binaries.runtimes_root()
+    free, total = _volume_bytes(cache)
+    return {
+        "engine": engine,
+        "models_dir": str(cache),
+        "models_dir_display": display_user_path(cache),
+        "models_storage_bytes": _dir_bytes_cached(cache),
+        "disk_free_bytes": free,
+        "disk_total_bytes": total,
+        "runtime_dir": str(runtime),
+        "runtime_dir_display": display_user_path(runtime),
+    }
 
 
 def refuse_llama_only() -> None:
@@ -169,7 +273,8 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
              "size_label": m.get("size_label") or "—"}
             for m in inventory if m.get("cached") or m.get("active")
         ],
-        "models_dir": "",
+        **{k: v for k, v in cache_and_runtime_fields("vllm").items()
+           if k in ("models_dir", "models_dir_display", "runtime_dir", "runtime_dir_display")},
     }
 
 

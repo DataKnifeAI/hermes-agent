@@ -514,6 +514,7 @@ def local_models_status():
         "placement": placement,
         "models": [_staged_row(gguf) for gguf in bootstrap.staged_models()] if mdir.exists() else [],
         "models_dir": str(mdir),
+        "models_dir_display": engine_mod.display_user_path(mdir),
         "venv_ready": False,
         "occupancy": [],
         "occupancy_message": None,
@@ -524,30 +525,96 @@ def local_models_status():
 
 
 # ── hardware: what this machine can do ───────────────────────
+def _mib_to_bytes(raw: str) -> int | None:
+    token = (raw or "").split()[0].strip()
+    if not token or token.lower() in {"n/a", "[n/a]"}:
+        return None
+    try:
+        return int(float(token)) << 20
+    except ValueError:
+        return None
+
+
 def _nvidia_smi_facts() -> dict:
-    """GPU identity + live utilization (NVIDIA only; other vendors degrade to {} and the UI hides those readouts)."""
+    """GPU identity + live VRAM (NVIDIA only; other vendors degrade to {} and the UI hides those readouts)."""
     smi_exe = hardware._nvidia_smi_path()
     if not smi_exe:
         return {}
-    smi = subprocess.run([smi_exe, "--query-gpu=name,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
-                         capture_output=True, text=True, timeout=5)
-    if smi.returncode != 0 or not smi.stdout.strip():
+    queries = (
+        "name,utilization.gpu,memory.used,memory.total,memory.free,driver_version,compute_cap",
+        "name,utilization.gpu,memory.used,memory.total,memory.free,driver_version",
+        "name,utilization.gpu,memory.used",
+    )
+    line = ""
+    for query in queries:
+        smi = subprocess.run(
+            [smi_exe, f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5)
+        if smi.returncode == 0 and smi.stdout.strip():
+            line = smi.stdout.strip().splitlines()[0]
+            break
+    if not line:
         return {}
-    name, util, used_mib = (x.strip() for x in smi.stdout.strip().splitlines()[0].split(","))
-    return dict(gpu_name=name, gpu_util_percent=int(util), vram_used_bytes=int(used_mib) << 20)
+    parts = [x.strip() for x in line.split(",")]
+    if len(parts) < 3:
+        return {}
+    name, util, used_mib = parts[0], parts[1], parts[2]
+    total_mib = parts[3] if len(parts) > 3 else ""
+    free_mib = parts[4] if len(parts) > 4 else ""
+    driver = parts[5] if len(parts) > 5 else ""
+    compute = parts[6] if len(parts) > 6 else ""
+    used = _mib_to_bytes(used_mib)
+    total = _mib_to_bytes(total_mib)
+    free = _mib_to_bytes(free_mib)
+    try:
+        util_n = int(float(util))
+    except ValueError:
+        util_n = None
+    return {
+        "gpu_name": name or None,
+        "gpu_util_percent": util_n,
+        "vram_used_bytes": used,
+        "vram_free_bytes": free,
+        "gpu_driver_version": driver or None,
+        "cuda_compute_capability": compute or None,
+        # Prefer the live smi total when the budget probe and smi disagree on
+        # rounding — used/free are from this same row so the ratio stays honest.
+        "vram_total_bytes": total if total else None,
+    }
 
 
 @router.get("/api/local-models/hardware")
 def local_models_hardware():
-    """The budget as plain facts, polled by the pane and statusbar. Sync def: shells out to nvidia-smi — threadpool."""
+    """Machine stats for both engines: live VRAM, cache path/size, disk free.
+
+    Polled by the pane and statusbar. Sync def: shells out to nvidia-smi — threadpool.
+    """
     budget = hardware.probe_budget()
     ram_total, ram_avail = hardware._ram_bytes()
+    engine = engine_mod.configured_engine(_load_config())
     out = {
         "uma": budget.uma, "vram_total_bytes": budget.total_device_bytes, "vram_usable_bytes": budget.usable_vram_bytes,
         "ram_total_bytes": ram_total, "ram_available_bytes": ram_avail, "vram_label": _human_gb(budget.total_device_bytes),
         "gpu_name": None, "gpu_util_percent": None, "vram_used_bytes": None,
+        "vram_free_bytes": None, "vram_engine_bytes": None, "vram_other_bytes": None,
+        "gpu_driver_version": None, "cuda_compute_capability": None,
+        "occupancy_foreign": False, "ctx_64k_feasible": None,
     }
-    out.update(_quiet(_nvidia_smi_facts, {}))
+    smi = _quiet(_nvidia_smi_facts, {})
+    smi_total = smi.pop("vram_total_bytes", None)
+    if smi_total:
+        # Live smi total wins over the planning-budget figure so used ≤ total
+        # is a same-source invariant the UI can trust.
+        out["vram_total_bytes"] = smi_total
+        out["vram_label"] = _human_gb(smi_total)
+    out.update(smi)
+    out.update(engine_mod.cache_and_runtime_fields(engine))
+    out["ctx_64k_feasible"] = engine_mod.ctx_64k_feasible(out.get("vram_total_bytes"))
+    from hermes_cli.vllm_runtime.occupancy import gpu_vram_attribution
+
+    out.update(_quiet(gpu_vram_attribution, {
+        "vram_engine_bytes": None, "vram_other_bytes": None, "occupancy_foreign": False,
+    }))
     return out
 
 

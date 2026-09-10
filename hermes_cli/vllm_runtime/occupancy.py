@@ -62,20 +62,35 @@ def gpu_process_is_foreign_llm(name: str, pid: int, our_pids: set[int]) -> bool:
     return any(needle in lower for needle in _LLM_NAME_NEEDLES)
 
 
-def parse_compute_app_rows(csv_text: str) -> list[tuple[int, str]]:
-    """nvidia-smi ``pid,process_name,used_memory`` rows, header optional."""
-    rows: list[tuple[int, str]] = []
+def parse_compute_app_usage(csv_text: str) -> list[tuple[int, str, int]]:
+    """nvidia-smi ``pid,process_name,used_memory`` rows → (pid, name, used_bytes).
+
+    Accepts ``nounits`` (bare MiB) or ``1234 MiB``. Missing/N/A memory is 0.
+    """
+    rows: list[tuple[int, str, int]] = []
     for raw in csv_text.splitlines():
         line = raw.strip()
         if not line or line.lower().startswith("pid"):
             continue
-        pid_s, _, rest = line.partition(",")
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2:
+            continue
         with suppress(ValueError):
-            pid = int(pid_s.strip())
-            name = rest.split(",", 1)[0].strip()
+            pid = int(parts[0])
+            name = parts[1]
+            used = 0
+            if len(parts) >= 3:
+                token = parts[2].split()[0]
+                if token.lower() not in {"n/a", "[n/a]", ""}:
+                    used = int(float(token)) << 20
             if pid > 0 and name:
-                rows.append((pid, name))
+                rows.append((pid, name, used))
     return rows
+
+
+def parse_compute_app_rows(csv_text: str) -> list[tuple[int, str]]:
+    """nvidia-smi ``pid,process_name,used_memory`` rows, header optional."""
+    return [(pid, name) for pid, name, _used in parse_compute_app_usage(csv_text)]
 
 
 def _pid_alive(pid: int) -> bool:
@@ -220,22 +235,64 @@ def _gpu_occupants(our_pids: set[int],
     return hits
 
 
-def _live_compute_apps() -> list[tuple[int, str]]:
+def _live_compute_app_usage() -> list[tuple[int, str, int]] | None:
+    """Live compute-app rows, or None when nvidia-smi is missing/fails (not the same as idle)."""
     from hermes_cli.local_runtime.hardware import _nvidia_smi_path
 
     exe = _nvidia_smi_path()
     if not exe:
-        return []
+        return None
     import subprocess
 
     with suppress(OSError, subprocess.TimeoutExpired):
         out = subprocess.run(
             [exe, "--query-compute-apps=pid,process_name,used_memory",
-             "--format=csv,noheader"],
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10)
         if out.returncode == 0:
-            return parse_compute_app_rows(out.stdout)
-    return []
+            return parse_compute_app_usage(out.stdout)
+    return None
+
+
+def _live_compute_apps() -> list[tuple[int, str]]:
+    rows = _live_compute_app_usage()
+    if rows is None:
+        return []
+    return [(pid, name) for pid, name, _used in rows]
+
+
+def gpu_vram_attribution(
+        *,
+        rows: list[tuple[int, str, int]] | None = None,
+        our_pids: set[int] | None = None,
+) -> dict[str, int | bool | None]:
+    """Split live compute-app VRAM into this managed engine vs everyone else.
+
+    ``None`` used-bytes means the probe failed — do not render as 0. Inject
+    rows/pids in tests; a live miss must not raise.
+    """
+    live = rows if rows is not None else _live_compute_app_usage()
+    if live is None:
+        return {
+            "vram_engine_bytes": None,
+            "vram_other_bytes": None,
+            "occupancy_foreign": False,
+        }
+    ours = our_pids if our_pids is not None else _our_managed()[0]
+    engine = other = 0
+    foreign = False
+    for pid, name, used in live:
+        if pid in ours:
+            engine += used
+        else:
+            other += used
+            if gpu_process_is_foreign_llm(name, pid, ours):
+                foreign = True
+    return {
+        "vram_engine_bytes": engine,
+        "vram_other_bytes": other,
+        "occupancy_foreign": foreign,
+    }
 
 
 def discover_occupying_llms(

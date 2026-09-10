@@ -82,7 +82,22 @@ const BASE_HARDWARE: LocalHardware = {
   vram_label: '32.0 GB',
   gpu_name: 'NVIDIA GeForce RTX 5090',
   gpu_util_percent: 12,
-  vram_used_bytes: 6 * 2 ** 30
+  vram_used_bytes: 6 * 2 ** 30,
+  vram_free_bytes: 26 * 2 ** 30,
+  vram_engine_bytes: 5 * 2 ** 30,
+  vram_other_bytes: 1 * 2 ** 30,
+  gpu_driver_version: '560.35.03',
+  cuda_compute_capability: '8.9',
+  engine: 'llamacpp',
+  models_dir: '/tmp/hermes-home/models',
+  models_dir_display: '~/.hermes/models',
+  models_storage_bytes: 17.6 * 2 ** 30,
+  disk_free_bytes: 800 * 2 ** 30,
+  disk_total_bytes: 2000 * 2 ** 30,
+  runtime_dir: '/tmp/hermes-home/runtimes/llamacpp',
+  runtime_dir_display: '~/.hermes/runtimes/llamacpp',
+  occupancy_foreign: false,
+  ctx_64k_feasible: true
 }
 
 const FITTING_MODEL: LocalCatalogModel = {
@@ -318,9 +333,14 @@ describe('LocalModelsSettings', () => {
   it('shows hardware facts after backfill', async () => {
     await renderFullPane()
 
-    expect(await screen.findByText('NVIDIA GeForce RTX 5090')).toBeTruthy()
-    expect(screen.getByText(/32\.0 GB GPU memory/)).toBeTruthy()
+    expect(await screen.findByText(/NVIDIA GeForce RTX 5090/)).toBeTruthy()
+    expect(screen.getByText(/6\.0 GB \/ 32\.0 GB used/)).toBeTruthy()
+    expect(screen.getByText(/26\.0 GB free/)).toBeTruthy()
+    expect(screen.getByText(/this engine 5\.0 GB/)).toBeTruthy()
+    expect(screen.getByText(/~\/\.hermes\/models/)).toBeTruthy()
+    expect(screen.getByText(/17\.6 GB on disk/)).toBeTruthy()
     expect(screen.getByText(/256\.0 GB RAM/)).toBeTruthy()
+    expect(screen.getByText(/64k context fits this GPU/)).toBeTruthy()
   })
 
   it('tracks a download job to completion and refreshes', async () => {
@@ -665,7 +685,7 @@ describe('vLLM engine', () => {
     renderPane()
 
     expect((await screen.findAllByText(/hermes3:8b/i)).length).toBeGreaterThan(0)
-    expect(screen.getByText(/127\.0\.0\.1:18435/)).toBeTruthy()
+    expect(screen.getAllByText(/127\.0\.0\.1:18435/).length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: /turn off/i })).toBeTruthy()
     expect(screen.getByText('Local')).toBeTruthy()
     expect(screen.getAllByText(/0\.10\.0/).length).toBeGreaterThan(0)
