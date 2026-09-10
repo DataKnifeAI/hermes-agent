@@ -48,8 +48,38 @@ def venv_ready() -> bool:
     return vllm_executable().is_file()
 
 
+def hermes_logs_dir() -> Path:
+    """Same directory ``hermes logs`` lists and llama-server.log uses.
+
+    Wheels stay under ``runtimes/vllm/``. Only the log files join the
+    central log dir (profile-aware via ``get_hermes_home()``).
+    """
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "logs"
+
+
+def server_log_path() -> Path:
+    return hermes_logs_dir() / "vllm-server.log"
+
+
 def install_log_path() -> Path:
-    return runtimes_root() / "install.log"
+    return hermes_logs_dir() / "vllm-install.log"
+
+
+def server_log_read_paths() -> tuple[Path, ...]:
+    """Write target first; leftover runtime-dir files from older builds last."""
+    return (server_log_path(), runtimes_root() / "vllm-server.log")
+
+
+def install_log_read_paths() -> tuple[Path, ...]:
+    return (install_log_path(), runtimes_root() / "install.log")
+
+
+def server_log_hint() -> str:
+    from hermes_constants import display_hermes_home
+
+    return f"{display_hermes_home()}/logs/vllm-server.log"
 
 
 def manifest_path() -> Path:

@@ -1089,3 +1089,32 @@ def test_wait_ready_fails_immediately_when_proc_exits(tmp_path, monkeypatch):
         sup._wait_ready(30)
     assert opened["n"] == 0
 
+
+def test_vllm_logs_share_hermes_logs_dir_with_llamacpp(tmp_path, monkeypatch):
+    """vLLM server/install logs live in the same dir hermes logs lists.
+
+    llama.cpp writes ``<models_dir.parent>/logs/llama-server.log``. That
+    parent is the discovery set ``hermes logs list`` walks. last_error.json
+    stays under the isolated runtime dir — llama.cpp has no analog there.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+    from hermes_cli.local_runtime.bootstrap import models_dir
+    from hermes_cli.vllm_runtime.supervisor import last_error_path
+    from hermes_cli.vllm_runtime.venv import (
+        hermes_logs_dir, install_log_path, runtimes_root, server_log_path,
+    )
+    from hermes_constants import get_hermes_home
+
+    hermes_constants._default_hermes_root_memo = None
+    discovered = get_hermes_home() / "logs"
+    llama = models_dir().parent / "logs" / "llama-server.log"
+    assert llama.parent == discovered
+    assert hermes_logs_dir() == discovered
+    assert server_log_path().parent == llama.parent == discovered
+    assert install_log_path().parent == llama.parent == discovered
+    assert last_error_path().parent == runtimes_root()
+    assert last_error_path().parent != discovered
+

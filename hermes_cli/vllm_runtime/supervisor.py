@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from hermes_cli.vllm_runtime.venv import runtimes_root, vllm_executable
+from hermes_cli.vllm_runtime.venv import runtimes_root, server_log_path, vllm_executable
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,12 @@ def configured_cache_missing(settings: dict | None) -> bool:
 
 def last_serve_error_line(log_path: Path | None = None) -> str | None:
     """Last real error line from vllm-server.log — not a restart-loop breadcrumb."""
-    path = Path(log_path) if log_path else (runtimes_root() / "vllm-server.log")
+    if log_path:
+        path = Path(log_path)
+    else:
+        from hermes_cli.vllm_runtime.venv import server_log_read_paths
+
+        path = next((p for p in server_log_read_paths() if p.is_file()), server_log_path())
     if not path.is_file():
         return None
     try:
@@ -336,7 +341,7 @@ class VllmSupervisor:
         self.port = pick_listen_port(preferred)
         self.settings["port"] = self.port
         self.executable = Path(executable) if executable else vllm_executable()
-        self.log_path = log_path or (runtimes_root() / "vllm-server.log")
+        self.log_path = log_path or server_log_path()
         self.proc: subprocess.Popen | None = None
         self._restarts = 0
         self._stopping = False

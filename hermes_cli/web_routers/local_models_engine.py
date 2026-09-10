@@ -213,9 +213,9 @@ def occupancy_payload() -> dict[str, Any]:
 
 
 def _vllm_log_phase() -> str | None:
-    from hermes_cli.vllm_runtime.venv import install_log_path, runtimes_root
+    from hermes_cli.vllm_runtime.venv import install_log_read_paths, server_log_read_paths
 
-    for path in (runtimes_root() / "vllm-server.log", install_log_path()):
+    for path in (*server_log_read_paths(), *install_log_read_paths()):
         if not path.exists():
             continue
         try:
@@ -418,10 +418,12 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
         still = state_served_model_name()
         leftover = bool(wanted and still and wanted != still)
         if running is None or leftover:
+            from hermes_cli.vllm_runtime.venv import server_log_hint
+
             disable_auto_start()
             raise RuntimeError(
                 read_last_error()
-                or "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+                or f"managed vLLM did not start — see {server_log_hint()}")
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
 

@@ -1789,7 +1789,7 @@ def test_vllm_job_timeout_covers_supervisor_ready_wait():
 def test_vllm_log_phase_sniffs_warmup_and_cuda_graphs(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
-    log = home / "runtimes" / "vllm" / "vllm-server.log"
+    log = home / "logs" / "vllm-server.log"
     log.parent.mkdir(parents=True)
     log.write_text("Loading weights took 12s\nWarming up Mamba kernels\n", encoding="utf-8")
     monkeypatch.setattr(

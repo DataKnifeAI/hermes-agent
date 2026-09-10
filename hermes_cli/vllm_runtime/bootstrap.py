@@ -228,7 +228,9 @@ def start_managed_vllm(config: dict | None = None, *, apply_recommend: bool = Tr
     require_gpu_free()
     sup = ensure_managed_engine(cfg, force=True)
     if sup is None:
-        raise RuntimeError("managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+        from hermes_cli.vllm_runtime.venv import server_log_hint
+
+        raise RuntimeError(f"managed vLLM did not start — see {server_log_hint()}")
     from hermes_cli.vllm_runtime.bench import verify_tool_calls
 
     verify_tool_calls(sup.base_url)
