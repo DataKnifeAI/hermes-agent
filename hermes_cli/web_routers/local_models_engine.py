@@ -39,6 +39,12 @@ _LOG_PHASES = (
 _CLIENT_HINTS = (
     "too big", "gated", "awq", "not downloaded", "gguf", "exl2",
     "missing file", "invalid id", "tool-loop floor",
+    "sigkill", "oom", "out of memory",
+)
+_VLLM_RESTORE_KEYS = (
+    "model", "served_model_name", "max_model_len",
+    "gpu_memory_utilization", "quantization", "kv_cache_dtype",
+    "tool_call_parser",
 )
 
 
@@ -129,8 +135,9 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
     section = cfg.get("local_runtime") or {}
     settings = vllm_settings(cfg)
     running = resolve_vllm_endpoint(wait_for_boot_s=0)
-    # Live serve only — config is written on Use before GET /v1/models is 200.
+    # Live serve only after GET /v1/models 200 — spawn-time state is not ready.
     served = running_served_model_name() or None
+    ready = bool(served)
     configured = str(settings.get("model") or "") or None
     occ = occupancy_payload()
     versions = vllm_version_fields()
@@ -142,19 +149,19 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
         "runtime_installed": venv_ready(),
         "runtime_backend": "vllm" if venv_ready() else None,
         "venv_path": str(venv_dir()) if venv_ready() else "",
-        "server_running": running is not None,
+        "server_running": ready,
         "server_base_url": (running or {}).get("base_url") or (
             openai_base_url(settings) if venv_ready() else None),
         "active_model_id": served,
         "served_model_name": served,
         "model": configured,
-        "start_phase": None if running else _vllm_log_phase(),
+        "start_phase": None if ready else _vllm_log_phase(),
         "last_error": occ["occupancy_message"] or _vllm_last_error(),
         **occ,
         "tag": versions.get("tag") or "",
         "configured_tag": versions.get("configured_tag") or "",
         "update_available": bool(versions.get("update_available")),
-        "loaded_models": {served: "ready"} if running and served else {},
+        "loaded_models": {served: "ready"} if ready else {},
         "loading": {},
         "placement": {},
         "models": [
@@ -209,57 +216,136 @@ def stop_active_engine() -> None:
     lm._set_runtime_enabled(False)
 
 
-def start_active_engine() -> None:
-    """Start the configured engine; stop the other first. Occupancy is not swallowed."""
+def _vllm_overlay_from_settings(settings: dict) -> dict[str, Any]:
+    return {key: settings.get(key) for key in _VLLM_RESTORE_KEYS}
+
+
+def _persist_vllm_overlay(overlay: dict[str, Any]) -> None:
+    from cli import save_config_value
+
+    for key, value in overlay.items():
+        save_config_value(f"local_runtime.vllm.{key}", value)
+
+
+def recover_vllm_after_failed_start(
+    *,
+    failed_id: str,
+    previous: dict | None,
+    was_running: bool,
+) -> str | None:
+    """Restore the previous serve, else the official recommend. Keep last_error.
+
+    Returns the hid that started, or None when nothing could start. Never
+    re-enters ``start_active_engine(recover=True)``.
+    """
+    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.vllm_runtime.inventory import repo_is_cached
+    from hermes_cli.vllm_runtime.supervisor import read_last_error, write_last_error
+
+    failure = read_last_error()
+    stop_vllm_engine()
+    prev_model = str((previous or {}).get("model") or "").strip()
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    if (
+        prev_model
+        and prev_model != failed_id
+        and was_running
+        and repo_is_cached(prev_model)
+    ):
+        candidates.append((prev_model, _vllm_overlay_from_settings(previous or {})))
+    hid, _notice, _rec, overlay = _official_setup()
+    if hid and hid != failed_id and repo_is_cached(hid):
+        if not any(item[0] == hid for item in candidates):
+            candidates.append((hid, overlay))
+
+    for cand_id, cand_overlay in candidates:
+        _persist_vllm_overlay(cand_overlay)
+        try:
+            start_active_engine(recover=False)
+            activate_vllm()
+            if failure:
+                write_last_error(failure)
+            return cand_id
+        except Exception:  # noqa: BLE001 — try the next rung
+            stop_vllm_engine()
+
+    if prev_model and prev_model != failed_id:
+        _persist_vllm_overlay(_vllm_overlay_from_settings(previous or {}))
+    elif hid:
+        _persist_vllm_overlay(overlay)
+    if failure:
+        write_last_error(failure)
+    return None
+
+
+def _start_configured_vllm(cfg: dict, settings: dict) -> None:
     from hermes_cli.local_engines import stop_llama_engine, stop_vllm_engine
-    from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError, require_gpu_free
+    from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+    from hermes_cli.vllm_runtime.supervisor import (
+        MODEL_REMOVED_MSG, configured_cache_missing,
+        configured_unservable_reason, disable_auto_start, read_last_error,
+        state_served_model_name, write_last_error)
+
+    stop_llama_engine()
+    blocked = configured_unservable_reason(settings)
+    if blocked:
+        write_last_error(blocked)
+        disable_auto_start()
+        raise HTTPException(status_code=400, detail=blocked)
+    if configured_cache_missing(settings):
+        write_last_error(MODEL_REMOVED_MSG)
+        disable_auto_start()
+        raise RuntimeError(MODEL_REMOVED_MSG)
+    wanted = str(settings.get("served_model_name") or "").strip()
+    got = state_served_model_name()
+    if wanted and got and wanted != got:
+        stop_vllm_engine()
+    require_gpu_free()
+    from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
+
+    sup = ensure_vllm_runtime(cfg, force=True, timeout_s=VLLM_START_TIMEOUT_S)
+    if sup is None:
+        from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+
+        running = resolve_vllm_endpoint(wait_for_boot_s=0)
+        still = state_served_model_name()
+        leftover = bool(wanted and still and wanted != still)
+        if running is None or leftover:
+            disable_auto_start()
+            raise RuntimeError(
+                read_last_error()
+                or "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
+
+    activate_vllm_provider(load_config())
+
+
+def start_active_engine(*, recover: bool = True) -> None:
+    """Start the configured engine; stop the other first. Occupancy is not swallowed.
+
+    A failed vLLM start restores the previous serve when the caller asked, else
+    the official recommended row — never a crash-loop on the dead id.
+    """
+    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
+    from hermes_cli.vllm_runtime.supervisor import configured_model_id, vllm_settings
 
     from hermes_cli.web_routers import local_models as lm
 
     cfg = lm._set_runtime_enabled(True)
     if configured_engine(cfg) == "vllm":
-        stop_llama_engine()
-        from hermes_cli.vllm_runtime.supervisor import (
-            MODEL_REMOVED_MSG, configured_cache_missing, configured_unservable_reason,
-            disable_auto_start, read_last_error, state_served_model_name,
-            vllm_settings, write_last_error)
-
         settings = vllm_settings(cfg)
-        blocked = configured_unservable_reason(settings)
-        if blocked:
-            write_last_error(blocked)
-            disable_auto_start()
-            raise HTTPException(status_code=400, detail=blocked)
-        if configured_cache_missing(settings):
-            write_last_error(MODEL_REMOVED_MSG)
-            disable_auto_start()
-            raise RuntimeError(MODEL_REMOVED_MSG)
-        wanted = str(settings.get("served_model_name") or "").strip()
-        got = state_served_model_name()
-        if wanted and got and wanted != got:
-            stop_vllm_engine()
+        failed_id = configured_model_id(settings)
         try:
-            require_gpu_free()
+            _start_configured_vllm(cfg, settings)
         except OccupyingLlmError:
             raise
-        from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
-
-        sup = ensure_vllm_runtime(cfg, force=True, timeout_s=VLLM_START_TIMEOUT_S)
-        if sup is None:
-            from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
-
-            running = resolve_vllm_endpoint(wait_for_boot_s=0)
-            still = state_served_model_name()
-            leftover = bool(wanted and still and wanted != still)
-            if running is None or leftover:
-                disable_auto_start()
-                raise RuntimeError(
-                    read_last_error()
-                    or "managed vLLM did not start — see runtimes/vllm/vllm-server.log")
-        from hermes_cli.config import load_config
-        from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
-
-        activate_vllm_provider(load_config())
+        except Exception:
+            if recover:
+                recover_vllm_after_failed_start(
+                    failed_id=failed_id, previous=None, was_running=False)
+            raise
         return
     stop_vllm_engine()
     lm._start_local_server(cfg, lm._SERVER_START_FAILED)
@@ -411,14 +497,20 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
-    current = str(vllm_settings(load_config()).get("model") or "").strip()
+    previous = dict(vllm_settings(load_config()))
+    current = str(previous.get("model") or "").strip()
     running = resolve_vllm_endpoint(wait_for_boot_s=0) is not None
     set_vllm_model(hid)
     if running and current != hid:
         # New weights need a new serve. Same-id reuse leaves a healthy process up.
         stop_vllm_engine()
-    start_active_engine()
-    result = activate_vllm()
+    try:
+        start_active_engine(recover=False)
+        result = activate_vllm()
+    except Exception:
+        recover_vllm_after_failed_start(
+            failed_id=hid, previous=previous, was_running=running)
+        raise
     result["model"] = hid
     result["needs_download"] = False
     result["already_downloaded"] = True

@@ -1394,6 +1394,62 @@ describe('vLLM engine', () => {
     expect(mocked.deleteVllmModel).not.toHaveBeenCalled()
   })
 
+  it('does not show In use until /v1/models is ready', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      model: 'NousResearch/Hermes-3-Llama-3.1-8B',
+      served_model_name: null,
+      active_model_id: null,
+      server_running: false,
+      start_phase: 'Capturing CUDA graphs',
+      server_base_url: 'http://127.0.0.1:18435/v1',
+      models: [
+        { id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' },
+        { id: 'NousResearch/Hermes-3-Llama-3.1-8B', size_bytes: 16 * 2 ** 30, size_label: '16.0 GB' }
+      ],
+      runtime_installed: true,
+      tag: '0.10.0',
+      venv_ready: true
+    })
+    mocked.getVllmModels.mockResolvedValue({
+      models: [
+        {
+          active: false,
+          added_by_you: false,
+          cached: true,
+          capabilities: ['awq'],
+          display_name: 'qwen3:8b',
+          fit: 'fits-gpu',
+          fits: true,
+          id: 'Qwen/Qwen3-8B-AWQ',
+          recommended: true,
+          served_model_name: 'qwen3:8b',
+          size_bytes: 5 * 2 ** 30,
+          size_label: '5.0 GB'
+        },
+        {
+          active: false,
+          added_by_you: true,
+          cached: true,
+          capabilities: [],
+          display_name: 'Hermes-3-Llama-3.1-8B',
+          fit: 'too-big',
+          fits: false,
+          id: 'NousResearch/Hermes-3-Llama-3.1-8B',
+          recommended: false,
+          served_model_name: 'Hermes-3-Llama-3.1-8B',
+          size_bytes: 16 * 2 ** 30,
+          size_label: '16.0 GB'
+        }
+      ]
+    })
+    renderPane()
+
+    expect(await screen.findByText('Qwen/Qwen3-8B-AWQ')).toBeTruthy()
+    expect(screen.queryByText('In use')).toBeNull()
+    expect(screen.getByRole('button', { name: /^use$/i })).toBeTruthy()
+  })
+
   it('shows In use on the served cached model and Use on other cached rows', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,

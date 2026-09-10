@@ -78,6 +78,9 @@ def test_status_reports_vllm_not_llama_gguf(tmp_path, monkeypatch):
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 1})
     monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "qwen3:8b")
+    monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
 
@@ -474,6 +477,35 @@ def test_vllm_status_served_name_is_running_server_not_config(tmp_path, monkeypa
     assert down["served_model_name"] is None
     assert down["active_model_id"] is None
     assert down["model"] == "nvidia/Nemotron-3-Nano-30B-A3B-BF16"
+
+
+def test_vllm_status_active_empty_until_models_200(tmp_path, monkeypatch):
+    """Spawn-time supervisor state is not In use — GET /v1/models must be 200."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "NousResearch/Hermes-3-Llama-3.1-8B",
+        "served_model_name": "Hermes-3-Llama-3.1-8B",
+    }})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 7})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: "")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.state_served_model_name",
+        lambda: "Hermes-3-Llama-3.1-8B")
+
+    data = client.get("/api/local-models/status").json()
+    assert data["server_running"] is False
+    assert data["active_model_id"] is None
+    assert data["served_model_name"] is None
+    assert data["model"] == "NousResearch/Hermes-3-Llama-3.1-8B"
 
 
 def _wait_job(client, job_id: str, timeout_s: float = 3.0) -> dict:
@@ -1410,6 +1442,125 @@ def test_vllm_use_reloads_when_switching_cached_models(tmp_path, monkeypatch):
     from hermes_cli.config import load_config
 
     assert load_config()["local_runtime"]["vllm"]["model"] == "acme/sideload-awq"
+
+
+def test_vllm_use_failed_start_restores_previous(tmp_path, monkeypatch):
+    """Failed Use of a new id must put In use back on the previous serve."""
+    client, home = _client(tmp_path, monkeypatch)
+    previous = "Qwen/Qwen3-8B-AWQ"
+    doomed = "acme/doomed-awq"
+    rec = _feasible_rec(monkeypatch)
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": previous, "served_model_name": "qwen3:8b",
+    }})
+    hub = tmp_path / "hf-hub"
+    for repo in (previous, doomed, rec.model):
+        dest = hub / ("models--" + repo.replace("/", "--"))
+        dest.mkdir(parents=True)
+        (dest / "w.bin").write_bytes(b"y" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:9/v1", "pid": 1})
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    starts: list[str] = []
+
+    class _Sup:
+        base_url = "http://127.0.0.1:9/v1"
+
+    def _ensure(*_a, **_k):
+        from hermes_cli.config import load_config
+        from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
+
+        model = load_config()["local_runtime"]["vllm"]["model"]
+        starts.append(model)
+        if model == doomed:
+            write_last_error(f"vllm serve was killed (SIGKILL) starting {doomed}")
+            disable_auto_start()
+            raise RuntimeError(f"vllm serve was killed (SIGKILL) starting {doomed}")
+        return _Sup()
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
+
+    used = client.post("/api/local-models/vllm/use", json={"model": doomed})
+    assert used.status_code == 400, used.text
+    assert "SIGKILL" in used.json()["detail"]
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import read_last_error
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == previous
+    assert load_config()["local_runtime"]["vllm"]["served_model_name"] == "qwen3:8b"
+    assert starts[0] == doomed
+    assert previous in starts
+    assert "SIGKILL" in (read_last_error() or "")
+
+
+def test_vllm_use_failed_restore_falls_back_to_recommend(tmp_path, monkeypatch):
+    """If the previous serve cannot come back, start the official recommend."""
+    client, home = _client(tmp_path, monkeypatch)
+    previous = "acme/old-awq"
+    doomed = "acme/doomed-awq"
+    rec = _feasible_rec(monkeypatch)
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "model": previous, "served_model_name": "old-awq",
+    }})
+    hub = tmp_path / "hf-hub"
+    for repo in (previous, doomed, rec.model):
+        dest = hub / ("models--" + repo.replace("/", "--"))
+        dest.mkdir(parents=True)
+        (dest / "w.bin").write_bytes(b"y" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:9/v1", "pid": 1})
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    starts: list[str] = []
+
+    class _Sup:
+        base_url = "http://127.0.0.1:9/v1"
+
+    def _ensure(*_a, **_k):
+        from hermes_cli.config import load_config
+        from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
+
+        model = load_config()["local_runtime"]["vllm"]["model"]
+        starts.append(model)
+        if model in {doomed, previous}:
+            write_last_error(f"vllm serve was killed (SIGKILL) starting {model}")
+            disable_auto_start()
+            raise RuntimeError(f"vllm serve was killed (SIGKILL) starting {model}")
+        return _Sup()
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
+
+    used = client.post("/api/local-models/vllm/use", json={"model": doomed})
+    assert used.status_code == 400, used.text
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import read_last_error
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+    assert starts[0] == doomed
+    assert previous in starts
+    assert rec.model in starts
+    assert "SIGKILL" in (read_last_error() or "")
 
 
 def test_server_start_vllm_succeeds_when_already_running(tmp_path, monkeypatch):

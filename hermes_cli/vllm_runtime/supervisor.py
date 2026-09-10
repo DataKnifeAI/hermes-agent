@@ -135,8 +135,15 @@ def humanize_serve_error(raw: str | None, *, model: str = "") -> str | None:
     if blocked:
         return blocked
     text = (raw or "").strip()
-    if "cannot find the config file for awq" in text.lower():
+    lower = text.lower()
+    if "cannot find the config file for awq" in lower:
         return LEFTOVER_AWQ_MSG
+    if "out of memory" in lower or "oom" in lower or "sigkill" in lower:
+        label = model or "this model"
+        return (
+            f"{label} is too big for this GPU (OOM / SIGKILL) — "
+            "Use an AWQ or FP8 instruct model"
+        )
     return text[-500:] or None
 
 
@@ -175,7 +182,13 @@ def last_serve_error_line(log_path: Path | None = None) -> str | None:
         if not stripped:
             continue
         lower = stripped.lower()
-        if "validationerror" in lower or "value error" in lower or "error:" in lower:
+        if (
+            "validationerror" in lower
+            or "value error" in lower
+            or "error:" in lower
+            or "out of memory" in lower
+            or "oom" in lower
+        ):
             return stripped[-500:]
     return None
 
@@ -202,6 +215,33 @@ def client_host(settings: dict) -> str:
     if host in ("0.0.0.0", "::", "[::]"):
         return _LOOPBACK
     return host
+
+
+def probe_served_model_name(base_url: str, timeout_s: float = 1.5) -> str:
+    """First id from GET ``{base_url}/models`` 200. Empty while CUDA graphs run.
+
+    Spawn-time ``server.json`` is not readiness — only this probe is.
+    """
+    url = str(base_url or "").rstrip("/") + "/models"
+    if not str(base_url or "").strip():
+        return ""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            if int(getattr(resp, "status", 200) or 200) != 200:
+                return ""
+            body = json.loads(resp.read() or b"{}")
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError,
+            json.JSONDecodeError, ValueError, TypeError):
+        return ""
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, list):
+        return ""
+    for row in data:
+        if isinstance(row, dict):
+            hid = str(row.get("id") or "").strip()
+            if hid:
+                return hid
+    return ""
 
 
 def openai_base_url(settings: dict, *, port: int | None = None) -> str:
@@ -338,7 +378,7 @@ class VllmSupervisor:
                 write_last_error(MODEL_REMOVED_MSG)
             else:
                 write_last_error(
-                    humanize_serve_error(crash, model=hid)
+                    humanize_serve_error(crash or str(exc), model=hid)
                     or str(exc).strip()
                     or "vllm serve failed"
                 )

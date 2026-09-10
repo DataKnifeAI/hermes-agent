@@ -1018,16 +1018,17 @@ def served_name_for(hf_id: str) -> str:
 def running_served_model_name() -> str:
     """Id the live server advertised after GET /v1/models 200. Empty if down.
 
-    Config ``served_model_name`` is written on Use before serve is up — do not
-    treat that as In use.
+    Supervisor state is written at spawn, before CUDA graphs finish — do not
+    treat that as In use. Config ``served_model_name`` is written on Use click.
     """
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
-    from hermes_cli.vllm_runtime.supervisor import state_served_model_name
+    from hermes_cli.vllm_runtime.supervisor import probe_served_model_name
 
     try:
-        if resolve_vllm_endpoint(wait_for_boot_s=0) is None:
+        endpoint = resolve_vllm_endpoint(wait_for_boot_s=0)
+        if endpoint is None:
             return ""
-        return state_served_model_name()
+        return probe_served_model_name(str(endpoint.get("base_url") or ""))
     except Exception:  # noqa: BLE001 — status/catalog must not 500 on a probe
         return ""
 

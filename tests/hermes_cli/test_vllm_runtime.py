@@ -910,6 +910,51 @@ def _alive_supervisor(tmp_path, monkeypatch, port=19980):
     return sup
 
 
+def test_probe_served_model_name_empty_until_200(monkeypatch):
+    import urllib.error
+    from hermes_cli.vllm_runtime.supervisor import probe_served_model_name
+
+    def refuse(_url, timeout=1.5):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse)
+    assert probe_served_model_name("http://127.0.0.1:18435/v1") == ""
+
+
+def test_probe_served_model_name_reads_models_payload(monkeypatch):
+    from hermes_cli.vllm_runtime.supervisor import probe_served_model_name
+
+    class _Ok:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"data":[{"id":"qwen3:8b"}]}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Ok())
+    assert probe_served_model_name("http://127.0.0.1:18435/v1") == "qwen3:8b"
+
+
+def test_running_served_name_ignores_spawn_state_until_200(monkeypatch):
+    from hermes_cli.vllm_runtime.inventory import running_served_model_name
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 9})
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.state_served_model_name",
+        lambda: "Hermes-3-Llama-3.1-8B")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.probe_served_model_name",
+        lambda *a, **k: "")
+    assert running_served_model_name() == ""
+
+
 def test_wait_ready_keeps_polling_while_proc_alive_until_200(tmp_path, monkeypatch):
     """Connection refused / 503 is not failure while the pid is still starting."""
     import urllib.error

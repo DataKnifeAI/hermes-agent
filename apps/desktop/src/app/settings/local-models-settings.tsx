@@ -97,9 +97,9 @@ function vllmServedIdentity(status: LocalModelsStatus): {
   activeModelId: null | string
   servedModelName: null | string
 } {
-  // In use = the id GET /v1/models advertised on a running serve — not
-  // config written on Use click, not the recommended catalog flag.
-  if (!status.server_running) {
+  // In use = GET /v1/models 200 for that id. Spawn-time state and config
+  // written on Use click are not ready — keep the Use spinner until then.
+  if (!status.server_running || (!status.active_model_id && !status.served_model_name)) {
     return { activeModelId: null, servedModelName: null }
   }
 
