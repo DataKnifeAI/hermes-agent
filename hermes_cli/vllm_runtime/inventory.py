@@ -361,37 +361,109 @@ _KV_AND_RUNTIME_64K = _KV_64K_LLAMA8B + _VLLM_RUNTIME_BYTES
 # 64k floor against this usable budget, not the sticker 24.000 GiB.
 _VLLM_GPU_UTIL = 0.75
 _VLLM_GRAPH_BYTES = 2 * (1 << 30)
+# Official GLM-4-9B / Z1-9B: 40L × 2 KV heads × 128. HF expand=config
+# ships model_type + tokenizer only — no layers/heads — so search used
+# the Llama-8B 8 GiB KV floor on ~17.5 GiB BF16 (17.5+8+3 ≈ 28.5, a
+# lying Too big). YaRN 64k/128k is official. Do not reuse for 32B / 4.5+.
+_GLM4_9B_KV = {
+    "num_hidden_layers": 40,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 2,
+    "hidden_size": 4096,
+    "head_dim": 128,
+}
+_GLM4_9B_ID_RE = re.compile(r"(?:^|/)(?:glm-4-9b|glm-z1-9b)(?:[-_]|$)", re.I)
+_GLM45_PLUS_RE = re.compile(r"glm-4\.[5-9]", re.I)
 
 
-def estimate_min_vram_bytes(params_b: float, quant: str) -> int:
+def estimate_min_vram_bytes(
+    params_b: float, quant: str, *, config: dict | None = None,
+) -> int:
     """Conservative 64k-floor VRAM from param count + known quant. Not a promise."""
     bpp = _QUANT_BYTES.get(quant)
     if bpp is None:
         raise ValueError(f"unknown quant {quant}")
     weight = int(params_b * 1_000_000_000 * bpp)
-    return _vram_from_weight_bytes(weight)
+    return _vram_from_weight_bytes(weight, config=config)
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, float) and value > 0 and value == int(value):
+        return int(value)
+    return None
 
 
 def _kv_from_config(config: dict | None, *, elem_bytes: int = 2) -> int | None:
     """64k K+V bytes from HF config. None when layers/heads/head_dim are missing."""
     if not isinstance(config, dict) or elem_bytes <= 0:
         return None
-    layers = config.get("num_hidden_layers") or config.get("n_layer")
-    kv_heads = config.get("num_key_value_heads")
-    attn = config.get("num_attention_heads") or config.get("n_head")
+    layers = _positive_int(
+        config.get("num_hidden_layers")
+        or config.get("n_layer")
+        or config.get("num_layers")
+    )
+    kv_heads = _positive_int(
+        config.get("num_key_value_heads")
+        or config.get("num_kv_heads")
+        or config.get("multi_query_group_num")
+    )
+    attn = _positive_int(
+        config.get("num_attention_heads") or config.get("n_head")
+    )
     if kv_heads is None:
         kv_heads = attn
-    hidden = config.get("hidden_size") or config.get("d_model")
-    head_dim = config.get("head_dim")
-    if head_dim is None and isinstance(hidden, int) and isinstance(attn, int) and attn > 0:
+    hidden = _positive_int(config.get("hidden_size") or config.get("d_model"))
+    head_dim = _positive_int(config.get("head_dim") or config.get("kv_channels"))
+    if head_dim is None and hidden is not None and attn is not None and attn > 0:
         head_dim = hidden // attn
-    if not all(isinstance(v, int) and v > 0 for v in (layers, kv_heads, head_dim)):
+    if layers is None or kv_heads is None or head_dim is None:
         return None
-    return 2 * int(layers) * int(kv_heads) * int(head_dim) * 65536 * int(elem_bytes)
+    return 2 * layers * kv_heads * head_dim * 65536 * int(elem_bytes)
+
+
+def _known_kv_config(
+    hid: str, *, params: float | None = None, config: dict | None = None,
+) -> dict | None:
+    """Official GLM-4/Z1 9B geometry when HF omitted layers/KV heads."""
+    blob = (hid or "").replace("_", "-")
+    if _GLM45_PLUS_RE.search(blob):
+        return None
+    if _GLM4_9B_ID_RE.search(blob):
+        return dict(_GLM4_9B_KV)
+    model_type = ""
+    if isinstance(config, dict):
+        model_type = str(config.get("model_type") or "").lower().replace("-", "")
+    if model_type == "glm4" and params is not None and 8.0 <= params <= 10.5:
+        return dict(_GLM4_9B_KV)
+    return None
+
+
+def _resolve_kv_config(
+    hid: str, config: dict | None, params: float | None = None,
+) -> dict | None:
+    """Prefer published KV geometry; fill official GLM-4/Z1 9B when HF omitted it."""
+    if _kv_from_config(config) is not None:
+        return config
+    known = _known_kv_config(hid, params=params, config=config)
+    if known is None:
+        return config if isinstance(config, dict) else None
+    if isinstance(config, dict):
+        merged = dict(config)
+        merged.update(known)
+        return merged
+    return known
 
 
 def _vram_from_weight_bytes(weight: int, *, config: dict | None = None) -> int:
-    """weights + 64k KV + vLLM working set. KV is not a fraction of the file."""
+    """weights + 64k KV + vLLM working set. KV is not a fraction of the file.
+
+    The 8 GiB Llama-8B floor is only the fallback when KV geometry is
+    unknown. 2-head GQA (GLM-4-9B) is ~2.5 GiB at 64k — do not pad it.
+    """
     kv = _kv_from_config(config)
     reserve = (kv + _VLLM_RUNTIME_BYTES) if kv else _KV_AND_RUNTIME_64K
     return int(weight) + reserve
@@ -739,7 +811,13 @@ def weight_bytes_from_safetensors(safetensors: dict | None, quant: str | None = 
         mapped = {_SAFETENSORS_DTYPE.get(str(k).upper()) for k in params}
         mapped.discard(None)
         if len(mapped) == 1:
-            bpp = _QUANT_BYTES.get(next(iter(mapped)))
+            kind = next(iter(mapped))
+            # Unique BF16/FP16 shards are params × 2 (GLM-4-9B ~17.5 GiB),
+            # not the 2.2 ID-only bpp. That extra 10% plus the Llama KV
+            # floor was a lying Too big on a 24 GB card.
+            if kind in {"bf16", "fp16"} and count >= 10_000_000:
+                return int(count * 2)
+            bpp = _QUANT_BYTES.get(kind)
             if bpp and count >= 10_000_000:
                 return int(count * bpp)
         summed = sum(
@@ -851,6 +929,7 @@ def classify_vllm_repo(
         or parse_param_billions(" ".join(tag_list))
         or parse_param_billions(_base_model_blob(card_data))
     )
+    kv_config = _resolve_kv_config(hid, config, params)
     disk = int(weight_bytes or 0)
     actual, listing = resolve_weight_bytes(
         hid=hid, tags=tag_list, card_data=card_data, config=config,
@@ -873,7 +952,7 @@ def classify_vllm_repo(
     if blocked and matched is None:
         detail = blocked
     elif actual >= _MIN_WEIGHT_BYTES:
-        min_vram = _vram_from_weight_bytes(actual, config=config)
+        min_vram = _vram_from_weight_bytes(actual, config=kv_config)
         if total_vram > 0:
             fit = _fit_on_probe(min_vram, total_vram)
         fullprec = not quant or quant in {"bf16", "fp16"}
@@ -897,7 +976,7 @@ def classify_vllm_repo(
         id_quant = parse_quantization(hid, None)
         tag_quant = parse_quantization("", tag_list)
         if params is not None and id_quant in _QUANT_BYTES and total_vram > 0:
-            min_vram = estimate_min_vram_bytes(params, id_quant)
+            min_vram = estimate_min_vram_bytes(params, id_quant, config=kv_config)
             fit = _fit_on_probe(min_vram, total_vram)
             detail = _detail(
                 priced_quant=id_quant,
@@ -909,7 +988,7 @@ def classify_vllm_repo(
             and not id_quant
             and not tag_quant
         ):
-            min_vram = estimate_min_vram_bytes(params, "bf16")
+            min_vram = estimate_min_vram_bytes(params, "bf16", config=kv_config)
             fit = _fit_on_probe(min_vram, total_vram)
             if fit == "too-big":
                 detail = _detail(priced_quant="bf16", fullprec_too_big=True)

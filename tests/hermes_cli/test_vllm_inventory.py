@@ -384,7 +384,7 @@ def test_fit_does_not_trust_8b_token_over_larger_pack():
     )
     assert big["fit"] == "too-big"
     assert big["min_vram_bytes"] == _vram_from_weight_bytes(
-        int(70_000_000_000 * 2.2))
+        int(70_000_000_000 * 2))
 
 
 def test_fit_flip_only_when_cache_is_larger():
@@ -565,6 +565,91 @@ def test_classify_gpt_oss_mxfp4_20b_fits_24gb_120b_too_big():
     assert search120["fit"] == "too-big"
     assert search120["min_vram_bytes"] > vram
     assert named20["min_vram_bytes"] < search120["min_vram_bytes"]
+
+    assert classify_vllm_repo("Qwen/Qwen3-8B-AWQ", total_vram=vram)["fit"] == "fits-gpu"
+    nous = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=vram)
+    assert nous["fit"] == "too-big"
+    assert NEEDS_AWQ_MSG in nous["fit_detail"]
+
+
+def test_classify_glm4_9b_fits_24gb_32b_too_big():
+    """Official GLM-4/Z1 9B BF16 Fits a 24 GB card; 32B does not.
+
+    HF expand=config omits layers/KV heads (model_type + tokenizer only).
+    The Llama-8B 8 GiB KV floor on ~17.5 GiB weights was a lying Too big
+    (17.5+8+3 ≈ 28.5). Extreme GQA (2 KV heads) is ~2.5 GiB at 64k.
+    GLM-4.5+ stays off the 9B shortcut. Qwen3-8B-AWQ and Nous BF16 8B
+    keep their existing 24 GB contracts.
+    """
+    vram = 24 * _GIB
+    st9 = {"parameters": {"BF16": 9_400_279_040}, "total": 9_400_279_040}
+    # HF list/search expand=config — no layers/heads.
+    hf_cfg = {"architectures": ["Glm4ForCausalLM"], "model_type": "glm4"}
+    full_cfg = {
+        "num_hidden_layers": 40,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 2,
+        "hidden_size": 4096,
+        "head_dim": 128,
+    }
+    weights9 = 9_400_279_040 * 2
+    kv9 = _kv_from_config(full_cfg)
+    assert kv9 == 2 * 40 * 2 * 128 * 65536 * 2
+    assert kv9 < 3 * _GIB
+    assert _vram_from_weight_bytes(weights9) > vram
+    assert _vram_from_weight_bytes(weights9, config=full_cfg) <= vram
+
+    named4 = classify_vllm_repo("zai-org/GLM-4-9B-0414", total_vram=vram)
+    namedz = classify_vllm_repo("zai-org/GLM-Z1-9B-0414", total_vram=vram)
+    assert named4["fit"] == namedz["fit"] == "fits-gpu"
+    assert named4["min_vram_bytes"] <= vram
+    assert namedz["min_vram_bytes"] <= vram
+
+    search4 = classify_vllm_repo(
+        "zai-org/GLM-4-9B-0414",
+        tags=["text-generation"],
+        total_vram=vram,
+        safetensors=st9,
+        config=hf_cfg,
+        used_storage=18_800_557_280,
+    )
+    searchz = classify_vllm_repo(
+        "zai-org/GLM-Z1-9B-0414",
+        tags=["text-generation"],
+        total_vram=vram,
+        safetensors=st9,
+        config=hf_cfg,
+    )
+    assert search4["fit"] == searchz["fit"] == "fits-gpu"
+    assert search4["min_vram_bytes"] <= vram
+    assert searchz["min_vram_bytes"] <= vram
+    assert search4["quantization"] == "bf16"
+    cached4 = classify_vllm_repo(
+        "zai-org/GLM-4-9B-0414", total_vram=vram, weight_bytes=weights9)
+    assert cached4["fit"] == "fits-gpu"
+    assert cached4["min_vram_bytes"] <= vram
+
+    named32 = classify_vllm_repo("zai-org/GLM-4-32B-0414", total_vram=vram)
+    search32 = classify_vllm_repo(
+        "zai-org/GLM-4-32B-0414",
+        tags=["text-generation"],
+        total_vram=vram,
+        safetensors={"parameters": {"BF16": 32_000_000_000}, "total": 32_000_000_000},
+        config=hf_cfg,
+    )
+    assert named32["fit"] == search32["fit"] == "too-big"
+    assert named32["min_vram_bytes"] > vram
+    assert search32["min_vram_bytes"] > vram
+
+    air = classify_vllm_repo("zai-org/GLM-4.5-Air", total_vram=vram)
+    assert air["fit"] != "fits-gpu"
+    air9 = classify_vllm_repo(
+        "zai-org/GLM-4.5-Air",
+        total_vram=vram,
+        safetensors=st9,
+        config=hf_cfg,
+    )
+    assert air9["fit"] != "fits-gpu"
 
     assert classify_vllm_repo("Qwen/Qwen3-8B-AWQ", total_vram=vram)["fit"] == "fits-gpu"
     nous = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=vram)
