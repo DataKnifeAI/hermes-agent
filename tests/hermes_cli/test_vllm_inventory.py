@@ -572,6 +572,65 @@ def test_classify_gpt_oss_mxfp4_20b_fits_24gb_120b_too_big():
     assert NEEDS_AWQ_MSG in nous["fit_detail"]
 
 
+def test_cached_gpt_oss_mxfp4_ignores_inflated_hub_bytes():
+    """Downloaded 20B Fits a 24 GB card even when hub cache is ~38 GiB.
+
+    Search already prefers MXFP4 pricing over Hub usedStorage. The cached
+    path used whole-hub blobs (original/ + metal/ + shards) plus the 64k
+    KV floor and badged Too big. 120B stays Too big on the same probe.
+    """
+    vram = 24 * _GIB
+    inflated = 38 * _GIB
+    cached20 = classify_vllm_repo(
+        "openai/gpt-oss-20b", total_vram=vram,
+        weight_bytes=inflated, used_storage=inflated)
+    assert cached20["fit"] == "fits-gpu"
+    assert cached20["min_vram_bytes"] <= vram
+    assert cached20["quantization"] == "mxfp4"
+    actual, listing = resolve_weight_bytes(
+        hid="openai/gpt-oss-20b", disk_bytes=inflated, used_storage=inflated)
+    assert actual == listing
+    assert actual < inflated
+    assert actual + _KV_AND_RUNTIME_64K <= vram
+
+    cached120 = classify_vllm_repo(
+        "openai/gpt-oss-120b", total_vram=vram,
+        weight_bytes=inflated, used_storage=inflated)
+    assert cached120["fit"] == "too-big"
+    assert cached120["min_vram_bytes"] > vram
+    assert cached120["min_vram_bytes"] > cached20["min_vram_bytes"]
+
+
+def test_catalog_cached_gpt_oss_20b_fits_on_24gb(monkeypatch):
+    """Library row after Download uses the same MXFP4 fit as search."""
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.recommend import (
+        NvidiaProbe, VllmRecommendation, catalog_tiers,
+    )
+
+    pick = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(NvidiaProbe(24 * _GIB, 24 * _GIB, "data"), pick, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.list_cached_repos",
+        lambda: [
+            {"id": "openai/gpt-oss-20b", "size_bytes": 38 * _GIB, "cached": True},
+            {"id": "openai/gpt-oss-120b", "size_bytes": 38 * _GIB, "cached": True},
+        ],
+    )
+    monkeypatch.setattr("hermes_cli.vllm_runtime.supervisor.vllm_settings", lambda cfg=None: {})
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.running_served_model_name", lambda: "")
+    rows = catalog_models({})
+    by_id = {r["id"]: r for r in rows}
+    twenty = by_id["openai/gpt-oss-20b"]
+    assert twenty["cached"] is True
+    assert twenty["fit"] == "fits-gpu"
+    assert twenty["min_vram_bytes"] <= 24 * _GIB
+    hundred = by_id["openai/gpt-oss-120b"]
+    assert hundred["fit"] == "too-big"
+    assert hundred["min_vram_bytes"] > 24 * _GIB
+
+
 def test_nous_full_precision_too_big_on_24gb():
     """Search listing, 15 GiB shards, and the same bytes on disk must agree."""
     hid = "NousResearch/Hermes-3-Llama-3.1-8B"
@@ -777,6 +836,42 @@ def test_hub_cache_does_not_double_count_blobs_and_snapshots(tmp_path, monkeypat
     assert rows[0]["size_bytes"] == len(payload)
     assert rows[0]["cached"] is True
     assert rows[0]["size_bytes"] < 2 * len(payload)
+
+
+def test_hub_cache_sums_index_shards_not_original_and_metal(tmp_path, monkeypatch):
+    """gpt-oss ships duplicate original/ + metal/ packs beside the load shards."""
+    import json
+
+    hub = tmp_path / "hub"
+    repo = hub / "models--openai--gpt-oss-20b"
+    blobs = repo / "blobs"
+    rev = "abc123"
+    snaps = repo / "snapshots" / rev
+    blobs.mkdir(parents=True)
+    snaps.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text(rev, encoding="utf-8")
+    shard = b"s" * (200 << 20)
+    extra = b"e" * (200 << 20)
+    shard_blob = blobs / "shard"
+    extra_blob = blobs / "extra"
+    shard_blob.write_bytes(shard)
+    extra_blob.write_bytes(extra)
+    (snaps / "model-00000-of-00002.safetensors").symlink_to(shard_blob)
+    (snaps / "original").mkdir()
+    (snaps / "original" / "model.safetensors").symlink_to(extra_blob)
+    (snaps / "metal").mkdir()
+    (snaps / "metal" / "model.bin").symlink_to(extra_blob)
+    (snaps / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"w": "model-00000-of-00002.safetensors"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    assert _hub_repo_bytes(repo) == len(shard)
+    rows = list_cached_repos()
+    assert rows[0]["id"] == "openai/gpt-oss-20b"
+    assert rows[0]["size_bytes"] == len(shard)
+    assert rows[0]["size_bytes"] < len(shard) + len(extra)
 
 
 def test_usable_pool_is_below_sticker_24gib():

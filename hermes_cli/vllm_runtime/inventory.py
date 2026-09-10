@@ -142,13 +142,92 @@ def _dir_bytes(path: Path) -> int:
     return total
 
 
+def _current_snapshot(path: Path) -> Path | None:
+    """Hub ``refs/main`` snapshot, else the only / newest snapshot dir."""
+    snapshots = path / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    refs = path / "refs"
+    for name in ("main", "master"):
+        ref = refs / name
+        if not ref.is_file():
+            continue
+        try:
+            rev = ref.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        snap = snapshots / rev
+        if rev and snap.is_dir():
+            return snap
+    try:
+        kids = [p for p in snapshots.iterdir() if p.is_dir()]
+    except OSError:
+        return None
+    if not kids:
+        return None
+    if len(kids) == 1:
+        return kids[0]
+    return max(kids, key=lambda p: p.stat().st_mtime_ns)
+
+
+def _snapshot_shard_bytes(snap: Path) -> int:
+    """Weight bytes vLLM loads from one snapshot — not original/ or metal/.
+
+    gpt-oss ships ~13 GiB index shards plus duplicate ``original/`` and
+    ``metal/`` packs. Summing every weight file (or all hub blobs) is ~38 GiB.
+    """
+    if not snap.is_dir():
+        return 0
+    names: set[str] = set()
+    idx = snap / "model.safetensors.index.json"
+    if idx.is_file():
+        try:
+            data = json.loads(idx.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            data = None
+        if isinstance(data, dict):
+            wmap = data.get("weight_map")
+            if isinstance(wmap, dict):
+                names = {str(v) for v in wmap.values() if v}
+    total = 0
+    if names:
+        for name in names:
+            child = snap / name
+            try:
+                size = child.stat().st_size
+            except OSError:
+                continue
+            if size > 0:
+                total += size
+        return total
+    try:
+        children = list(snap.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        if not child.is_file() or child.suffix.lower() not in _WEIGHT_FILE_SUFFIXES:
+            continue
+        try:
+            total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def _hub_repo_bytes(path: Path) -> int:
     """Weight bytes in one HF hub cache dir.
 
     Hub layout is ``blobs/`` plus ``snapshots/`` symlinks into those blobs.
     ``Path.stat()`` follows the links, so walking the repo root counted
-    every shard twice and a 5.7 GiB AWQ looked like 11.4 GiB.
+    every shard twice and a 5.7 GiB AWQ looked like 11.4 GiB. ``blobs/``
+    also keeps extra snapshot variants — prefer the current snapshot's
+    index / top-level shards (gpt-oss-20b ~13 GiB, not ~38 GiB).
     """
+    snap = _current_snapshot(path)
+    if snap is not None:
+        sized = _snapshot_shard_bytes(snap)
+        if sized > 0:
+            return sized
     blobs = path / "blobs"
     if blobs.is_dir():
         return _dir_bytes(blobs)
@@ -690,9 +769,11 @@ def resolve_weight_bytes(
     Listing prefers usedStorage when it matches the published pack, then
     safetensors file bytes, then params × quant only when the quant is on
     the repo id / config / index — a loose tag plus an ``8B`` token is not
-    enough to badge Fits. Hub ``usedStorage`` can count extra revisions
-    (gpt-oss-20b lists ~38 GiB; the MXFP4 snapshot is ~13 GiB) — prefer
-    the priced listing when usedStorage is far larger.
+    enough to badge Fits. Hub ``usedStorage`` and a full hub-cache walk
+    can count extra revisions / ``original/`` + ``metal/`` packs
+    (gpt-oss-20b lists ~38 GiB; the MXFP4 shards are ~13 GiB) — prefer
+    the priced listing when those figures are far larger. Other quants
+    still trust a larger on-disk pack (AWQ sideload).
     """
     tag_list = [str(t) for t in (tags or [])]
     st_bytes = weight_bytes_from_safetensors(safetensors, quant)
@@ -722,7 +803,14 @@ def resolve_weight_bytes(
     elif priced >= _MIN_WEIGHT_BYTES:
         listing = priced
     disk = int(disk_bytes or 0)
-    actual = disk if disk >= _MIN_WEIGHT_BYTES else listing
+    actual = listing
+    if disk >= _MIN_WEIGHT_BYTES:
+        inflated_mxfp = (
+            priced >= _MIN_WEIGHT_BYTES
+            and disk > int(priced * 1.5)
+            and strong_quant in {"mxfp4", "nvfp4"}
+        )
+        actual = priced if inflated_mxfp else disk
     return actual, listing
 
 
