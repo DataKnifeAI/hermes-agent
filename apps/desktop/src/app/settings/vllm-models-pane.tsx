@@ -341,7 +341,8 @@ export function VllmModelsPane({
 
   return (
     <>
-      <SettingsSection icon={Search} meta={`${visible.length}`} title={copy.modelsTitle}>
+      {/* Same mark as llama.cpp Local. Search lives in Find more models. */}
+      <SettingsSection icon={Download} meta={`${visible.length}`} title={copy.modelsTitle}>
         <div className="grid gap-1">
           {sorted.map(model => {
             const busy = setting === model.id
