@@ -37,19 +37,21 @@ llama.cpp release zips have no CUDA build for your machine.
 On the same **Settings → Providers → Local Models** page, set **Local
 backend** to vLLM, then **Install → Use**. Hermes creates an isolated
 venv, picks one hardware-fit Hugging Face id from a short official list
-(same idea as llama.cpp's recommended row; everything else is Hugging
-Face search), keeps a 64K tool-loop floor — cards that cannot hold it
-stay infeasible — and starts a loopback OpenAI server. You do not
-`pip install vllm` or hand-edit a serve line.
+(Qwen3-8B-AWQ on 16 GB, Qwen3-14B-AWQ on 24 GB; everything else is
+Hugging Face search), keeps a 64K tool-loop floor — cards that cannot
+hold it stay infeasible — and starts a loopback OpenAI server on port
+18435 (llama.cpp stays on 18434). You do not `pip install vllm` or
+hand-edit a serve line.
 
-Headless / CLI is the same helpers:
+Desktop **Use** is what serves a cached model and sets it as the default
+for new chats.
+
+Headless / CLI can install and start the same engine:
 
 ```bash
 hermes local engine vllm
 hermes local install
 hermes local start
-hermes local use
-hermes local bench    # /v1/models + a required calculator tool-call
 hermes local stop     # frees VRAM so you can play games
 ```
 
@@ -93,8 +95,10 @@ guarantees. Below 4-bit the quality loss is too severe, so Hermes never
 offers builds smaller than that — a machine that can't run the 4-bit
 build spilled to system RAM simply can't run that model.
 
-Models that don't fit stay visible with the reason, so you always know
-what a hardware upgrade would unlock.
+On **llama.cpp**, models that don't fit stay visible with the reason, so
+you always know what a hardware upgrade would unlock. On **vLLM**,
+official rows that don't fit are hidden until you click **Show models
+that don't fit**, or run `hermes local ls --show-unfitting`.
 
 ## How memory management works
 
@@ -161,18 +165,22 @@ local_runtime:
   backend: auto      # auto | cuda | metal | vulkan | hip | cpu
   tag: b10362        # pinned llama.cpp release; Hermes updates it with
                      # each release after re-validation
+  port: 0            # llama.cpp: 0 = try 18434, then an ephemeral port
   vllm:              # written by Desktop / `hermes local` when engine is vllm
+    port: 0          # 0 = try 18435, then an ephemeral port (never 18434)
     model: Qwen/Qwen3-8B-AWQ
     served_model_name: qwen3:8b
     max_model_len: 65536
 ```
 
 Models and runtime builds live under the Hermes home directory
-(`models/`, `runtimes/llamacpp/`, `runtimes/vllm/`). Selecting a local
-model as your main model uses `model.provider: llamacpp` or
-`model.provider: vllm` plus `model.default` — the same shape as every
-other provider. The UI/CLI writes those keys; do not add a `.env` flag
-for the managed path.
+(`models/`, `runtimes/llamacpp/`, `runtimes/vllm/`). Server logs are in
+that home's `logs/` folder (`llama-server.log`, `vllm-server.log`) — the
+same directory `hermes logs` lists. A non-default profile uses its own
+home; do not hardcode `~/.hermes`. Selecting a local model as your main
+model uses `model.provider: llamacpp` or `model.provider: vllm` plus
+`model.default` — the same shape as every other provider. The UI/CLI
+writes those keys; do not add a `.env` flag for the managed path.
 
 ## Requirements and limits
 
