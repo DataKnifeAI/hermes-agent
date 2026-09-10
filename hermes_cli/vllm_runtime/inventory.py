@@ -32,12 +32,18 @@ _QUANT_BYTES = {
     "awq": 0.55,
     "gptq": 0.55,
     "int4": 0.55,
+    # MXFP4 is 4.25-bit + block scales. Official gpt-oss-20b is ~13 GiB
+    # on disk (sized for a 16 GB card), not dense BF16 / Hub usedStorage.
+    "mxfp4": 0.55,
+    "nvfp4": 0.55,
     "fp8": 1.1,
     "int8": 1.1,
     "bf16": 2.2,
     "fp16": 2.2,
 }
 _QUANT_TOKENS = (
+    ("mxfp4", "mxfp4"),
+    ("nvfp4", "nvfp4"),
     ("awq", "awq"),
     ("gptq", "gptq"),
     ("fp8", "fp8"),
@@ -97,7 +103,7 @@ _VISION_TAGS = frozenset({
 _INSTRUCT_TAGS = frozenset({
     "instruct", "instruction-tuned", "conversational", "chat",
 })
-_QUANT_CAP_ORDER = ("awq", "gptq", "fp8", "int4", "int8", "bf16", "fp16")
+_QUANT_CAP_ORDER = ("mxfp4", "nvfp4", "awq", "gptq", "fp8", "int4", "int8", "bf16", "fp16")
 _SKIP_DOWNLOAD_SUFFIX = frozenset({
     ".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".html", ".txt",
 })
@@ -234,7 +240,14 @@ def parse_quantization(repo: str, tags: list[str] | None = None) -> str | None:
     blob = f"{repo} {' '.join(tags or [])}".lower()
     for token, quant in _QUANT_TOKENS:
         if token in blob:
+            # HF tags official gpt-oss as both mxfp4 and 8-bit; 8-bit must
+            # not win and price a 4.25-bit MoE as dense INT8.
+            if quant == "int8" and ("mxfp4" in blob or "nvfp4" in blob or "gpt-oss" in blob):
+                continue
             return quant
+    # Official OpenAI gpt-oss checkpoints are MXFP4; the id has no quant token.
+    if "gpt-oss" in blob:
+        return "mxfp4"
     return None
 
 
@@ -375,7 +388,7 @@ def _quant_from_config(config: dict | None) -> str | None:
         return None
     method = str(qcfg.get("quant_method") or "").lower()
     bits = qcfg.get("bits")
-    if method in {"awq", "gptq", "fp8"}:
+    if method in {"awq", "gptq", "fp8", "mxfp4", "nvfp4"}:
         return method
     if bits == 4:
         return "int4"
@@ -467,11 +480,15 @@ def _capability_tags(
     elif vision:
         caps.append("vision")
     moe = False
-    if isinstance(config, dict) and isinstance(config.get("num_experts"), int) and config["num_experts"] > 1:
+    if isinstance(config, dict):
+        experts = config.get("num_experts") or config.get("num_local_experts")
+        if isinstance(experts, int) and experts > 1:
+            moe = True
+        elif str(config.get("model_type") or "").lower().replace("-", "_") == "gpt_oss":
+            moe = True
+    if not moe and any("moe" in t.lower().replace("-", "_").split("_") for t in tag_list):
         moe = True
-    elif any("moe" in t.lower().replace("-", "_").split("_") for t in tag_list):
-        moe = True
-    elif "-moe-" in blob or blob.endswith("-moe"):
+    elif not moe and ("-moe-" in blob or blob.endswith("-moe")):
         moe = True
     if moe:
         caps.append("moe")
@@ -636,6 +653,10 @@ def weight_bytes_from_safetensors(safetensors: dict | None, quant: str | None = 
         # I32+BF16 would otherwise look like a BF16-only pack (~4× too large).
         if _awq_packed_safetensors(params) and count >= 10_000_000:
             return int(count * _QUANT_BYTES["awq"])
+        # MXFP4 publishes U8 + BF16. Summing U8×1 + BF16×2 is ~21 GiB for
+        # gpt-oss-20b; the snapshot is ~13 GiB. Price as MXFP4 bpp.
+        if count >= 10_000_000 and quant in {"mxfp4", "nvfp4"}:
+            return int(count * _QUANT_BYTES[quant])
         mapped = {_SAFETENSORS_DTYPE.get(str(k).upper()) for k in params}
         mapped.discard(None)
         if len(mapped) == 1:
@@ -666,32 +687,40 @@ def resolve_weight_bytes(
 ) -> tuple[int, int]:
     """``(actual, listing)`` weight file bytes. VRAM is ``actual`` plus 64k KV.
 
-    Listing prefers usedStorage, then safetensors file bytes, then params ×
-    quant only when the quant is on the repo id / config / index — a loose
-    tag plus an ``8B`` token is not enough to badge Fits.
+    Listing prefers usedStorage when it matches the published pack, then
+    safetensors file bytes, then params × quant only when the quant is on
+    the repo id / config / index — a loose tag plus an ``8B`` token is not
+    enough to badge Fits. Hub ``usedStorage`` can count extra revisions
+    (gpt-oss-20b lists ~38 GiB; the MXFP4 snapshot is ~13 GiB) — prefer
+    the priced listing when usedStorage is far larger.
     """
     tag_list = [str(t) for t in (tags or [])]
     st_bytes = weight_bytes_from_safetensors(safetensors, quant)
     used = int(used_storage or 0)
+    strong_quant = (
+        parse_quantization(hid, None)
+        or _quant_from_config(config)
+        or _quant_from_safetensors(safetensors)
+    )
+    params = (
+        param_billions_from_safetensors(safetensors)
+        or parse_param_billions(hid)
+        or parse_param_billions(" ".join(tag_list))
+        or parse_param_billions(_base_model_blob(card_data))
+    )
+    priced = 0
+    if st_bytes >= _MIN_WEIGHT_BYTES:
+        priced = st_bytes
+    elif params is not None and strong_quant in _QUANT_BYTES:
+        priced = int(params * 1_000_000_000 * _QUANT_BYTES[strong_quant])
     listing = 0
     if used >= _MIN_WEIGHT_BYTES:
-        listing = used
-    elif st_bytes >= _MIN_WEIGHT_BYTES:
-        listing = st_bytes
-    else:
-        strong_quant = (
-            parse_quantization(hid, None)
-            or _quant_from_config(config)
-            or _quant_from_safetensors(safetensors)
-        )
-        params = (
-            param_billions_from_safetensors(safetensors)
-            or parse_param_billions(hid)
-            or parse_param_billions(" ".join(tag_list))
-            or parse_param_billions(_base_model_blob(card_data))
-        )
-        if params is not None and strong_quant in _QUANT_BYTES:
-            listing = int(params * 1_000_000_000 * _QUANT_BYTES[strong_quant])
+        if priced >= _MIN_WEIGHT_BYTES and used > int(priced * 1.5):
+            listing = priced
+        else:
+            listing = used
+    elif priced >= _MIN_WEIGHT_BYTES:
+        listing = priced
     disk = int(disk_bytes or 0)
     actual = disk if disk >= _MIN_WEIGHT_BYTES else listing
     return actual, listing

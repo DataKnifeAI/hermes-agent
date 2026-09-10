@@ -50,6 +50,9 @@ def test_parse_quantization_from_id_or_tags():
     assert parse_quantization("org/model", ["fp8", "text-generation"]) == "fp8"
     assert parse_quantization("org/mystery", ["4-bit", "text-generation"]) == "int4"
     assert parse_quantization("org/mystery", ["text-generation"]) is None
+    assert parse_quantization("openai/gpt-oss-20b") == "mxfp4"
+    assert parse_quantization("openai/gpt-oss-20b", ["8-bit", "mxfp4"]) == "mxfp4"
+    assert parse_quantization("org/mystery", ["8-bit"]) == "int8"
 
 
 def test_classify_unknown_when_quant_or_size_missing():
@@ -507,6 +510,66 @@ def test_vram_is_weights_plus_64k_kv_not_percent_of_disk():
     }
     assert _kv_from_config(llama) == 8 * _GIB
     assert _vram_from_weight_bytes(16 * _GIB, config=llama) == 16 * _GIB + _KV_AND_RUNTIME_64K
+
+
+def test_classify_gpt_oss_mxfp4_20b_fits_24gb_120b_too_big():
+    """Official MXFP4 20B Fits a 24 GB card; 120B does not.
+
+    Hub usedStorage for gpt-oss-20b is ~38 GiB (extra revisions). The MXFP4
+    snapshot is ~13 GiB / 3.6B active. Treating 20B as dense BF16 or adding
+    the Llama-8B 64k KV floor on top of that listing was a lying Too big.
+    Qwen3-8B-AWQ and Nous BF16 8B keep their existing 24 GB contracts.
+    """
+    vram = 24 * _GIB
+    named20 = classify_vllm_repo("openai/gpt-oss-20b", total_vram=vram)
+    assert named20["fit"] == "fits-gpu"
+    assert named20["quantization"] == "mxfp4"
+    assert named20["min_vram_bytes"] <= vram
+
+    st20 = {"parameters": {"BF16": 1_804_459_584, "U8": 19_110_297_600},
+            "total": 20_914_757_184}
+    cfg20 = {
+        "quantization_config": {"quant_method": "mxfp4"},
+        "model_type": "gpt_oss",
+        "num_local_experts": 32,
+        "num_experts_per_tok": 4,
+        "num_hidden_layers": 24,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "head_dim": 64,
+        "hidden_size": 2880,
+    }
+    search20 = classify_vllm_repo(
+        "openai/gpt-oss-20b",
+        tags=["mxfp4", "8-bit", "text-generation"],
+        total_vram=vram,
+        safetensors=st20,
+        config=cfg20,
+        used_storage=41_382_448_021,
+    )
+    assert search20["fit"] == "fits-gpu"
+    assert search20["min_vram_bytes"] <= vram
+    assert search20["quantization"] == "mxfp4"
+    assert "moe" in search20["capabilities"]
+
+    named120 = classify_vllm_repo("openai/gpt-oss-120b", total_vram=vram)
+    assert named120["fit"] == "too-big"
+    search120 = classify_vllm_repo(
+        "openai/gpt-oss-120b",
+        tags=["mxfp4", "8-bit"],
+        total_vram=vram,
+        safetensors={"parameters": {"BF16": 2_167_371_072, "U8": 114_661_785_600},
+                     "total": 116_829_156_672},
+        config={"quantization_config": {"quant_method": "mxfp4"}},
+    )
+    assert search120["fit"] == "too-big"
+    assert search120["min_vram_bytes"] > vram
+    assert named20["min_vram_bytes"] < search120["min_vram_bytes"]
+
+    assert classify_vllm_repo("Qwen/Qwen3-8B-AWQ", total_vram=vram)["fit"] == "fits-gpu"
+    nous = classify_vllm_repo("NousResearch/Hermes-3-Llama-3.1-8B", total_vram=vram)
+    assert nous["fit"] == "too-big"
+    assert NEEDS_AWQ_MSG in nous["fit_detail"]
 
 
 def test_nous_full_precision_too_big_on_24gb():
