@@ -1588,7 +1588,9 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
 def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     """Persist ``local_runtime.vllm.model`` (+ served name). Does not start or stop a server."""
     from cli import save_config_value
-    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm, tier_for_model
+    from hermes_cli.vllm_runtime.recommend import (
+        as_vllm_config, parser_for_hf_id, recommend_vllm, tier_for_model,
+    )
 
     hid = (hf_id or "").strip()
     if not hid or "/" not in hid:
@@ -1627,6 +1629,11 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
             "local_runtime.vllm.quantization",
             method if method in {"awq", "gptq"} else "",
         )
+        # Catalog Use writes the tier parser. Search hits must pin Hermes-4
+        # to hermes so leftover llama3_json / empty does not ride along.
+        parser = parser_for_hf_id(hid)
+        if parser:
+            save_config_value("local_runtime.vllm.tool_call_parser", parser)
     return {"ok": True, "model": hid, "served_model_name": served_name_for(hid)}
 
 

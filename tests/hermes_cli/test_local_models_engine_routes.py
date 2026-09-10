@@ -1956,6 +1956,39 @@ def test_apply_compressed_tensors_awq_id_clears_quantization(tmp_path, monkeypat
     vllm = load_config()["local_runtime"]["vllm"]
     assert vllm["model"] == hid
     assert not (vllm.get("quantization") or "").strip()
+    assert vllm.get("tool_call_parser") == "hermes"
+
+
+def test_apply_hermes4_overwrites_leftover_llama3_parser(tmp_path, monkeypatch):
+    """Use Hermes-4 after a Llama leftover must pin --tool-call-parser hermes."""
+    _, home = _client(tmp_path, monkeypatch)
+    hid = "cyankiwi/Hermes-4-14B-AWQ-4bit"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "Qwen/Qwen3-14B-AWQ",
+        "quantization": "awq",
+        "tool_call_parser": "llama3_json",
+        "kv_cache_dtype": "fp8",
+    }})
+    hub = tmp_path / "hf-hub"
+    root = hub / ("models--" + hid.replace("/", "--"))
+    snap = root / "snapshots" / "main"
+    snap.mkdir(parents=True)
+    (root / "refs").mkdir(parents=True)
+    (root / "refs" / "main").write_text("main", encoding="utf-8")
+    (snap / "config.json").write_text(
+        '{"quantization_config": {"quant_method": "compressed-tensors"}}',
+        encoding="utf-8",
+    )
+    (snap / "w.bin").write_bytes(b"y" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.inventory import apply_vllm_model
+
+    apply_vllm_model(hid)
+    vllm = load_config()["local_runtime"]["vllm"]
+    assert vllm["model"] == hid
+    assert vllm.get("tool_call_parser") == "hermes"
+    assert not (vllm.get("quantization") or "").strip()
 
 
 def test_vllm_job_timeout_covers_supervisor_ready_wait():

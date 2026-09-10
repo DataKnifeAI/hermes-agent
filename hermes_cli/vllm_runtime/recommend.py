@@ -15,6 +15,7 @@ a silent ctx shrink — and do not add a sixth official download. No GGUF.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 _GIB = 1 << 30
@@ -29,6 +30,8 @@ _PUBLIC_FALLBACK = "Qwen/Qwen2.5-7B-Instruct-AWQ"
 _PUBLIC_FALLBACK_SERVED = "qwen2.5:7b"
 # Parsers vLLM's OpenAI-compat /v1/chat/completions actually implements.
 TOOL_PARSERS = frozenset({"hermes", "llama3_json", "qwen3_xml", "qwen3_coder", "mistral"})
+# Nous Hermes-4 (Qwen3 post-train, including cyankiwi AWQ-4bit) emits XML <tool_call>.
+_HERMES4_ID_RE = re.compile(r"hermes[-_ ]?4\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -211,6 +214,24 @@ def official_catalog_ids() -> frozenset[str]:
     }
 
 
+def parser_for_hf_id(hf_id: str) -> str | None:
+    """Parser to persist on Use. Catalog row, else Hermes-4 family, else unknown.
+
+    Search-hit Use must not keep leftover ``llama3_json`` (or empty) on a
+    Hermes-4 id — vLLM's hermes parser is the XML ``<tool_call>`` contract.
+    Unknown families return None so leftover is not clobbered.
+    """
+    hid = (hf_id or "").strip()
+    if not hid:
+        return None
+    matched = tier_for_model(hid)
+    if matched is not None:
+        return matched.tool_call_parser
+    if _HERMES4_ID_RE.search(hid):
+        return "hermes"
+    return None
+
+
 def overlay_for_setup(hid: str, rec: VllmRecommendation) -> dict:
     """Recommend overlay with *hid* (official row or public fallback) as the model."""
     overlay = as_vllm_config(rec)
@@ -229,6 +250,9 @@ def overlay_for_setup(hid: str, rec: VllmRecommendation) -> dict:
         overlay["tool_call_parser"] = _DEFAULT_PARSER
     else:
         overlay["served_model_name"] = hid.rsplit("/", 1)[-1]
+        parser = parser_for_hf_id(hid)
+        if parser:
+            overlay["tool_call_parser"] = parser
     return overlay
 
 

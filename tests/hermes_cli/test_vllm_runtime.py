@@ -18,7 +18,9 @@ import pytest
 import yaml
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG
-from hermes_cli.vllm_runtime.recommend import MIN_CONTEXT, TIERS, TOOL_PARSERS, recommend_vllm
+from hermes_cli.vllm_runtime.recommend import (
+    MIN_CONTEXT, TIERS, TOOL_PARSERS, parser_for_hf_id, recommend_vllm,
+)
 from hermes_cli.vllm_runtime.supervisor import serve_argv, vllm_settings
 
 
@@ -308,6 +310,17 @@ def test_watch_stops_on_fatal_awq_config_error(tmp_path, monkeypatch):
     assert spawned == []
     assert sup._stopping is True
     assert read_last_error() == LEFTOVER_AWQ_MSG
+
+
+def test_parser_for_hf_id_pins_hermes4_and_catalog():
+    """Hermes-4 search hits use XML <tool_call>; official Qwen3 keeps hermes.
+    Unknown families stay None so leftover llama3_json is not clobbered."""
+    assert parser_for_hf_id("cyankiwi/Hermes-4-14B-AWQ-4bit") == "hermes"
+    assert parser_for_hf_id("NousResearch/Hermes-4-14B") == "hermes"
+    assert parser_for_hf_id("Qwen/Qwen3-14B-AWQ") == "hermes"
+    assert parser_for_hf_id("dphn/dolphin-2.9.1-llama-3-8b") is None
+    assert parser_for_hf_id("solidrust/Hermes-3-Llama-3.1-8B-AWQ") is None
+    assert parser_for_hf_id("") is None
 
 
 def test_serve_argv_loopback_and_hermes_tool_parser():
