@@ -1146,22 +1146,13 @@ export interface Translations {
       engineVllm: string
       vllmInstallTitle: string
       vllmInstallDetail: string
-      vllmReadyTitle: string
-      vllmReadyDetail: (model: string) => string
-      vllmUseAction: string
-      vllmUseFailed: string
-      vllmUseDone: (url: string) => string
-      vllmRecommendFailed: string
       vllmNotFeasible: (reason: string) => string
       occupancyTitle: string
-      vllmVersionMissing: string
-      vllmVersionDetail: (ver: string) => string
       vllmCheckUpdate: string
       vllmCheckingUpdate: string
       vllmUpdateAvailable: (latest: string, current: string) => string
       vllmUpToDate: (ver: string) => string
       vllmCheckFailed: string
-      vllmVenvDetail: (path: string) => string
       vllmBrowseHint: string
       vllmBrowseNoHits: string
       vllmSetFailed: string

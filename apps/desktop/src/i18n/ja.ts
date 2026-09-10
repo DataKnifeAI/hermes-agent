@@ -1211,24 +1211,14 @@ export const ja = defineLocale({
       vllmInstallTitle: 'vLLM ランタイムをインストール',
       vllmInstallDetail:
         'vLLM 推論エンジンをダウンロードします。ダウンロードしたモデルはこのマシンだけで動きます——アカウント不要、データは外に出ません。サーバーは Hermes が起動・管理します。',
-      vllmReadyTitle: 'vLLM ランタイム導入済み',
-      vllmReadyDetail: model =>
-        `${model} の準備ができました。サーバーは Hermes が起動・管理します。モデルをダウンロードしてから「使用する」で新しいチャットのデフォルトにします。`,
-      vllmUseAction: '使う',
-      vllmUseFailed: 'vLLM に切り替えられませんでした',
-      vllmUseDone: url => `新しいチャットは ${url} の vLLM を使います。`,
-      vllmRecommendFailed: 'この GPU 向けの vLLM モデルを選べませんでした',
       vllmNotFeasible: reason => `この GPU ではまだ管理 vLLM を実行できません（${reason}）。`,
       occupancyTitle: '別の LLM が GPU を使用中です',
-      vllmVersionMissing: 'まだ vLLM がインストールされていません。',
-      vllmVersionDetail: ver => `vLLM ${ver} を実行中。`,
       vllmCheckUpdate: '更新を確認',
       vllmCheckingUpdate: '確認中…',
       vllmUpdateAvailable: (latest, current) =>
         `新しい vLLM ビルド（${latest}）をインストールできます——現在は ${current} です。ダウンロード中もモデルは引き続き使えます。`,
       vllmUpToDate: ver => `vLLM ${ver} を実行中——PyPI の最新リリースです。`,
       vllmCheckFailed: 'vLLM エンジンの更新を確認できませんでした',
-      vllmVenvDetail: path => `インストール先 ${path}`,
       vllmBrowseHint:
         'Hugging Face を検索できます。ここでダウンロードしたモデルは分かる範囲でマシンに合わせますが、当方でのテストは行われていません。',
       vllmBrowseNoHits: 'Hugging Face モデルが見つかりません。',

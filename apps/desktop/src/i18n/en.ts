@@ -1319,24 +1319,14 @@ export const en: Translations = {
       vllmInstallTitle: 'Install the vLLM runtime',
       vllmInstallDetail:
         'Downloads the vLLM inference engine. Models you download run entirely on this machine — no account, nothing leaves your computer. Hermes starts and manages the server for you.',
-      vllmReadyTitle: 'vLLM runtime installed',
-      vllmReadyDetail: model =>
-        `${model} is ready. Hermes starts and manages the server for you. Download a model, then Use to make it the default for new chats.`,
-      vllmUseAction: 'Use',
-      vllmUseFailed: 'Could not switch to vLLM',
-      vllmUseDone: url => `New chats use vLLM at ${url}.`,
-      vllmRecommendFailed: 'Could not pick a vLLM model for this GPU',
       vllmNotFeasible: reason => `This GPU cannot run managed vLLM yet (${reason}).`,
       occupancyTitle: 'Another LLM is using the GPU',
-      vllmVersionMissing: 'vLLM is not installed yet.',
-      vllmVersionDetail: ver => `Running vLLM ${ver}.`,
       vllmCheckUpdate: 'Check for update',
       vllmCheckingUpdate: 'Checking…',
       vllmUpdateAvailable: (latest, current) =>
         `A newer vLLM build (${latest}) is ready to install — you're on ${current}. Models keep working during the download.`,
       vllmUpToDate: ver => `Running vLLM ${ver} — the latest release on PyPI.`,
       vllmCheckFailed: 'Could not check for a vLLM engine update',
-      vllmVenvDetail: path => `Installed at ${path}`,
       vllmBrowseHint:
         'Search Hugging Face. Models you download here are sized to your machine when we can tell, but not tested by us.',
       vllmBrowseNoHits: 'No Hugging Face models found.',
