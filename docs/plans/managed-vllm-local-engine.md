@@ -1,7 +1,10 @@
 # Managed vLLM as a first-class local engine
 
-Status: **implemented** (Desktop is the ship surface)
-Audience: Desktop + CLI local-inference work
+Status: **CLI follow-up** — `feat/hermes-local-cli` / [#8](https://github.com/DataKnifeAI/hermes-agent/issues/8)
+Audience: `hermes local` argparse parity with Desktop managed vLLM
+
+Engine + Desktop ship on `feat/managed-vllm-local-engine`. This branch
+keeps the CLI wrapper so use / status / start can catch up.
 
 ## What shipped
 
@@ -36,6 +39,7 @@ supervised server.
 | Desktop HTTP | `hermes_cli/web_routers/local_models_engine.py` |
 | Desktop UI | `apps/desktop/src/app/settings/local-models-settings.tsx`, `vllm-models-pane.tsx` |
 | User guide | `website/docs/user-guide/local-models.md` |
+| CLI argparse | `hermes_cli/subcommands/local.py`, `hermes_cli/local_cmd.py` |
 
 `hermes_cli/local_runtime/` remains llama.cpp only.
 
@@ -51,10 +55,16 @@ supervised server.
   endpoint stays remote.
 - Mid-conversation engine swaps are next-session / explicit restart.
 
-## Follow-up (not this work)
+## This branch
 
-CLI `hermes local use` still only pins the provider. Desktop **Use**
-serves the cached id. `hermes local status` does not print
-Starting/Ready / In use (`engine_state`). `hermes local start` can still
-fail the tool-call bench even when serve is up. Do not rename
-`hermes local use`; do not change CLI start semantics in a cleanup PR.
+Close these gaps before merging `hermes local` as product:
+
+- CLI `hermes local use` still only pins the provider. Desktop **Use**
+  serves the cached id. Do not rename `use`.
+- `hermes local status` does not print Starting/Ready / In use
+  (`engine_state`).
+- `hermes local start` can still fail the tool-call bench even when
+  serve is up. Do not change CLI start semantics in a drive-by.
+
+Call the same engine helpers as Desktop (`local_engines`,
+`vllm_runtime`, `/api/local-models/*`). Do not fork them.
