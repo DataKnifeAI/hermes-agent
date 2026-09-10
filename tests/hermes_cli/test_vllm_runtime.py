@@ -21,7 +21,9 @@ from hermes_cli.config_defaults import DEFAULT_CONFIG
 from hermes_cli.vllm_runtime.recommend import (
     MIN_CONTEXT, TIERS, TOOL_PARSERS, parser_for_hf_id, recommend_vllm,
 )
-from hermes_cli.vllm_runtime.supervisor import serve_argv, vllm_settings
+from hermes_cli.vllm_runtime.supervisor import (
+    serve_argv, serve_environ, vllm_settings,
+)
 
 
 _GIB = 1 << 30
@@ -108,18 +110,23 @@ def test_serve_argv_drops_leftover_awq_on_non_awq_id():
     assert kept[kept.index("--quantization") + 1] == "awq"
 
 
-def _hub_quant_config(tmp_path, monkeypatch, hid: str, quant_method: str) -> None:
+def _hub_quant_config(tmp_path, monkeypatch, hid: str, quant_method: str,
+                      extra: dict | None = None) -> None:
     hub = tmp_path / "hf-hub"
     root = hub / ("models--" + hid.replace("/", "--"))
     snap = root / "snapshots" / "main"
     snap.mkdir(parents=True)
     (root / "refs").mkdir(parents=True)
     (root / "refs" / "main").write_text("main", encoding="utf-8")
-    (snap / "config.json").write_text(
-        json.dumps({"quantization_config": {"quant_method": quant_method}}),
-        encoding="utf-8",
-    )
+    payload = {"quantization_config": {"quant_method": quant_method}}
+    if extra:
+        payload.update(extra)
+    (snap / "config.json").write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+
+
+def _argv_max_model_len(argv: list[str]) -> int:
+    return int(argv[argv.index("--max-model-len") + 1])
 
 
 def test_serve_argv_skips_awq_for_compressed_tensors_id(tmp_path, monkeypatch):
@@ -143,6 +150,77 @@ def test_serve_argv_keeps_awq_for_official_qwen_autoawq(tmp_path, monkeypatch):
         "port": 18435,
     })
     assert argv[argv.index("--quantization") + 1] == "awq"
+
+
+@pytest.mark.parametrize("hid", ["Qwen/Qwen3-8B-AWQ", "Qwen/Qwen3-14B-AWQ"])
+def test_serve_argv_caps_qwen3_awq_at_checkpoint_native(tmp_path, monkeypatch, hid):
+    """Qwen3-*-AWQ native is 40960; 65536 + ALLOW_LONG CUDA-OOBs mid-chat."""
+    _hub_quant_config(tmp_path, monkeypatch, hid, "awq", extra={
+        "max_position_embeddings": 40960,
+        "rope_scaling": None,
+    })
+    argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": hid,
+        "max_model_len": 65536,
+        "quantization": "awq",
+        "port": 18435,
+    })
+    assert _argv_max_model_len(argv) == 40960
+    assert "--rope-scaling" not in argv
+
+
+def test_serve_argv_keeps_64k_when_native_is_at_least_floor(tmp_path, monkeypatch):
+    """Qwen3.8-class checkpoints (native ≥64k) still get the Hermes floor."""
+    hid = "org/already-64k-instruct"
+    _hub_quant_config(tmp_path, monkeypatch, hid, "fp8", extra={
+        "max_position_embeddings": 65536,
+    })
+    argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": hid,
+        "max_model_len": 65536,
+        "port": 18435,
+    })
+    assert _argv_max_model_len(argv) == 65536
+
+    nested = "org/nested-text-262k"
+    _hub_quant_config(tmp_path, monkeypatch, nested, "fp8", extra={
+        "text_config": {"max_position_embeddings": 262144},
+    })
+    nested_argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": nested,
+        "max_model_len": 65536,
+        "port": 18435,
+    })
+    assert _argv_max_model_len(nested_argv) == 65536
+
+
+def test_serve_argv_yarn_in_checkpoint_reaches_64k_with_rope_args(tmp_path, monkeypatch):
+    """YaRN on config.json (not a README) may pass 64k with matching rope args."""
+    hid = "org/yarn-64k-instruct"
+    _hub_quant_config(tmp_path, monkeypatch, hid, "awq", extra={
+        "max_position_embeddings": 32768,
+        "rope_scaling": {
+            "rope_type": "yarn",
+            "factor": 2.0,
+            "original_max_position_embeddings": 32768,
+        },
+    })
+    argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": hid,
+        "max_model_len": 65536,
+        "port": 18435,
+    })
+    assert _argv_max_model_len(argv) == 65536
+    rope = json.loads(argv[argv.index("--rope-scaling") + 1])
+    assert rope["rope_type"] == "yarn"
+    assert rope["original_max_position_embeddings"] == 32768
+    assert float(rope["factor"]) * 32768 >= 65536
+
+
+def test_serve_environ_drops_allow_long_max_model_len(monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    env = serve_environ("/opt/venv/bin/vllm")
+    assert "VLLM_ALLOW_LONG_MAX_MODEL_LEN" not in env
 
 
 def test_start_refuses_exl2_without_spawning(tmp_path, monkeypatch):

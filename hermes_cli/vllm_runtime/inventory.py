@@ -349,6 +349,95 @@ def cached_model_config(repo: str) -> dict | None:
     return None
 
 
+# vLLM derive_max_model_len_and_key — smallest present key wins.
+_VLLM_MAX_LEN_KEYS = (
+    "max_position_embeddings",
+    "n_positions",
+    "max_seq_len",
+    "seq_length",
+    "model_max_length",
+    "max_target_positions",
+    "max_sequence_length",
+    "max_seq_length",
+    "seq_len",
+)
+_NESTED_TEXT_CONFIG_KEYS = ("text_config", "language_config", "llm_config")
+
+
+def _positive_len(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    n = int(value)
+    return n if n > 0 else None
+
+
+def _max_len_from_mapping(blob: dict) -> int | None:
+    found: list[int] = []
+    for key in _VLLM_MAX_LEN_KEYS:
+        n = _positive_len(blob.get(key))
+        if n is not None:
+            found.append(n)
+    return min(found) if found else None
+
+
+def _config_blobs(config: dict) -> list[dict]:
+    """Nested text/LLM mapping first (Qwen3.8), then the top-level blob."""
+    blobs: list[dict] = []
+    for key in _NESTED_TEXT_CONFIG_KEYS:
+        nested = config.get(key)
+        if isinstance(nested, dict):
+            blobs.append(nested)
+    blobs.append(config)
+    return blobs
+
+
+def native_max_model_len(config: dict | None) -> int | None:
+    """Checkpoint-native max vLLM will derive — not a README YaRN ceiling.
+
+    Qwen3-8B/14B-AWQ ship ``max_position_embeddings`` 40960 and
+    ``rope_scaling: null``. Serving 65536 via ALLOW_LONG CUDA-OOBs mid-chat.
+    """
+    if not isinstance(config, dict):
+        return None
+    for blob in _config_blobs(config):
+        got = _max_len_from_mapping(blob)
+        if got is not None:
+            return got
+    return None
+
+
+def documented_yarn_rope(config: dict | None, *, requested: int, native: int | None) -> dict | None:
+    """CLI ``--rope-scaling`` when the checkpoint *itself* documents YaRN past native.
+
+    README-only Qwen3 YaRN (``rope_scaling: null``) is not this. Only a yarn
+    dict already on config.json whose original × factor reaches ``requested``.
+    """
+    if not isinstance(config, dict) or native is None or native >= requested or requested <= 0:
+        return None
+    for blob in _config_blobs(config):
+        rope = blob.get("rope_scaling")
+        if not isinstance(rope, dict):
+            continue
+        rtype = str(rope.get("rope_type") or rope.get("type") or "").lower()
+        if rtype != "yarn":
+            continue
+        original = _positive_len(rope.get("original_max_position_embeddings")) or native
+        factor = rope.get("factor")
+        if not isinstance(factor, (int, float)) or isinstance(factor, bool) or factor <= 0:
+            continue
+        if int(original * float(factor)) < requested:
+            continue
+        out: dict[str, Any] = {"rope_type": "yarn", "factor": float(factor),
+                               "original_max_position_embeddings": original}
+        theta = rope.get("rope_theta")
+        if isinstance(theta, (int, float)) and not isinstance(theta, bool):
+            out["rope_theta"] = theta
+        return out
+    return None
+
+
 def repo_quant_method(repo: str, config: dict | None = None) -> str | None:
     """``quant_method`` from ``config`` or the hub-cache snapshot."""
     cfg = config if isinstance(config, dict) else cached_model_config(repo)

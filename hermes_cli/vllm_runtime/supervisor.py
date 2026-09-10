@@ -279,21 +279,69 @@ def openai_base_url(settings: dict, *, port: int | None = None) -> str:
     return f"http://{client_host(settings)}:{p}/v1"
 
 
+_ALLOW_LONG_ENV = "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
+
+
+def _requested_max_model_len(settings: dict) -> int:
+    from hermes_cli.vllm_runtime.recommend import MIN_CONTEXT
+
+    raw = settings.get("max_model_len")
+    try:
+        requested = int(raw) if raw not in (None, "") else MIN_CONTEXT
+    except (TypeError, ValueError):
+        requested = MIN_CONTEXT
+    return requested if requested > 0 else MIN_CONTEXT
+
+
+def serve_len_and_rope(settings: dict) -> tuple[int, dict | None]:
+    """``--max-model-len`` and optional YaRN ``--rope-scaling``.
+
+    Hermes' 64k floor is a *request*. Serve ``min(request, native)`` unless the
+    checkpoint's own ``rope_scaling`` yarn dict documents a higher length —
+    never ALLOW_LONG to fake 64k over a 40960 Qwen3.
+    """
+    requested = _requested_max_model_len(settings)
+    hid = configured_model_id(settings)
+    from hermes_cli.vllm_runtime.inventory import (
+        cached_model_config, documented_yarn_rope, native_max_model_len)
+
+    config = cached_model_config(hid)
+    native = native_max_model_len(config)
+    yarn = documented_yarn_rope(config, requested=requested, native=native)
+    if yarn is not None:
+        return requested, yarn
+    if native is None:
+        return requested, None
+    return min(requested, native), None
+
+
+def serve_environ(executable: str | Path, base: dict | None = None) -> dict[str, str]:
+    """Child env for ``vllm serve``. Never inherit ALLOW_LONG — it starts then dies."""
+    env = dict(os.environ if base is None else base)
+    bindir = str(Path(executable).parent)
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    env.pop(_ALLOW_LONG_ENV, None)
+    return env
+
+
 def serve_argv(executable: str | Path, settings: dict) -> list[str]:
     """``vllm serve`` argv. Bind host comes from settings; 1-click default is loopback."""
     model = str(settings.get("model") or "").strip()
     if not model:
         raise ValueError("local_runtime.vllm.model is required")
     port = int(settings.get("port") or 0) or DEFAULT_LISTEN_PORT
+    max_len, rope = serve_len_and_rope(settings)
     argv = [
         str(executable), "serve", model,
         "--host", bind_host(settings),
         "--port", str(port),
-        "--max-model-len", str(int(settings.get("max_model_len") or 65536)),
+        "--max-model-len", str(max_len),
         "--gpu-memory-utilization", str(settings.get("gpu_memory_utilization") or 0.75),
         "--enable-auto-tool-choice",
         "--tool-call-parser", str(settings.get("tool_call_parser") or "hermes"),
     ]
+    if rope:
+        argv.extend(["--rope-scaling", json.dumps(rope, separators=(",", ":"))])
     quant = serve_quantization(settings)
     if quant:
         argv.extend(["--quantization", quant])
@@ -367,12 +415,7 @@ class VllmSupervisor:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_handle = open(self.log_path, "ab")  # noqa: SIM115
         cmd = serve_argv(self.executable, self.settings)
-        env = os.environ.copy()
-        bindir = str(Path(self.executable).parent)
-        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
-        # Qwen3-8B-AWQ (the 16 GB shipped default) derives 40960; Hermes' tool
-        # loop is 64k. vLLM refuses the override unless this is set.
-        env.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+        env = serve_environ(self.executable)
         self.proc = subprocess.Popen(
             cmd, stdout=self._log_handle, stderr=subprocess.STDOUT, env=env)
         logger.info("vllm serve spawned pid=%s port=%s", self.proc.pid, self.port)
