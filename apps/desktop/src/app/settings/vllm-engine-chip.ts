@@ -6,7 +6,6 @@ export interface VllmEngineChipCopy {
   engineFailed: string
   engineInstalling: string
   engineReady: string
-  engineReadyNamed: (model: string) => string
   engineStarting: string
   engineStopped: string
   engineUpdating: string
@@ -15,10 +14,6 @@ export interface VllmEngineChipCopy {
 export interface VllmEngineChip {
   label: string
   tone: VllmEngineChipTone
-}
-
-function servedName(status: Pick<LocalModelsStatus, 'active_model_id' | 'served_model_name'>): string {
-  return (status.served_model_name || status.active_model_id || '').trim()
 }
 
 function derivedState(
@@ -55,7 +50,7 @@ export function vllmEngineChip({
   serverBusy?: boolean
   status: Pick<
     LocalModelsStatus,
-    'active_model_id' | 'engine_state' | 'last_error' | 'runtime_installed' | 'served_model_name' | 'server_running' | 'start_phase'
+    'engine_state' | 'last_error' | 'runtime_installed' | 'server_running' | 'start_phase'
   >
 }): null | VllmEngineChip {
   if (jobs.some(j => j.kind === 'vllm-install' && j.status === 'running')) {
@@ -70,9 +65,7 @@ export function vllmEngineChip({
     serverBusy && !status.server_running && derivedState(status) !== 'ready' ? 'starting' : derivedState(status)
 
   if (state === 'ready') {
-    const name = servedName(status)
-
-    return { label: name ? copy.engineReadyNamed(name) : copy.engineReady, tone: 'success' }
+    return { label: copy.engineReady, tone: 'success' }
   }
 
   if (state === 'starting') {

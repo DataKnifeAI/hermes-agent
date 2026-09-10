@@ -1167,7 +1167,6 @@ export const en: Translations = {
       runtimeReady: backend => `Ready · ${backend}`,
       serverRunning: 'Running',
       engineReady: 'Ready',
-      engineReadyNamed: model => `Ready · ${model}`,
       engineStarting: 'Starting',
       engineStopped: 'Stopped',
       engineFailed: 'Failed',

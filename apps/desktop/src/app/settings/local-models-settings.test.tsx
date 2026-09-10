@@ -1537,7 +1537,7 @@ describe('vLLM engine', () => {
     expect(screen.queryByText(/Ready · vllm/i)).toBeNull()
   })
 
-  it('shows Ready · model on the runtime chip only when serving', async () => {
+  it('shows Ready on the runtime chip only when serving', async () => {
     mocked.getLocalModelsStatus.mockResolvedValue({
       ...VLLM_STATUS,
       engine_state: 'ready',
@@ -1569,7 +1569,8 @@ describe('vLLM engine', () => {
     })
     renderPane()
 
-    expect(await screen.findByText('Ready · qwen3:14b')).toBeTruthy()
+    expect(await screen.findByText('Ready')).toBeTruthy()
+    expect(screen.queryByText(/Ready ·/)).toBeNull()
   })
 
   it('shows Stopped on the runtime chip when the engine is idle', async () => {

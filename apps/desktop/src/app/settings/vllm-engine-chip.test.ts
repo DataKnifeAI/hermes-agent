@@ -6,7 +6,6 @@ const copy: VllmEngineChipCopy = {
   engineFailed: 'Failed',
   engineInstalling: 'Installing',
   engineReady: 'Ready',
-  engineReadyNamed: model => `Ready · ${model}`,
   engineStarting: 'Starting',
   engineStopped: 'Stopped',
   engineUpdating: 'Updating'
@@ -34,7 +33,7 @@ describe('vllmEngineChip', () => {
           server_running: true
         }
       })
-    ).toEqual({ label: 'Ready · qwen3:14b', tone: 'success' })
+    ).toEqual({ label: 'Ready', tone: 'success' })
 
     expect(
       vllmEngineChip({

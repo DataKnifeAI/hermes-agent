@@ -1034,7 +1034,6 @@ export const zhHant = defineLocale({
       runtimeReady: backend => `就緒 · ${backend}`,
       serverRunning: '執行中',
       engineReady: '就緒',
-      engineReadyNamed: model => `就緒 · ${model}`,
       engineStarting: '啟動中',
       engineStopped: '已停止',
       engineFailed: '失敗',

@@ -1013,7 +1013,6 @@ export interface Translations {
       runtimeReady: (backend: string) => string
       serverRunning: string
       engineReady: string
-      engineReadyNamed: (model: string) => string
       engineStarting: string
       engineStopped: string
       engineFailed: string

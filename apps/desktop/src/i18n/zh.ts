@@ -1358,7 +1358,6 @@ export const zh: Translations = {
       runtimeReady: backend => `就绪 · ${backend}`,
       serverRunning: '运行中',
       engineReady: '就绪',
-      engineReadyNamed: model => `就绪 · ${model}`,
       engineStarting: '启动中',
       engineStopped: '已停止',
       engineFailed: '失败',

@@ -1072,7 +1072,6 @@ export const ja = defineLocale({
       runtimeReady: backend => `準備完了 · ${backend}`,
       serverRunning: '実行中',
       engineReady: '準備完了',
-      engineReadyNamed: model => `準備完了 · ${model}`,
       engineStarting: '起動中',
       engineStopped: '停止中',
       engineFailed: '失敗',
