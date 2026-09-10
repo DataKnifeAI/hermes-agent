@@ -1012,6 +1012,12 @@ export interface Translations {
       runtimeTitle: string
       runtimeReady: (backend: string) => string
       serverRunning: string
+      engineReady: string
+      engineStarting: string
+      engineStopped: string
+      engineFailed: string
+      engineInstalling: string
+      engineUpdating: string
       runtimeInstalled: string
       runtimeInstalledDetail: (tag: string, backend: string) => string
       installTitle: string
@@ -1022,7 +1028,25 @@ export interface Translations {
       hardwareTitle: string
       hardwareLoading: string
       vram: (label: string) => string
+      vramUsed: (used: string, total: string) => string
+      vramFree: (free: string) => string
+      vramEngine: (label: string) => string
+      vramOther: (label: string) => string
+      gpuDriver: (version: string) => string
+      gpuCompute: (cap: string) => string
+      modelsPath: string
+      storageUsed: (used: string, free: string) => string
+      runtimePath: string
+      engineStat: string
+      servingStat: string
+      servingReady: string
+      servingStarting: string
+      ctx64kFits: string
+      ctx64kTight: string
+      occupancyWarn: string
       ram: (label: string) => string
+      ramUsed: (used: string, total: string) => string
+      ramAvailable: (avail: string) => string
       unifiedMemory: string
       modelsTitle: string
       recommended: string
@@ -1031,6 +1055,7 @@ export interface Translations {
       recommendedReason: Record<string, string>
       downloaded: string
       downloadAction: (size: string) => string
+      downloadBare: string
       downloadProgress: (done: string, total: string) => string
       downloadDoneToast: (model: string) => string
       installDoneToast: string
@@ -1039,6 +1064,7 @@ export interface Translations {
       quickstartDetailReady: (model: string) => string
       quickstartAction: string
       quickstartConfigure: string
+      recommendedSetup: string
       quickstartDoneToast: (model: string) => string
       quickstartFailed: string
       quickstartStageEngine: string
@@ -1046,6 +1072,7 @@ export interface Translations {
       quickstartStageFinish: string
       useAction: string
       activePill: string
+      inUsePill: string
       updateTitle: string
       updateDetail: (next: string, current: string) => string
       updateAction: string
@@ -1078,6 +1105,8 @@ export interface Translations {
       pillFitsGpu: string
       pillUsesRam: string
       pillTooBig: string
+      pillInstruct: string
+      pillTools: string
       browseTitle: string
       browseHint: string
       browsePlaceholder: string
@@ -1087,9 +1116,14 @@ export interface Translations {
       browseRefresh: string
       browseDownloads: string
       browseLikes: string
+      released: (date: string) => string
+      downloadBytesPct: (done: string, total: string, pct: number) => string
       browseGated: string
+      browseGatedHint: string
+      downloadVerifying: string
       browseNoGguf: string
       browseFitUnknown: string
+      browseFitUnknownHint: string
       browseAlreadyDownloaded: string
       addedByYou: string
       browseDownloadStarted: string
@@ -1107,6 +1141,26 @@ export interface Translations {
       deleteConfirm: (model: string) => string
       deleted: (model: string) => string
       deleteFailed: string
+      engineLabel: string
+      engineLlama: string
+      engineVllm: string
+      vllmInstallTitle: string
+      vllmInstallDetail: string
+      vllmNotFeasible: (reason: string) => string
+      occupancyTitle: string
+      vllmCheckUpdate: string
+      vllmCheckingUpdate: string
+      vllmUpdateAvailable: (latest: string, current: string) => string
+      vllmUpToDate: (ver: string) => string
+      vllmCheckFailed: string
+      vllmBrowseHint: string
+      vllmBrowseNoHits: string
+      vllmSetFailed: string
+      vllmCachedPill: string
+      showUnfitting: string
+      hideUnfitting: string
+      showMore: string
+      showLess: string
     }
     providers: {
       connectAccount: string

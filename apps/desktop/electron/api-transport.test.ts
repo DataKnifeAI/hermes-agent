@@ -19,6 +19,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import {
   destroyKeepaliveAgents,
   downloadAgentFor,
+  httpErrorFromBackendResponse,
   isIdempotentMethod,
   isTransientTransportError,
   jsonAgentFor,
@@ -380,4 +381,35 @@ describe('live: POST reset after server-side processing', () => {
       server.close()
     }
   }, 20_000)
+})
+
+describe('httpErrorFromBackendResponse', () => {
+  it('preserves a FastAPI 400 and its JSON detail', () => {
+    const err = httpErrorFromBackendResponse(
+      400,
+      '{"detail":"This full-precision checkpoint is too big for this GPU at the 64k tool-loop floor — Download an AWQ or FP8 instruct model"}',
+      'Bad Request'
+    )
+    expect(err.statusCode).toBe(400)
+    expect(err.message).toMatch(/^400:/)
+    expect(err.message).toMatch(/too big/)
+    expect(err.message).not.toMatch(/^502:/)
+  })
+
+  it('does not map a 400 onto 502', () => {
+    const err = httpErrorFromBackendResponse(400, '{"detail":"gated"}', 'Bad Request')
+    expect(err.statusCode).toBe(400)
+    expect(err.message.startsWith('400:')).toBe(true)
+  })
+
+  it('unwraps a 502 whose FastAPI detail is urllib HTTP Error 400', () => {
+    const err = httpErrorFromBackendResponse(
+      502,
+      '{"detail":"HTTP Error 400: Bad Request"}',
+      'Bad Gateway'
+    )
+    expect(err.statusCode).toBe(400)
+    expect(err.message).toMatch(/^400:/)
+    expect(err.message).not.toMatch(/^502:/)
+  })
 })

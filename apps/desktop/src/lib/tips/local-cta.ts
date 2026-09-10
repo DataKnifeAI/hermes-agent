@@ -43,6 +43,11 @@ export function localSetupEligible(
     return false
   }
 
+  // vLLM uses HF weights, not the GGUF catalog — this tip is the llama.cpp offer.
+  if (status.engine === 'vllm') {
+    return false
+  }
+
   const needsSetup = !status.runtime_installed || status.models.length === 0
 
   return needsSetup && catalog.some(model => model.fits)

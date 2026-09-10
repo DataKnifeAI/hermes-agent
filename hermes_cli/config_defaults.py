@@ -2324,11 +2324,14 @@ DEFAULT_CONFIG = {
         # e.g. "us-central1" only if your models are region-pinned.
         "region": "global",
     },
-    # Managed llama.cpp runtime (docs: user-guide/local-models): official binaries, one supervised
-    # llama-server in router mode. No context/VRAM knobs by design.
+    # Managed local inference (docs: user-guide/local-models). llama.cpp is the default
+    # engine (official zips, GGUF catalog). vLLM is the optional Python/CUDA sibling —
+    # see hermes_cli/vllm_runtime/. Engine switch stops the other supervised server.
     "local_runtime": {
         # Off = detection-only (Hermes still finds an external llama-server you run).
         "enabled": False,
+        # llamacpp | vllm. Additive; missing key deep-merges to llamacpp.
+        "engine": "llamacpp",
         # Pinned llama.cpp release tag; bumped by Hermes releases after validation.
         "tag": "b10679",
         # auto = CUDA on NVIDIA, Metal on macOS, Vulkan on other GPUs, else CPU. Explicit:
@@ -2338,6 +2341,23 @@ DEFAULT_CONFIG = {
         "port": 0,  # Port for the managed server. 0 = pick a free port at spawn.
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
+        # Managed vLLM (localhost OpenAI-compatible). port 0 = pick at spawn, same
+        # rule as llama.cpp: try 18435, then an ephemeral port. Never 18434 (llama)
+        # and never 8000/8080 (a user's own vLLM/Ollama).
+        "vllm": {
+            "port": 0,
+            "host": "127.0.0.1",
+            "model": "Qwen/Qwen3-8B-AWQ",
+            "served_model_name": "qwen3:8b",
+            "max_model_len": 65536,
+            "gpu_memory_utilization": 0.75,
+            "quantization": "awq",
+            "kv_cache_dtype": "fp8",
+            "tool_call_parser": "hermes",
+            # Empty = Hermes' own CPython (already on the machine). A pin like
+            # "3.12" must exist on PATH; we never ask the user to install Python.
+            "python": "",
+        },
     },
     "_config_version": 41,  # Config schema version - bump this when adding new required fields
 }

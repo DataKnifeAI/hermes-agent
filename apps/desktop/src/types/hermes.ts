@@ -1283,13 +1283,28 @@ export interface LocalModelLoadProgress {
   percent: number
 }
 
+export type LocalEngine = 'llamacpp' | 'vllm'
+
+export interface LocalOccupancyHit {
+  kind: string
+  detail: string
+  port?: null | number
+  pid?: null | number
+}
+
 export interface LocalModelsStatus {
   enabled: boolean
+  /** Selected local engine. Missing on older backends — treat as llama.cpp. */
+  engine?: LocalEngine
   tag: string
   configured_tag: string
   update_available: boolean
   runtime_installed: boolean
   runtime_backend: string | null
+  /** Managed vLLM only. `ready` iff GET /v1/models 200. */
+  engine_state?: 'error' | 'not_installed' | 'ready' | 'starting' | 'stopped'
+  /** Live serve pid while starting or ready. Missing on older backends. */
+  pid?: null | number
   server_running: boolean
   server_base_url: string | null
   active_model_id: string | null
@@ -1299,6 +1314,19 @@ export interface LocalModelsStatus {
   placement?: Record<string, LocalModelPlacement>
   models: { id: string; size_bytes: number; size_label: string }[]
   models_dir: string
+  models_dir_display?: string
+  runtime_dir?: string
+  runtime_dir_display?: string
+  venv_ready?: boolean
+  venv_path?: string
+  /** Isolated-venv `vllm` package version. Null/absent when not installed. */
+  vllm_version?: null | string
+  occupancy?: LocalOccupancyHit[]
+  occupancy_message?: null | string
+  served_model_name?: null | string
+  start_phase?: null | string
+  last_error?: null | string
+  model?: null | string
 }
 
 export interface LocalHardware {
@@ -1307,10 +1335,36 @@ export interface LocalHardware {
   vram_usable_bytes: number
   ram_total_bytes: number
   ram_available_bytes: number
+  /** Physical RAM in use, matching `free` used (not MemFree / cache). Missing on older backends. */
+  ram_used_bytes?: number | null
+  /** Isolated-venv vLLM version when engine is vLLM. */
+  vllm_version?: null | string
   vram_label: string
   gpu_name: string | null
   gpu_util_percent: number | null
   vram_used_bytes: number | null
+  /** Live free VRAM from nvidia-smi. Missing on older backends / non-NVIDIA. */
+  vram_free_bytes?: number | null
+  /** VRAM held by this install's managed llama.cpp/vLLM pids. */
+  vram_engine_bytes?: number | null
+  /** VRAM held by every other compute app on the GPU. */
+  vram_other_bytes?: number | null
+  gpu_driver_version?: string | null
+  cuda_compute_capability?: string | null
+  engine?: LocalEngine
+  models_dir?: string
+  models_dir_display?: string
+  models_storage_bytes?: number
+  disk_free_bytes?: number
+  disk_total_bytes?: number
+  runtime_dir?: string
+  runtime_dir_display?: string
+  occupancy_foreign?: boolean
+  ctx_64k_feasible?: boolean | null
+  /** Same starting/ready/stopped rule as LocalModelsStatus. vLLM only. */
+  engine_state?: LocalModelsStatus['engine_state']
+  pid?: null | number
+  start_phase?: null | string
 }
 
 export interface LocalCatalogModel {
@@ -1346,7 +1400,7 @@ export interface LocalCatalogModel {
 
 export interface LocalRuntimeJob {
   job_id: string
-  kind: 'model-activate' | 'model-download' | 'quickstart' | 'runtime-install'
+  kind: 'model-activate' | 'model-download' | 'quickstart' | 'runtime-install' | 'vllm-install' | 'vllm-update'
   target: string
   model_id: string | null
   status: 'running' | 'done' | 'error'

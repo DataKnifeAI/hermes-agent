@@ -28,6 +28,47 @@ That's the whole flow. The server starts and stops with Hermes, restarts
 survive app restarts, and switching back to a cloud provider is one click
 in the model picker.
 
+## vLLM — the alternative engine
+
+llama.cpp is the default 1-click engine (official GGUF catalog, idle unload).
+**vLLM** is the managed alternative on Linux NVIDIA — useful when official
+llama.cpp release zips have no CUDA build for your machine.
+
+On the same **Settings → Providers → Local Models** page, set **Local
+backend** to vLLM, then **Install → Use**. Hermes creates an isolated
+venv, picks one hardware-fit Hugging Face id from a short official list
+(Qwen3-8B-AWQ on 16 GB, Qwen3-14B-AWQ on 24 GB; everything else is
+Hugging Face search), keeps a 64K tool-loop floor — cards that cannot
+hold it stay infeasible — and starts a loopback OpenAI server on port
+18435 (llama.cpp stays on 18434). You do not `pip install vllm` or
+hand-edit a serve line.
+
+Desktop **Use** is what serves a cached model and sets it as the default
+for new chats.
+
+The Desktop page writes `local_runtime.engine` and the
+`local_runtime.vllm` block for you. There is no `HERMES_VLLM_*` env var.
+Headless CLI (`hermes local`) is a follow-up, not the ship path — see
+[issue #8](https://github.com/DataKnifeAI/hermes-agent/issues/8).
+
+Stop the managed server when you want the GPU back. Hermes never kills a
+foreign LLM (Ollama, LM Studio, a `vllm serve` you started yourself) —
+if another process is occupying the GPU, Desktop shows that message and
+waits for you to stop it.
+
+vLLM **Find more models** search asks Hugging Face for `safetensors`,
+card, and tag metadata. **Fits your GPU** / **Too big** fire when a
+parameter count (id token, `safetensors.total`, or `base_model`) and a
+known quantization (AWQ/GPTQ/FP8/BF16, `4-bit` / `8-bit` tags, or a
+single safetensors dtype) are present. **Fit unknown** means that
+metadata is missing — Hermes will not guess. Capability pills
+(Instruct, Tools, quant, Vision/Omni, MoE, 32k/64k/128k, Coding) come
+from those HF tags, not from recognizing a model name.
+
+A remote GPU box is the same engine with a different host: point a custom
+endpoint at that OpenAI URL. Activate will not rewrite a non-loopback
+`model.base_url` to `127.0.0.1`.
+
 ## How Hermes picks what to download
 
 Every model in the catalog is priced against **your machine** before you
@@ -47,8 +88,10 @@ guarantees. Below 4-bit the quality loss is too severe, so Hermes never
 offers builds smaller than that — a machine that can't run the 4-bit
 build spilled to system RAM simply can't run that model.
 
-Models that don't fit stay visible with the reason, so you always know
-what a hardware upgrade would unlock.
+On **llama.cpp**, models that don't fit stay visible with the reason, so
+you always know what a hardware upgrade would unlock. On **vLLM**,
+official rows that don't fit are hidden until you click **Show models
+that don't fit**.
 
 ## How memory management works
 
@@ -111,15 +154,26 @@ documented for CLI and headless use:
 local_runtime:
   enabled: false     # true = start the managed server with Hermes.
                      # The desktop "Use" button sets this automatically.
+  engine: llamacpp   # llamacpp (default) | vllm
   backend: auto      # auto | cuda | metal | vulkan | hip | cpu
   tag: b10362        # pinned llama.cpp release; Hermes updates it with
                      # each release after re-validation
+  port: 0            # llama.cpp: 0 = try 18434, then an ephemeral port
+  vllm:              # written by Desktop when engine is vllm
+    port: 0          # 0 = try 18435, then an ephemeral port (never 18434)
+    model: Qwen/Qwen3-8B-AWQ
+    served_model_name: qwen3:8b
+    max_model_len: 65536
 ```
 
 Models and runtime builds live under the Hermes home directory
-(`models/` and `runtimes/llamacpp/`). Selecting a local model as your
-main model uses the standard `model.provider: llamacpp` +
-`model.default` settings — the same shape as every other provider.
+(`models/`, `runtimes/llamacpp/`, `runtimes/vllm/`). Server logs are in
+that home's `logs/` folder (`llama-server.log`, `vllm-server.log`) — the
+same directory `hermes logs` lists. A non-default profile uses its own
+home; do not hardcode `~/.hermes`. Selecting a local model as your main
+model uses `model.provider: llamacpp` or `model.provider: vllm` plus
+`model.default` — the same shape as every other provider. The UI/CLI
+writes those keys; do not add a `.env` flag for the managed path.
 
 ## Requirements and limits
 

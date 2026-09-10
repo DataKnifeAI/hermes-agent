@@ -1,6 +1,18 @@
-import type { LocalCatalogModel, LocalHardware, LocalModelsStatus, LocalRuntimeJob } from '@/types/hermes'
+import type {
+  LocalCatalogModel,
+  LocalEngine,
+  LocalHardware,
+  LocalModelsStatus,
+  LocalRuntimeJob
+} from '@/types/hermes'
 
 import { hermesApi, profileScoped } from './client'
+
+/** POST /vllm/use and /server start block until GET /v1/models is 200.
+ *  Must cover CUDA-graph cold start (~2–3 min) plus tool-call verify — the
+ *  30s fetch default reports "vLLM failed to start" while the pid is still
+ *  capturing graphs. Keep >= hermes_cli READY_TIMEOUT_S (180s). */
+export const VLLM_START_REQUEST_TIMEOUT_MS = 240_000
 
 // The desktop surface of the managed llama.cpp runtime: status/catalog
 // reads, download/install/activate jobs, and server control.
@@ -107,7 +119,148 @@ export function setLocalServer(action: 'start' | 'stop'): Promise<{ ok: boolean 
     ...profileScoped(),
     body: { action },
     method: 'POST',
-    path: '/api/local-models/server'
+    path: '/api/local-models/server',
+    timeoutMs: action === 'start' ? VLLM_START_REQUEST_TIMEOUT_MS : undefined
+  })
+}
+
+export function setLocalEngine(engine: LocalEngine): Promise<{ engine: LocalEngine; ok: boolean }> {
+  return hermesApi<{ engine: LocalEngine; ok: boolean }>({
+    ...profileScoped(),
+    body: { engine },
+    method: 'POST',
+    path: '/api/local-models/engine'
+  })
+}
+
+export interface VllmRecommend {
+  config: Record<string, number | string>
+  feasible: boolean
+  gpu_memory_utilization: number
+  kv_cache_dtype: string
+  max_model_len: number
+  model: string
+  quantization: string
+  reason: string
+  served_model_name: string
+  tier: null | string
+}
+
+export function getVllmRecommend(): Promise<VllmRecommend> {
+  return hermesApi<VllmRecommend>({
+    ...profileScoped(),
+    path: '/api/local-models/vllm/recommend'
+  })
+}
+
+export function installVllm(): Promise<{ job_id: string }> {
+  return hermesApi<{ job_id: string }>({
+    ...profileScoped(),
+    method: 'POST',
+    path: '/api/local-models/vllm/install'
+  })
+}
+
+export interface VllmUseResult {
+  already_downloaded?: boolean
+  base_url?: string
+  job_id?: null | string
+  model?: string
+  needs_download?: boolean
+  ok: boolean
+}
+
+export function useVllm(model?: string): Promise<VllmUseResult> {
+  return hermesApi<VllmUseResult>({
+    ...profileScoped(),
+    body: model ? { model } : {},
+    method: 'POST',
+    path: '/api/local-models/vllm/use',
+    timeoutMs: VLLM_START_REQUEST_TIMEOUT_MS
+  })
+}
+
+export function downloadVllmModel(model: string): Promise<{ already_downloaded?: boolean; job_id: null | string; model: string }> {
+  return hermesApi<{ already_downloaded?: boolean; job_id: null | string; model: string }>({
+    ...profileScoped(),
+    body: { model },
+    method: 'POST',
+    path: '/api/local-models/vllm/download'
+  })
+}
+
+export interface VllmInventoryModel {
+  active: boolean
+  added_by_you?: boolean
+  cached: boolean
+  capabilities?: string[]
+  created_at?: string
+  display_name: string
+  fit?: 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
+  fit_detail?: string
+  fits?: boolean | null
+  hide_by_default?: boolean
+  id: string
+  min_vram_bytes?: number
+  quantization?: string
+  recommended: boolean
+  served_model_name: string
+  size_bytes: number
+  size_label: string
+}
+
+export function getVllmModels(): Promise<{ models: VllmInventoryModel[] }> {
+  return hermesApi<{ models: VllmInventoryModel[] }>({
+    ...profileScoped(),
+    path: '/api/local-models/vllm/models'
+  })
+}
+
+export function searchVllmModels(q: string, limit = 20): Promise<{ hits: HFSearchHit[] }> {
+  return hermesApi<{ hits: HFSearchHit[] }>({
+    ...profileScoped(),
+    path: `/api/local-models/vllm/search?q=${encodeURIComponent(q)}&limit=${limit}`
+  })
+}
+
+export function setVllmModel(model: string): Promise<{ model: string; ok: boolean; served_model_name: string }> {
+  return hermesApi<{ model: string; ok: boolean; served_model_name: string }>({
+    ...profileScoped(),
+    body: { model },
+    method: 'POST',
+    path: '/api/local-models/vllm/set'
+  })
+}
+
+export function deleteVllmModel(modelId: string): Promise<{ ok: boolean }> {
+  return hermesApi<{ ok: boolean }>({
+    ...profileScoped(),
+    method: 'DELETE',
+    path: `/api/local-models/vllm/models/${encodeURIComponent(modelId)}`
+  })
+}
+
+export interface VllmVersionCheck {
+  configured_tag: string
+  installed: string
+  latest: string
+  tag: string
+  update_available: boolean
+}
+
+export function checkVllmUpdate(): Promise<VllmVersionCheck> {
+  return hermesApi<VllmVersionCheck>({
+    ...profileScoped(),
+    method: 'POST',
+    path: '/api/local-models/vllm/check-update'
+  })
+}
+
+export function updateVllm(): Promise<{ job_id: string }> {
+  return hermesApi<{ job_id: string }>({
+    ...profileScoped(),
+    method: 'POST',
+    path: '/api/local-models/vllm/update'
   })
 }
 
@@ -119,6 +272,15 @@ export interface HFSearchHit {
   likes: number
   updated: string
   gated: boolean
+  cached?: boolean
+  capabilities?: string[]
+  created_at?: string
+  fit?: 'fits-gpu' | 'needs-ram' | 'too-big' | 'unknown'
+  fit_detail?: string
+  quantization?: string
+  recommended?: boolean
+  size_bytes?: number
+  size_label?: string
 }
 
 export interface HFFileGroup {

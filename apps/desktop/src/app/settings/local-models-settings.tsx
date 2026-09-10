@@ -4,9 +4,11 @@ import { useNavigate } from 'react-router'
 
 import { NEW_CHAT_ROUTE } from '@/app/routes'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tip } from '@/components/ui/tooltip'
 import {
   activateLocalModel,
+  checkVllmUpdate,
   deleteLocalModel,
   downloadBrowsedModel,
   downloadLocalModel,
@@ -14,14 +16,21 @@ import {
   getLocalCatalog,
   getLocalHardware,
   getLocalModelsStatus,
+  getVllmModels,
+  getVllmRecommend,
   type HFFileGroup,
   type HFSearchHit,
   installLocalRuntime,
+  installVllm,
   listHFRepoFiles,
   quickstartLocalModels,
   searchHFModels,
+  setLocalEngine,
   setLocalServer,
-  sideloadLocalModel
+  sideloadLocalModel,
+  updateVllm,
+  type VllmInventoryModel,
+  type VllmRecommend
 } from '@/hermes'
 import { useI18n } from '@/i18n'
 import {
@@ -34,6 +43,7 @@ import {
   Loader2,
   Monitor,
   Package,
+  RefreshCw,
   Search,
   StopFilled,
   Trash2,
@@ -47,9 +57,13 @@ import {
   watchLocalRuntimeJobs
 } from '@/store/local-runtime-jobs'
 import { notify, notifyError } from '@/store/notifications'
-import type { LocalCatalogModel, LocalHardware, LocalModelsStatus } from '@/types/hermes'
+import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus } from '@/types/hermes'
 
+import { CONTROL_TEXT } from './constants'
+import { LocalModelsMachineStats } from './local-models-machine-stats'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
+import { vllmEngineChip, vllmEnginePower } from './vllm-engine-chip'
+import { VllmModelsPane } from './vllm-models-pane'
 
 function ProgressBar({ percent }: { percent: number | undefined }) {
   return (
@@ -68,6 +82,61 @@ function gbLabel(bytes: number | null | undefined): string {
   }
 
   return `${(bytes / (1 << 30)).toFixed(1)} GB`
+}
+
+function engineOf(status: LocalModelsStatus | null): LocalEngine {
+  return status?.engine === 'vllm' ? 'vllm' : 'llamacpp'
+}
+
+function vllmLibraryEmpty(status: LocalModelsStatus): boolean {
+  // Cached HF weights (or a sized active row). A configured id with no
+  // cache is not a library — deleting every hub dir should look like a
+  // fresh engine, not a dead empty list.
+  return !(status.models ?? []).some(m => (m.size_bytes ?? 0) > 0)
+}
+
+function vllmServedIdentity(status: LocalModelsStatus): {
+  activeModelId: null | string
+  servedModelName: null | string
+} {
+  // In use = GET /v1/models 200 for that id. Spawn-time state and config
+  // written on Use click are not ready — keep the Use spinner until then.
+  if (!status.server_running || (!status.active_model_id && !status.served_model_name)) {
+    return { activeModelId: null, servedModelName: null }
+  }
+
+  return {
+    activeModelId: status.active_model_id ?? null,
+    servedModelName: status.served_model_name ?? null
+  }
+}
+
+function EngineSelect({
+  disabled,
+  engine,
+  onChange
+}: {
+  disabled?: boolean
+  engine: LocalEngine
+  onChange: (next: LocalEngine) => void
+}) {
+  const { t } = useI18n()
+  const copy = t.settings.localModels
+
+  return (
+    <label className="flex flex-col items-start gap-1 text-left">
+      <span className="text-[0.72rem] text-muted-foreground">{copy.engineLabel}</span>
+      <Select disabled={disabled} onValueChange={next => onChange(next as LocalEngine)} value={engine}>
+        <SelectTrigger aria-label={copy.engineLabel} className={cn('min-w-44', CONTROL_TEXT)}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="llamacpp">{copy.engineLlama}</SelectItem>
+          <SelectItem value="vllm">{copy.engineVllm}</SelectItem>
+        </SelectContent>
+      </Select>
+    </label>
+  )
 }
 
 // Catalog display order: what runs well leads. Resident (all on GPU)
@@ -96,29 +165,102 @@ export function LocalModelsSettings() {
   // Quickstart escape hatch: true once the user asks for the full pane
   // (model list, HF browser) instead of the one-button setup card.
   const [configure, setConfigure] = useState(false)
+  const [engineBusy, setEngineBusy] = useState(false)
+  const [recommend, setRecommend] = useState<VllmRecommend | null>(null)
+  const [vllmModels, setVllmModels] = useState<VllmInventoryModel[] | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   // Jobs live in the app-level store (they must survive this pane
   // unmounting); the pane just renders the slice it cares about.
   const jobs = useStore($localRuntimeJobs)
 
   const refresh = useCallback(() => {
     void getLocalModelsStatus()
-      .then(setStatus)
+      .then(next => {
+        setStatus(next)
+
+        if (engineOf(next) === 'vllm') {
+          void getVllmModels()
+            .then(data => setVllmModels(data.models))
+            .catch(() => setVllmModels([]))
+
+          return
+        }
+
+        setVllmModels(null)
+        void getLocalCatalog()
+          .then(data => setCatalog(data.models))
+          .catch(() => setCatalog([]))
+      })
       .catch(() => setStatus(null))
-    void getLocalCatalog()
-      .then(data => setCatalog(data.models))
-      .catch(() => setCatalog([]))
   }, [])
 
   // Snappy first paint: status + catalog immediately; hardware (may shell out
-  // to nvidia-smi) backfills and pops in-place. The job watcher also kicks
-  // here so reopening the pane rediscovers work started before.
+  // to nvidia-smi) backfills and pops in-place. Keep polling while this pane
+  // is open so VRAM used/free is live, same 5s cadence as the statusbar.
   useEffect(() => {
     refresh()
     watchLocalRuntimeJobs()
-    void getLocalHardware()
-      .then(setHardware)
-      .catch(() => setHardware(null))
+
+    let cancelled = false
+    let timer: number | null = null
+
+    const pollHardware = async () => {
+      try {
+        const next = await getLocalHardware()
+
+        if (!cancelled) {
+          setHardware(next)
+        }
+      } catch {
+        if (!cancelled) {
+          setHardware(null)
+        }
+      }
+
+      if (!cancelled) {
+        timer = window.setTimeout(() => void pollHardware(), 5_000)
+      }
+    }
+
+    void pollHardware()
+
+    return () => {
+      cancelled = true
+
+      if (timer !== null) {
+        window.clearTimeout(timer)
+      }
+    }
   }, [refresh])
+
+  const selectedEngine = engineOf(status)
+  const hadVllmLibrary = useRef(false)
+
+  useEffect(() => {
+    if (selectedEngine !== 'vllm' || !status) {
+      return
+    }
+
+    const empty = vllmLibraryEmpty(status)
+
+    if (hadVllmLibrary.current && empty) {
+      setConfigure(false)
+    }
+
+    hadVllmLibrary.current = !empty
+  }, [selectedEngine, status])
+
+  useEffect(() => {
+    if (selectedEngine !== 'vllm') {
+      setRecommend(null)
+
+      return
+    }
+
+    void getVllmRecommend()
+      .then(setRecommend)
+      .catch(() => setRecommend(null))
+  }, [selectedEngine])
 
   // The pane is LIVE while visible: residency changes without user action
   // (boot warm finishing, idle sweep unloading, another surface ejecting),
@@ -141,11 +283,11 @@ export function LocalModelsSettings() {
       }
 
       if (!cancelled) {
-        timer = window.setTimeout(() => void tick(), 4_000)
+        timer = window.setTimeout(() => void tick(), 5_000)
       }
     }
 
-    timer = window.setTimeout(() => void tick(), 4_000)
+    timer = window.setTimeout(() => void tick(), 5_000)
 
     return () => {
       cancelled = true
@@ -172,12 +314,68 @@ export function LocalModelsSettings() {
     }
   }
 
+  async function handleEngineChange(next: LocalEngine) {
+    if (next === engineOf(status)) {
+      return
+    }
+
+    setEngineBusy(true)
+
+    try {
+      await setLocalEngine(next)
+      refresh()
+    } catch (err) {
+      notifyError(err, copy.quickstartFailed)
+    } finally {
+      setEngineBusy(false)
+    }
+  }
+
   async function handleQuickstart() {
     try {
       await quickstartLocalModels()
       watchLocalRuntimeJobs()
     } catch (err) {
       notifyError(err, copy.quickstartFailed)
+    }
+  }
+
+  async function handleInstallVllm() {
+    try {
+      await installVllm()
+      watchLocalRuntimeJobs()
+    } catch (err) {
+      notifyError(err, copy.installFailed)
+    }
+  }
+
+  async function handleVllmCheckUpdate() {
+    setCheckingUpdate(true)
+
+    try {
+      const result = await checkVllmUpdate()
+      refresh()
+      notify({
+        durationMs: 3_500,
+        kind: result.update_available ? 'info' : 'success',
+        message: result.update_available
+          ? copy.vllmUpdateAvailable(result.latest || result.configured_tag, result.installed || result.tag)
+          : copy.vllmUpToDate(result.installed || result.tag || copy.engineVllm),
+        title: copy.title
+      })
+    } catch (err) {
+      notifyError(err, copy.vllmCheckFailed)
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }
+
+  async function handleVllmUpdate() {
+    try {
+      await updateVllm()
+      watchLocalRuntimeJobs()
+    } catch (err) {
+      notifyError(err, copy.installFailed)
     }
   }
 
@@ -287,26 +485,130 @@ export function LocalModelsSettings() {
     }
   }, [jobs, navigate])
 
-  if (!status || catalog === null) {
+  const engine = engineOf(status)
+
+  if (!status || (engine === 'llamacpp' && catalog === null)) {
     return <SettingsSkeleton sections={[{ rows: 2 }, { rows: 4 }]} />
   }
 
   const rJob = runningRuntimeInstall(jobs)
   const lastError = jobs.find(j => j.status === 'error')
+  const vllmInstallJob = jobs.find(j => j.kind === 'vllm-install' && j.status === 'running')
+  const vllmSetupJob = runningQuickstart ?? vllmInstallJob ?? null
 
-  const sortedCatalog = [...catalog].sort((a, b) => fitRank(a) - fitRank(b))
+  const sortedCatalog = [...(catalog ?? [])].sort((a, b) => fitRank(a) - fitRank(b))
 
-  // ── Quickstart: the dummy-proof front door ──
-  // Until something is servable (runtime + at least one model), the pane
-  // leads with a hero that does everything in one click; the full pane
-  // stays one 'Configure…' click away. A running quickstart pins this
-  // view so its progress has a home even after a remount.
+  // ── Quickstart: failsafe front door, not the everyday switch ──
+  // Empty library, missing runtime, first install, or a running setup job.
+  // Switching models uses Use on a library row. Restore recommended setup
+  // re-runs this same one-click path without hiding the library first.
   const qJob = runningQuickstart ?? null
 
-  const needsSetup = !status.runtime_installed || status.models.length === 0
-  const heroModel = catalog.find(c => c.recommended && c.fits) ?? catalog.find(c => c.fits) ?? null
+  const libraryEmpty = engine === 'vllm' ? vllmLibraryEmpty(status) : status.models.length === 0
+  const needsSetup = !status.runtime_installed || libraryEmpty
+  const heroModel = catalog?.find(c => c.recommended && c.fits) ?? catalog?.find(c => c.fits) ?? null
 
-  if (qJob || (needsSetup && !configure && heroModel)) {
+  if (engine === 'vllm' && (vllmSetupJob || (needsSetup && !configure))) {
+    const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || copy.engineVllm
+    const vllmPhase = vllmSetupJob?.phase ?? ''
+    const vllmStageIndex = ['starting-server', 'setting-default'].includes(vllmPhase)
+      ? 2
+      : vllmPhase === 'downloading'
+        ? 1
+        : 0
+    const stages = [copy.quickstartStageEngine, copy.quickstartStageModel, copy.quickstartStageFinish]
+    const liveDetail =
+      vllmSetupJob?.detail ||
+      (vllmSetupJob?.total_bytes
+        ? copy.downloadProgress(gbLabel(vllmSetupJob.done_bytes), gbLabel(vllmSetupJob.total_bytes))
+        : null) ||
+      status.start_phase ||
+      (recommend && !recommend.feasible ? copy.vllmNotFeasible(recommend.reason) : copy.vllmInstallDetail)
+
+    return (
+      <SettingsContent>
+        <div className="flex min-h-[60dvh] items-center justify-center">
+          <div className="w-full max-w-md text-center">
+            <div className="mx-auto mb-5 flex size-14 items-center justify-center rounded-2xl bg-primary/10">
+              {vllmSetupJob ? (
+                <Loader2 className="size-7 animate-spin text-primary" />
+              ) : (
+                <Cpu className="size-7 text-primary" />
+              )}
+            </div>
+
+            <h2 className="text-lg font-semibold text-foreground">{recModel}</h2>
+            <p className="mt-2 text-[0.8rem] leading-5 text-muted-foreground">{liveDetail}</p>
+
+            <div className="mt-5 flex justify-center">
+              <EngineSelect disabled={engineBusy || Boolean(vllmSetupJob)} engine={engine} onChange={next => void handleEngineChange(next)} />
+            </div>
+
+            {vllmSetupJob ? (
+              <>
+                <div className="mt-5">
+                  <ProgressBar percent={vllmSetupJob.percent} />
+                </div>
+                {vllmSetupJob.kind === 'quickstart' && (
+                  <div className="mt-5 flex items-center justify-center gap-5">
+                    {stages.map((label, i) => (
+                      <span
+                        className={cn(
+                          'inline-flex items-center gap-1.5 text-[0.72rem]',
+                          i < vllmStageIndex && 'text-(--ui-text-tertiary)',
+                          i === vllmStageIndex && 'font-medium text-foreground',
+                          i > vllmStageIndex && 'text-(--ui-text-tertiary) opacity-60'
+                        )}
+                        key={label}
+                      >
+                        {i < vllmStageIndex ? (
+                          <CheckCircle2 className="size-3.5 text-primary" />
+                        ) : i === vllmStageIndex ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <span className="size-1.5 rounded-full bg-current" />
+                        )}
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="mt-6 flex items-center justify-center gap-3">
+                <Button
+                  onClick={() => setConfigure(true)}
+                  size="sm"
+                  variant="outline"
+                >
+                  {copy.quickstartConfigure}
+                </Button>
+                <Button onClick={() => void handleQuickstart()} size="default">
+                  <Zap />
+                  {copy.quickstartAction}
+                </Button>
+              </div>
+            )}
+
+            {(status.occupancy_message || status.last_error || lastError?.error) && (
+              <p className="mt-4 text-[0.75rem] text-destructive">
+                {status.occupancy_message ?? status.last_error ?? lastError?.error}
+              </p>
+            )}
+          </div>
+        </div>
+        {!vllmSetupJob && (
+          <VllmModelsPane
+            {...vllmServedIdentity(status)}
+            models={vllmModels ?? []}
+            onChanged={refresh}
+          />
+        )}
+      </SettingsContent>
+    )
+  }
+
+  if (engine === 'llamacpp' && (qJob || (needsSetup && !configure && heroModel))) {
     // Stage rail derived from the job phase: engine -> model -> finish.
     const phase = qJob?.phase ?? ''
 
@@ -380,6 +682,10 @@ export function LocalModelsSettings() {
                     : copy.quickstartDetail(heroModel.display_name, heroModel.size_label)}
                 </p>
 
+                <div className="mt-5 flex justify-center">
+                  <EngineSelect disabled={engineBusy} engine={engine} onChange={next => void handleEngineChange(next)} />
+                </div>
+
                 <div className="mt-6 flex items-center justify-center gap-3">
                   <Button onClick={() => setConfigure(true)} size="sm" variant="outline">
                     {copy.quickstartConfigure}
@@ -404,23 +710,130 @@ export function LocalModelsSettings() {
   // Up to date = the authority (status) says the configured tag is what's
   // serving. Shown whenever true — not only right after an update.
   const updateApplied = status.runtime_installed && !status.update_available && status.tag === status.configured_tag
+  const vllmVersion = (status.vllm_version || (engine === 'vllm' ? status.tag : '') || '').trim()
+  const vllmChip =
+    engine === 'vllm'
+      ? vllmEngineChip({ copy, jobs, serverBusy, status })
+      : status.runtime_installed
+        ? {
+            label: status.server_running ? copy.serverRunning : copy.runtimeReady(status.runtime_backend ?? ''),
+            tone: 'primary' as const
+          }
+        : null
+  const vllmPower = engine === 'vllm' ? vllmEnginePower({ copy, jobs, serverBusy, status }) : null
 
   return (
     <SettingsContent>
       {/* ── Runtime ── */}
       <SettingsSection
-        aside={
-          status.runtime_installed ? (
-            <Pill tone="primary">
-              {status.server_running ? copy.serverRunning : copy.runtimeReady(status.runtime_backend ?? '')}
-            </Pill>
-          ) : undefined
-        }
+        aside={vllmChip ? <Pill tone={vllmChip.tone}>{vllmChip.label}</Pill> : undefined}
         icon={Zap}
-        meta={status.tag}
+        meta={engine === 'vllm' ? (vllmVersion ? `${copy.engineVllm} ${vllmVersion}` : copy.engineVllm) : status.tag}
         title={copy.runtimeTitle}
       >
-        {status.runtime_installed ? (
+        <div className="mb-3">
+          <EngineSelect disabled={engineBusy} engine={engine} onChange={next => void handleEngineChange(next)} />
+        </div>
+
+        {engine === 'vllm' ? (
+          <>
+            {status.runtime_installed && status.tag && (
+              <ListRow
+                action={
+                  <div className="flex items-center justify-end gap-2">
+                    <Button disabled={checkingUpdate} onClick={() => void handleVllmCheckUpdate()} size="sm" variant="outline">
+                      {checkingUpdate ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                      {checkingUpdate ? copy.vllmCheckingUpdate : copy.vllmCheckUpdate}
+                    </Button>
+                    {status.update_available && !rJob && (
+                      <Button onClick={() => void handleVllmUpdate()} size="sm">
+                        <Download />
+                        {copy.updateAction}
+                      </Button>
+                    )}
+                    <Button
+                      className={cn((serverBusy || vllmPower?.action == null) && '[&_svg]:animate-spin')}
+                      disabled={vllmPower?.disabled ?? serverBusy}
+                      onClick={() => {
+                        if (vllmPower?.action) {
+                          void handleServer(vllmPower.action)
+                        }
+                      }}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {serverBusy || vllmPower?.action == null ? (
+                        <Loader2 />
+                      ) : vllmPower.action === 'stop' ? (
+                        <StopFilled />
+                      ) : (
+                        <Zap />
+                      )}
+                      {vllmPower?.label ?? copy.startServer}
+                    </Button>
+                  </div>
+                }
+                description={
+                  status.update_available
+                    ? copy.vllmUpdateAvailable(status.configured_tag, status.tag)
+                    : undefined
+                }
+                title={
+                  <span className="inline-flex items-center gap-2">
+                    {checkingUpdate ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : status.update_available ? (
+                      <Download className="size-4" />
+                    ) : (
+                      <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
+                    )}
+                    {checkingUpdate
+                      ? copy.vllmCheckingUpdate
+                      : status.update_available
+                        ? copy.updateTitle
+                        : copy.upToDateTitle}
+                  </span>
+                }
+              />
+            )}
+            {status.runtime_installed && (
+              <div className="mt-1 flex justify-start">
+                <Button className="h-auto px-0" onClick={() => void handleQuickstart()} size="sm" variant="ghost">
+                  {copy.recommendedSetup}
+                </Button>
+              </div>
+            )}
+            {!status.runtime_installed && !rJob && (
+              <ListRow
+                action={
+                  <Button onClick={() => void handleInstallVllm()} size="sm">
+                    <Download />
+                    {copy.installAction}
+                  </Button>
+                }
+                description={copy.vllmInstallDetail}
+                title={copy.vllmInstallTitle}
+              />
+            )}
+            {rJob && (
+              <ListRow
+                below={<ProgressBar percent={rJob.percent} />}
+                description={rJob.detail || status.start_phase || (rJob.kind === 'vllm-update' ? copy.updating : copy.installing)}
+                title={
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="size-3.5 animate-spin" />
+                    {rJob.kind === 'vllm-update' ? copy.updating : copy.installing}
+                  </span>
+                }
+              />
+            )}
+            {(status.occupancy_message || status.last_error) && (
+              <p className="text-[0.75rem] text-destructive">
+                {status.occupancy_message ?? status.last_error}
+              </p>
+            )}
+          </>
+        ) : status.runtime_installed ? (
           <ListRow
             action={
               status.server_running ? (
@@ -478,7 +891,7 @@ export function LocalModelsSettings() {
           />
         )}
 
-        {status.update_available && !rJob && (
+        {engine === 'llamacpp' && status.update_available && !rJob && (
           <ListRow
             action={
               <Button onClick={() => void handleInstallRuntime()} size="sm">
@@ -491,7 +904,7 @@ export function LocalModelsSettings() {
           />
         )}
 
-        {rJob && status.runtime_installed && (
+        {engine === 'llamacpp' && rJob && status.runtime_installed && (
           <ListRow
             below={<ProgressBar percent={rJob.percent} />}
             description={rJob.detail || copy.updating}
@@ -504,7 +917,7 @@ export function LocalModelsSettings() {
           />
         )}
 
-        {updateApplied && (
+        {engine === 'llamacpp' && updateApplied && (
           <ListRow
             description={copy.upToDateDetail(status.tag, status.runtime_backend ?? 'cpu')}
             title={
@@ -516,32 +929,15 @@ export function LocalModelsSettings() {
           />
         )}
 
-        {lastError?.kind === 'runtime-install' && <p className="text-[0.75rem] text-destructive">{lastError.error}</p>}
+        {(lastError?.kind === 'runtime-install' || lastError?.kind === 'vllm-install' || lastError?.kind === 'vllm-update') && (
+          <p className="text-[0.75rem] text-destructive">{lastError.error}</p>
+        )}
       </SettingsSection>
 
       {/* ── This machine ── */}
       <SettingsSection icon={Monitor} title={copy.hardwareTitle}>
         {hardware ? (
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 py-1 text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
-            {hardware.gpu_name && (
-              <span className="inline-flex items-center gap-1.5">
-                <Zap className="size-3.5" />
-                {hardware.gpu_name}
-              </span>
-            )}
-
-            <span className="inline-flex items-center gap-1.5">
-              <Cpu className="size-3.5" />
-              {copy.vram(gbLabel(hardware.vram_total_bytes))}
-            </span>
-
-            <span className="inline-flex items-center gap-1.5">
-              <Package className="size-3.5" />
-              {copy.ram(gbLabel(hardware.ram_total_bytes))}
-            </span>
-
-            {hardware.uma && <Pill>{copy.unifiedMemory}</Pill>}
-          </div>
+          <LocalModelsMachineStats engine={engine} hardware={hardware} status={status} />
         ) : (
           <p className="py-1 text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
             {copy.hardwareLoading}
@@ -549,8 +945,9 @@ export function LocalModelsSettings() {
         )}
       </SettingsSection>
 
-      {/* ── Models ── */}
-      <SettingsSection icon={Download} meta={`${catalog.length}`} title={copy.modelsTitle}>
+      {/* ── Models (llama.cpp GGUF only) ── */}
+      {engine === 'llamacpp' && (
+      <SettingsSection icon={Download} meta={`${(catalog ?? []).length}`} title={copy.modelsTitle}>
         <div className="grid gap-1">
           {sortedCatalog.map(model => {
             const dJob = runningDownloadFor(jobs, model.id)
@@ -833,8 +1230,16 @@ export function LocalModelsSettings() {
 
         {lastError?.kind === 'model-download' && <p className="text-[0.75rem] text-destructive">{lastError.error}</p>}
       </SettingsSection>
+      )}
 
-      <BrowseSection onChanged={refresh} />
+      {engine === 'llamacpp' && <BrowseSection onChanged={refresh} />}
+      {engine === 'vllm' && (
+        <VllmModelsPane
+          {...vllmServedIdentity(status)}
+          models={vllmModels ?? []}
+          onChanged={refresh}
+        />
+      )}
     </SettingsContent>
   )
 }

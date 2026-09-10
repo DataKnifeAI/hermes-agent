@@ -35,6 +35,7 @@ from hermes_cli.local_runtime import (
     load_progress, presets, supervisor,
 )
 from hermes_cli.local_runtime.endpoint import _state_endpoint
+from hermes_cli.web_routers import local_models_engine as engine_mod
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,18 @@ class SideloadBody(BaseModel):
     path: str                   # absolute path to a .gguf on this machine
 
 
+class EngineBody(BaseModel):
+    engine: str                 # "llamacpp" | "vllm"
+
+
+class VllmModelBody(BaseModel):
+    model: str                  # Hugging Face org/name id
+
+
+class VllmUseBody(BaseModel):
+    model: str | None = None    # optional HF id; download-if-needed then start
+
+
 def _human_gb(n: int | float) -> str:
     return f"{n / (1 << 30):.1f} GB"
 
@@ -96,10 +109,22 @@ def _k_label(tokens: int) -> str:
 
 @contextlib.contextmanager
 def _http_error(status: int, prefix: str = ""):
-    """Map any exception to ``HTTPException(status, f"{prefix}{exc}")``."""
+    """Map unexpected exceptions to ``HTTPException(status, f"{prefix}{exc}")``.
+
+    ``HTTPException`` (llama-only 400, gated 400) must keep its own status
+    and detail — wrapping it produced a raw ``400: Bad Request`` toast.
+    """
     try:
         yield
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
+        from hermes_cli.vllm_runtime.inventory import hf_http_status_and_detail
+
+        mapped = hf_http_status_and_detail(exc)
+        if mapped and mapped[0] < 500:
+            detail = f"{prefix}{mapped[1]}" if prefix else mapped[1]
+            raise HTTPException(status_code=mapped[0], detail=detail) from exc
         raise HTTPException(status_code=status, detail=f"{prefix}{exc}") from exc
 
 
@@ -161,8 +186,10 @@ def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *, fail
         except Exception as exc:  # noqa: BLE001
             if fail_msg:
                 logger.warning(fail_msg, exc)
+            from hermes_cli.vllm_runtime.inventory import job_failure_detail
+
             job["status"] = "error"
-            job["error"] = str(exc)
+            job["error"] = job_failure_detail(exc)
         finally:
             if on_exit is not None:
                 on_exit()
@@ -455,8 +482,11 @@ def _active_llamacpp_model_id() -> str | None:
 
 @router.get("/api/local-models/status")
 def local_models_status():
-    """Cheap, immediate: config state + installed runtime + staged models + supervisor state (GPU facts live
+    """Cheap, immediate: config state + the *selected* engine's server (GPU facts live
     in /hardware). Sync def on purpose: blocking urlopen/scans run in the threadpool."""
+    config = _load_config()
+    if engine_mod.configured_engine(config) == "vllm":
+        return engine_mod.vllm_status_fields(config)
     section = _runtime_section()
     configured_tag = section.get("tag") or binaries.default_tag()
     have = binaries.installed_tags()
@@ -470,6 +500,7 @@ def local_models_status():
     loaded, placement = ({}, {}) if running is None else _quiet(
         lambda: _loaded_models(running), ({}, {}), warn="loaded-models read failed: %r")
     return {
+        "engine": "llamacpp",
         "enabled": bool(section.get("enabled")), "tag": tag, "configured_tag": configured_tag,
         # Update pending = engine in use (enabled + something installed) and the configured tag
         # (pinned or release default) isn't on disk. The download is a button click, never automatic.
@@ -483,34 +514,120 @@ def local_models_status():
         "placement": placement,
         "models": [_staged_row(gguf) for gguf in bootstrap.staged_models()] if mdir.exists() else [],
         "models_dir": str(mdir),
+        "models_dir_display": engine_mod.display_user_path(mdir),
+        "venv_ready": False,
+        "vllm_version": None,
+        "occupancy": [],
+        "occupancy_message": None,
+        "served_model_name": None,
+        "start_phase": None,
+        "last_error": None,
     }
 
 
 # ── hardware: what this machine can do ───────────────────────
+def _mib_to_bytes(raw: str) -> int | None:
+    token = (raw or "").split()[0].strip()
+    if not token or token.lower() in {"n/a", "[n/a]"}:
+        return None
+    try:
+        return int(float(token)) << 20
+    except ValueError:
+        return None
+
+
 def _nvidia_smi_facts() -> dict:
-    """GPU identity + live utilization (NVIDIA only; other vendors degrade to {} and the UI hides those readouts)."""
+    """GPU identity + live VRAM (NVIDIA only; other vendors degrade to {} and the UI hides those readouts)."""
     smi_exe = hardware._nvidia_smi_path()
     if not smi_exe:
         return {}
-    smi = subprocess.run([smi_exe, "--query-gpu=name,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
-                         capture_output=True, text=True, timeout=5)
-    if smi.returncode != 0 or not smi.stdout.strip():
+    queries = (
+        "name,utilization.gpu,memory.used,memory.total,memory.free,driver_version,compute_cap",
+        "name,utilization.gpu,memory.used,memory.total,memory.free,driver_version",
+        "name,utilization.gpu,memory.used",
+    )
+    line = ""
+    for query in queries:
+        smi = subprocess.run(
+            [smi_exe, f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5)
+        if smi.returncode == 0 and smi.stdout.strip():
+            line = smi.stdout.strip().splitlines()[0]
+            break
+    if not line:
         return {}
-    name, util, used_mib = (x.strip() for x in smi.stdout.strip().splitlines()[0].split(","))
-    return dict(gpu_name=name, gpu_util_percent=int(util), vram_used_bytes=int(used_mib) << 20)
+    parts = [x.strip() for x in line.split(",")]
+    if len(parts) < 3:
+        return {}
+    name, util, used_mib = parts[0], parts[1], parts[2]
+    total_mib = parts[3] if len(parts) > 3 else ""
+    free_mib = parts[4] if len(parts) > 4 else ""
+    driver = parts[5] if len(parts) > 5 else ""
+    compute = parts[6] if len(parts) > 6 else ""
+    used = _mib_to_bytes(used_mib)
+    total = _mib_to_bytes(total_mib)
+    free = _mib_to_bytes(free_mib)
+    try:
+        util_n = int(float(util))
+    except ValueError:
+        util_n = None
+    return {
+        "gpu_name": name or None,
+        "gpu_util_percent": util_n,
+        "vram_used_bytes": used,
+        "vram_free_bytes": free,
+        "gpu_driver_version": driver or None,
+        "cuda_compute_capability": compute or None,
+        # Prefer the live smi total when the budget probe and smi disagree on
+        # rounding — used/free are from this same row so the ratio stays honest.
+        "vram_total_bytes": total if total else None,
+    }
 
 
 @router.get("/api/local-models/hardware")
 def local_models_hardware():
-    """The budget as plain facts, polled by the pane and statusbar. Sync def: shells out to nvidia-smi — threadpool."""
+    """Machine stats for both engines: live VRAM, cache path/size, disk free.
+
+    Polled by the pane and statusbar. Sync def: shells out to nvidia-smi — threadpool.
+    """
     budget = hardware.probe_budget()
-    ram_total, ram_avail = hardware._ram_bytes()
+    ram_total, ram_used, ram_avail = hardware._ram_stats()
+    if not ram_total:
+        ram_used = None
+    engine = engine_mod.configured_engine(_load_config())
     out = {
         "uma": budget.uma, "vram_total_bytes": budget.total_device_bytes, "vram_usable_bytes": budget.usable_vram_bytes,
-        "ram_total_bytes": ram_total, "ram_available_bytes": ram_avail, "vram_label": _human_gb(budget.total_device_bytes),
+        "ram_total_bytes": ram_total, "ram_available_bytes": ram_avail, "ram_used_bytes": ram_used,
+        "vram_label": _human_gb(budget.total_device_bytes),
         "gpu_name": None, "gpu_util_percent": None, "vram_used_bytes": None,
+        "vram_free_bytes": None, "vram_engine_bytes": None, "vram_other_bytes": None,
+        "gpu_driver_version": None, "cuda_compute_capability": None,
+        "occupancy_foreign": False, "ctx_64k_feasible": None, "vllm_version": None,
     }
-    out.update(_quiet(_nvidia_smi_facts, {}))
+    smi = _quiet(_nvidia_smi_facts, {})
+    smi_total = smi.pop("vram_total_bytes", None)
+    if smi_total:
+        # Live smi total wins over the planning-budget figure so used ≤ total
+        # is a same-source invariant the UI can trust.
+        out["vram_total_bytes"] = smi_total
+        out["vram_label"] = _human_gb(smi_total)
+    out.update(smi)
+    out.update(engine_mod.cache_and_runtime_fields(engine))
+    out["ctx_64k_feasible"] = engine_mod.ctx_64k_feasible(out.get("vram_total_bytes"))
+    from hermes_cli.vllm_runtime.occupancy import gpu_vram_attribution
+
+    out.update(_quiet(gpu_vram_attribution, {
+        "vram_engine_bytes": None, "vram_other_bytes": None, "occupancy_foreign": False,
+    }))
+    if engine == "vllm":
+        from hermes_cli.vllm_runtime.venv import installed_vllm_version
+
+        out["vllm_version"] = (installed_vllm_version() or "").strip() or None
+        # Same starting/ready/stopped rule as /status — VRAM stays live smi.
+        snap = engine_mod.vllm_engine_snapshot(_load_config(), with_occupancy=False)
+        out["engine_state"] = snap["engine_state"]
+        out["pid"] = snap["pid"]
+        out["start_phase"] = snap["start_phase"]
     return out
 
 
@@ -583,6 +700,7 @@ def local_models_catalog():
     get. The row advertises the BEST build for this machine (highest quality fully on GPU at the 64K floor;
     else the smallest that works, spilled and priced). No entry is hidden; unaffordable models show WHY.
     Sync def: blocking I/O -> threadpool."""
+    engine_mod.refuse_llama_only()
     # Serve the in-memory catalog; a TTL-gated background fetch lands new entries for the next call
     # (day-0 models without an app release).
     catalog.refresh_catalog_soon()
@@ -646,6 +764,7 @@ def _restart_on_new_tag(job: Dict[str, Any], tag: str, previous: list) -> bool:
 
 @router.post("/api/local-models/runtime/install")
 async def local_models_runtime_install(body: RuntimeInstallBody):
+    engine_mod.refuse_llama_only()
     tag, backend = _runtime_target(body.backend)
     plan = _resolve_assets_or_400(tag, backend)
     job = _job("runtime-install", f"llama.cpp {tag} ({backend})")
@@ -684,6 +803,7 @@ def _download_target(model_id: str):
 @router.post("/api/local-models/download")
 async def local_models_download(body: ModelDownloadBody):
     """Accepts either a family id (downloads this machine's selected variant) or an exact variant model_id."""
+    engine_mod.refuse_llama_only()
     entry, variant = _download_target(body.model_id)
     if variant.model_id in bootstrap.staged_model_ids():
         return {"job_id": None, "already_downloaded": True, "model_id": variant.model_id}
@@ -699,6 +819,7 @@ async def local_models_download(body: ModelDownloadBody):
 async def local_models_delete(model_id: str):
     """Remove every split part plus private assets, then bounce the router off the request thread (deleting
     the active file mid-serve is exactly the stale state the refresh exists for)."""
+    engine_mod.refuse_llama_only()
     files = _variant_files_on_disk(model_id)
     if not files:
         raise HTTPException(status_code=404, detail="model not found")
@@ -732,7 +853,27 @@ async def local_models_quickstart(body: QuickstartBody):
     """One job: install the runtime (if missing), download this machine's build of the recommended model (if
     missing), make it the default. Each leg is the same code the individual routes run, so 'Configure' and
     quickstart can never disagree. Preflight rejects (no servable entry, engine too old) fail the POST
-    synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress."""
+    synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress.
+
+    Dispatches on ``local_runtime.engine``: vLLM is recommend → isolated venv →
+    HF weights → supervisor → provider, not the GGUF llama path.
+    """
+    if engine_mod.configured_engine() == "vllm":
+        plan = engine_mod.vllm_quickstart_plan(body.model_id)
+        if not _QUICKSTART_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Setup is already running")
+        job = _job("quickstart", plan["display_name"], model_id=plan["model"])
+
+        def _run_vllm():
+            engine_mod.run_vllm_quickstart(job, plan)
+
+        _spawn_job(job, "lr-quickstart", _run_vllm, fail_msg="quickstart failed: %s",
+                   on_exit=_QUICKSTART_LOCK.release)
+        return {"job_id": job["job_id"], "model_id": plan["model"],
+                "display_name": plan["display_name"], "needs_runtime": plan["needs_runtime"],
+                "needs_download": plan["needs_download"], "download_bytes": 0}
+
+    engine_mod.refuse_llama_only()
     entry, variant = _quickstart_target(body, hardware.probe_budget(planning=True))
     tag, backend = _runtime_target()
     need_runtime = not binaries.installed_tags()
@@ -791,18 +932,22 @@ def _start_server() -> None:
     _start_local_server(_set_runtime_enabled(True), _SERVER_START_FAILED)
 
 
-_SERVER_ACTIONS = {"stop": _stop_server, "start": _start_server}
+_SERVER_ACTIONS = {"stop": engine_mod.stop_active_engine, "start": engine_mod.start_active_engine}
 
 
 @router.post("/api/local-models/server")
 async def local_models_server(body: ServerActionBody):
-    """Turn the local engine off (stop the server, free ALL GPU memory, disable auto-start) or back on. Unlike
-    per-model eject the off switch IS durable: the user said off, so boots stay off until they say on."""
+    """Turn the selected local engine off or on. Stops the other supervisor first on start.
+    OccupyingLlmError is returned to the client — never swallowed."""
     action = (body.action or "").strip().lower()
     if action not in _SERVER_ACTIONS:
         raise HTTPException(status_code=400, detail="action must be 'stop' or 'start'")
-    with _http_error(502):
+    if action == "start":
+        engine_mod.refuse_duplicate_vllm_start()
+    try:
         await asyncio.to_thread(_SERVER_ACTIONS[action])
+    except Exception as exc:  # noqa: BLE001
+        engine_mod.raise_engine_http(exc)
     return {"ok": True, "action": action}
 
 
@@ -811,6 +956,7 @@ async def local_models_server(body: ServerActionBody):
 def local_models_eject(body: ModelEjectBody):
     """Free a loaded model's GPU memory now; only demand (the next message) reloads it — residency v2 has no
     automatic loading anywhere. Sync def: the fallback path blocks on a 120s urlopen — threadpool, never the loop."""
+    engine_mod.refuse_llama_only()
     sup = bootstrap.get_supervisor()
     if sup is not None:
         with _http_error(502):
@@ -830,6 +976,7 @@ async def local_models_activate(body: ModelActivateBody):
     """Make a downloaded model the default for new chats: a config write via the same machinery as
     /api/model/set plus making sure the server is up. NO model loading (residency v2: models load on first
     inference; an empty router costs nothing). Kept as a job for UI continuity."""
+    engine_mod.refuse_llama_only()
     # Split variants stage under their first part — resolve like the other routes.
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")
@@ -869,6 +1016,7 @@ async def local_models_job(job_id: str):
 @router.get("/api/local-models/search")
 async def local_models_search(q: str, limit: int = 20):
     """Full-text HF search over GGUF models — the firehose behind the curated catalog; fit pills come from /search/files."""
+    engine_mod.refuse_llama_only()
     if not q.strip():
         return {"hits": []}
     with _http_error(502, "Hugging Face search unavailable: "):
@@ -879,6 +1027,7 @@ async def local_models_search(q: str, limit: int = 20):
 async def local_models_search_files(repo: str):
     """Servable GGUFs in one HF repo with a rough pre-download fit verdict per quant (file size + conservative
     fill-ins; the GGUF header refines it)."""
+    engine_mod.refuse_llama_only()
     with _http_error(502, f"Could not list {repo}: "):
         groups = await run_in_threadpool(hf_browse.priced_repo_files, repo, hardware.probe_budget(planning=True))
     return {"files": [dict(g.__dict__, paths=list(g.paths)) for g in groups]}
@@ -889,6 +1038,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
     """Download an arbitrary HF GGUF into the managed models dir. Once landed it is a normal staged model (the
     post-download bounce regenerates presets from its real header); with no catalog entry it serves
     'unverified', capabilities answered from the live server only."""
+    engine_mod.refuse_llama_only()
     paths = [p for p in (body.paths or []) if p.lower().endswith(".gguf")]
     if not paths:
         raise HTTPException(status_code=422, detail="no .gguf files given")
@@ -915,6 +1065,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
 async def local_models_sideload(body: SideloadBody):
     """Register a GGUF already on this machine: link it into the managed models dir (copy only when linking is
     impossible) and bounce the router. The original stays put; delete-from-Hermes removes only our link."""
+    engine_mod.refuse_llama_only()
     src = Path(body.path)
     if not src.is_file() or src.suffix.lower() != ".gguf":
         raise HTTPException(status_code=422, detail="Pick a .gguf model file")
@@ -931,3 +1082,112 @@ async def local_models_sideload(body: SideloadBody):
             await run_in_threadpool(shutil.copyfile, src, dest)
     _refresh_runtime("post-sideload runtime refresh skipped")
     return {"ok": True, "model_id": dest.stem}
+
+
+# ── engine switch + vLLM (Install → Use) ─────────────────────
+@router.post("/api/local-models/engine")
+def local_models_set_engine(body: EngineBody):
+    """Persist which engine pane is configured. Does not stop a running supervisor."""
+    return engine_mod.set_engine(body.engine)
+
+
+@router.get("/api/local-models/vllm/recommend")
+def local_models_vllm_recommend():
+    """VRAM-tier pick for managed vLLM (same helper as Desktop recommend)."""
+    return engine_mod.recommend_payload()
+
+
+@router.post("/api/local-models/vllm/install")
+async def local_models_vllm_install():
+    """Isolated venv + wheel — same job pattern as llama runtime install."""
+    job = _job("vllm-install", "vLLM")
+
+    def _run():
+        _step(job, "installing-venv", "Installing vLLM")
+        engine_mod.apply_recommend_and_install(job)
+        _finish(job, "vLLM is ready to start")
+
+    _spawn_job(job, "lr-vllm-install", _run, fail_msg="vLLM install failed: %s")
+    return {"job_id": job["job_id"]}
+
+
+@router.post("/api/local-models/vllm/use")
+async def local_models_vllm_use(body: VllmUseBody | None = None):
+    """Activate a cached HF id (or start the configured one). Never downloads.
+
+    Passing ``model`` requires hub-cached weights — Download first, same as
+    llama.cpp Use. No body is start-only for whatever is already configured.
+    """
+    hid = ((body.model if body else None) or "").strip() or None
+    try:
+        if hid:
+            result = await asyncio.to_thread(engine_mod.use_cached_vllm, hid)
+        else:
+            await asyncio.to_thread(engine_mod.start_active_engine)
+            result = engine_mod.activate_vllm()
+            result["needs_download"] = False
+            result["already_downloaded"] = True
+    except Exception as exc:  # noqa: BLE001
+        engine_mod.raise_engine_http(exc)
+    return result
+
+
+@router.post("/api/local-models/vllm/download")
+async def local_models_vllm_download(body: VllmModelBody):
+    """Prefetch HF weights into the hub cache. Same ``model-download`` job the pane polls."""
+    hid = engine_mod.setup_download_model((body.model or "").strip())
+    if not hid or "/" not in hid:
+        raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
+    if engine_mod.repo_is_cached(hid):
+        return {"job_id": None, "already_downloaded": True, "model": hid}
+    job = _job("model-download", hid, model_id=hid)
+
+    def _fetch():
+        engine_mod.download_vllm_weights(hid, job)
+
+    _spawn_job(job, "lr-vllm-download", _fetch, download_label=hid)
+    return {"job_id": job["job_id"], "already_downloaded": False, "model": hid}
+
+
+@router.get("/api/local-models/vllm/models")
+def local_models_vllm_models():
+    """Curated HF ids plus cached hub weights — the vLLM inventory, not GGUF."""
+    return engine_mod.vllm_models_payload()
+
+
+@router.get("/api/local-models/vllm/search")
+async def local_models_vllm_search(q: str, limit: int = 20):
+    """HF text-generation search (safetensors / AWQ), not the GGUF firehose."""
+    return await run_in_threadpool(engine_mod.search_vllm_models, q, limit)
+
+
+@router.post("/api/local-models/vllm/set")
+def local_models_vllm_set(body: VllmModelBody):
+    """Make an HF id the configured vLLM model. Does not start or stop a server."""
+    return engine_mod.set_vllm_model(body.model)
+
+
+@router.delete("/api/local-models/vllm/models/{model_id:path}")
+def local_models_vllm_delete(model_id: str):
+    """Remove cached HF weights for one org/name id."""
+    return engine_mod.delete_vllm_model(urllib.parse.unquote(model_id))
+
+
+@router.post("/api/local-models/vllm/check-update")
+async def local_models_vllm_check_update():
+    """Installed isolated-venv version vs PyPI. Never probes Hermes ``sys.prefix``."""
+    return await run_in_threadpool(engine_mod.check_vllm_update)
+
+
+@router.post("/api/local-models/vllm/update")
+async def local_models_vllm_update():
+    """Upgrade ``vllm`` inside the isolated venv (uv/pip). Same job shape as install."""
+    job = _job("vllm-update", "vLLM")
+
+    def _run():
+        _step(job, "updating-venv", "Updating vLLM")
+        engine_mod.apply_vllm_update()
+        _finish(job, "vLLM is up to date")
+
+    _spawn_job(job, "lr-vllm-update", _run, fail_msg="vLLM update failed: %s")
+    return {"job_id": job["job_id"]}

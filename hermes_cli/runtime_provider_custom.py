@@ -17,6 +17,7 @@ from utils import base_url_hostname
 logger = logging.getLogger("hermes_cli.runtime_provider")
 
 _LLAMACPP_ALIASES = ("llamacpp", "llama.cpp", "llama-cpp")
+_VLLM_ALIASES = ("vllm",)
 
 
 def _rp():
@@ -402,6 +403,62 @@ def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optiona
                      "model.")
 
 
+def _configured_vllm_url(rp) -> str:
+    """``model.base_url`` or ``providers.vllm`` — used to leave a remote GPU-box URL alone."""
+    try:
+        cfg = rp.load_config()
+    except Exception:  # noqa: BLE001
+        return ""
+    model = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+    url = _clean(model.get("base_url", ""))
+    if url:
+        return url
+    providers = cfg.get("providers")
+    entry = providers.get("vllm") if isinstance(providers, dict) else None
+    if isinstance(entry, dict):
+        return _clean(_entry_url(entry))
+    return ""
+
+
+def _resolve_vllm_runtime(requested_provider: str, explicit_api_key: Optional[str]) -> Dict[str, Any]:
+    """Managed vLLM runtime, or a typed occupancy / server-off error — never OpenRouter.
+
+    Reachability is the credential (same as llamacpp). ``OccupyingLlmError`` is not
+    caught: the chat path must show the detector's stop message. A remote
+    ``model.base_url`` / ``providers.vllm`` URL is returned as-is (no local boot).
+    """
+    from hermes_cli.vllm_runtime.endpoint import is_loopback_url, resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+
+    rp = _rp()
+    configured = _configured_vllm_url(rp)
+    if configured and not is_loopback_url(configured):
+        return rp._runtime(
+            "custom", "chat_completions", configured.rstrip("/"),
+            (explicit_api_key or "").strip() or "no-key-required",
+            source="custom_provider:vllm", requested_provider=requested_provider)
+
+    endpoint = resolve_vllm_endpoint()
+    if endpoint:
+        return rp._runtime(
+            "custom", "chat_completions", endpoint["base_url"],
+            (explicit_api_key or "").strip() or endpoint.get("api_key") or "no-key-required",
+            source="local-runtime", requested_provider=requested_provider)
+    try:
+        section = rp.load_config().get("local_runtime") or {}
+        enabled = bool(section.get("enabled"))
+    except Exception:  # noqa: BLE001
+        enabled = False
+    if enabled:
+        require_gpu_free()
+        raise ValueError("The local model server isn't running. It may still be "
+                         "starting — try again in a moment, or check Settings → "
+                         "Providers → Local models.")
+    raise ValueError("The local model server is turned off. Turn it back on in "
+                     "Settings → Providers → Local models, or switch to another "
+                     "model.")
+
+
 def _custom_runtime(rp, base_url: str, api_key: Any, api_mode: Optional[str], **extra: Any) -> Dict[str, Any]:
     """``custom`` runtime dict with URL-detected api_mode fallback and the no-auth placeholder."""
     return rp._runtime("custom", api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions", base_url,
@@ -460,9 +517,19 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     requested_norm = (requested_provider or "").strip().lower()
     if requested_norm in _LLAMACPP_ALIASES and not explicit_base_url:
         return _resolve_llamacpp_runtime(requested_provider, explicit_api_key)
+    if requested_norm in _VLLM_ALIASES:
+        from hermes_cli.vllm_runtime.endpoint import is_loopback_url
+
+        if not explicit_base_url or is_loopback_url(explicit_base_url):
+            return _resolve_vllm_runtime(requested_provider, explicit_api_key)
     if requested_norm and requested_norm != "custom" and rp._resolves_to_custom(requested_norm):
         requested_norm = "custom"
     if requested_norm == "custom" and explicit_base_url:
+        from hermes_cli.vllm_runtime.endpoint import follow_live_managed_vllm, is_loopback_url
+
+        if is_loopback_url(explicit_base_url) and follow_live_managed_vllm(
+                explicit_base_url, target_model or ""):
+            return _resolve_vllm_runtime(requested_provider or "vllm", explicit_api_key)
         return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
     custom_provider = rp._get_named_custom_provider(requested_provider)
     if not custom_provider:

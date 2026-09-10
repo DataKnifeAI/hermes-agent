@@ -167,9 +167,41 @@ async function withRetry(makeAttempt, options: any = {}) {
   throw lastError
 }
 
+const NESTED_HTTP_ERROR = /HTTP Error (\d{3}):\s*(.*)$/i
+
+/**
+ * IPC error for a Hermes REST response. Preserves the backend status — a
+ * FastAPI 400 must not become 502. If a 5xx body nested urllib's
+ * ``HTTP Error 400: Bad Request``, unwrap to that 4xx + FastAPI detail.
+ */
+function httpErrorFromBackendResponse(statusCode, text, statusMessage) {
+  let status = Number(statusCode)
+  if (!Number.isInteger(status) || status < 100) {
+    status = 500
+  }
+
+  let body = String(text || '').trim() || String(statusMessage || '')
+  const nested = body.match(/"detail"\s*:\s*"((?:\\.|[^"\\])*)"/)
+  const nestedText = nested ? nested[1].replace(/\\"/g, '"') : ''
+  const inner = nestedText.match(NESTED_HTTP_ERROR)
+
+  if (status >= 500 && inner) {
+    const innerStatus = Number(inner[1])
+    if (Number.isInteger(innerStatus) && innerStatus >= 400 && innerStatus < 500) {
+      status = innerStatus
+      body = JSON.stringify({ detail: inner[2].trim() || nestedText })
+    }
+  }
+
+  const error = new Error(`${status}: ${body}`)
+  ;(error as Error & { statusCode: number }).statusCode = status
+  return error
+}
+
 export {
   destroyKeepaliveAgents,
   downloadAgentFor,
+  httpErrorFromBackendResponse,
   isIdempotentMethod,
   isTransientTransportError,
   jsonAgentFor,

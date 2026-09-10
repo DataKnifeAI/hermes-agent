@@ -76,6 +76,72 @@ def test_hardware_plain_facts(client):
     assert data["vram_total_bytes"] >= 0
     # GPU fields are None-able (non-NVIDIA machines) but must exist.
     assert "gpu_name" in data and "gpu_util_percent" in data and "vram_used_bytes" in data
+    assert "ram_used_bytes" in data and "vllm_version" in data
+    # Used without total is useless — when both are present, used cannot exceed total.
+    if data["vram_used_bytes"] is not None:
+        assert data["vram_used_bytes"] <= data["vram_total_bytes"]
+    if data["ram_used_bytes"] is not None:
+        assert data["ram_used_bytes"] <= data["ram_total_bytes"]
+    if data["vllm_version"] is not None:
+        assert isinstance(data["vllm_version"], str) and data["vllm_version"]
+    if data.get("vram_free_bytes") is not None:
+        assert data["vram_free_bytes"] <= data["vram_total_bytes"]
+    if data.get("vram_engine_bytes") is not None and data.get("vram_other_bytes") is not None:
+        assert data["vram_engine_bytes"] + data["vram_other_bytes"] >= 0
+        if data["vram_total_bytes"]:
+            assert data["vram_engine_bytes"] + data["vram_other_bytes"] <= data["vram_total_bytes"] + (16 << 20)
+    for key in (
+        "vram_free_bytes", "vram_engine_bytes", "vram_other_bytes",
+        "gpu_driver_version", "cuda_compute_capability", "engine",
+        "models_dir", "models_dir_display", "models_storage_bytes",
+        "disk_free_bytes", "disk_total_bytes", "runtime_dir",
+        "runtime_dir_display", "occupancy_foreign", "ctx_64k_feasible",
+    ):
+        assert key in data
+    assert data["models_storage_bytes"] >= 0
+    assert data["disk_free_bytes"] >= 0
+    assert data["engine"] in ("llamacpp", "vllm")
+
+
+def test_hardware_cache_path_is_profile_aware_and_engine_specific(tmp_path, monkeypatch):
+    """llama.cpp cache is the machine models dir; vLLM is the HF hub — never a
+    hardcoded ~/.hermes string, and both live on the same hardware payload."""
+    import yaml
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    hf = tmp_path / "hf-home"
+    hf.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HF_HOME", str(hf))
+    import hermes_constants
+
+    hermes_constants._default_hermes_root_memo = None
+    from hermes_cli import web_server
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    from hermes_cli.local_runtime.bootstrap import models_dir
+    from hermes_cli.vllm_runtime.inventory import hf_hub_dir
+    from hermes_constants import get_default_hermes_root
+
+    llama = client.get("/api/local-models/hardware").json()
+    assert llama["engine"] == "llamacpp"
+    assert Path(llama["models_dir"]) == models_dir()
+    assert models_dir() == get_default_hermes_root() / "models"
+    assert "~/.hermes" not in llama["models_dir"]
+    assert Path(llama["models_dir"]).is_relative_to(get_default_hermes_root())
+
+    (home / "config.yaml").write_text(
+        yaml.dump({"local_runtime": {"enabled": True, "engine": "vllm"}}),
+        encoding="utf-8")
+    vllm = client.get("/api/local-models/hardware").json()
+    assert vllm["engine"] == "vllm"
+    assert Path(vllm["models_dir"]) == hf_hub_dir()
+    assert hf_hub_dir().is_relative_to(hf)
+    assert vllm["models_dir"] != llama["models_dir"]
+    assert vllm["models_storage_bytes"] >= 0
 
 
 # ── catalog ──────────────────────────────────────────────────
