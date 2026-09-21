@@ -32,6 +32,26 @@ _PUBLIC_FALLBACK_SERVED = "qwen2.5:7b"
 TOOL_PARSERS = frozenset({"hermes", "llama3_json", "qwen3_xml", "qwen3_coder", "mistral"})
 # Nous Hermes-4 (Qwen3 post-train, including cyankiwi AWQ-4bit) emits XML <tool_call>.
 _HERMES4_ID_RE = re.compile(r"hermes[-_ ]?4\b", re.I)
+# 2507 30B-A3B ships native 262144. Serving that (or BF16 KV) OOMs a 24 GB
+# card — ~16.9 GiB weights + 64k FP8 KV is the 4090 envelope, not 262k.
+_QWEN3_30B_A3B_2507_RE = re.compile(
+    r"qwen3-30b-a3b-(?:instruct|thinking)-2507", re.I,
+)
+
+
+def is_qwen3_30b_a3b_2507(hf_id: str) -> bool:
+    return bool(_QWEN3_30B_A3B_2507_RE.search((hf_id or "").replace("_", "-")))
+
+
+def serve_len_cap(hf_id: str) -> int | None:
+    """Hard ``--max-model-len`` ceiling. None means ``min(request, native)`` only.
+
+    Qwen3-14B/8B stay uncapped here so native 40960 still wins over the 64k
+    floor — never ALLOW_LONG.
+    """
+    if is_qwen3_30b_a3b_2507(hf_id):
+        return MIN_CONTEXT
+    return None
 
 
 @dataclass(frozen=True)

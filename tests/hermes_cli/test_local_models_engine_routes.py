@@ -1959,6 +1959,28 @@ def test_apply_compressed_tensors_awq_id_clears_quantization(tmp_path, monkeypat
     assert vllm.get("tool_call_parser") == "hermes"
 
 
+def test_apply_qwen3_30b_a3b_2507_pins_64k_fp8(tmp_path, monkeypatch):
+    """Search-hit Use must not keep leftover 262144 / empty KV on 30B-A3B-2507."""
+    _, home = _client(tmp_path, monkeypatch)
+    hid = "cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "model": "Qwen/Qwen3-14B-AWQ",
+        "max_model_len": 262144,
+        "kv_cache_dtype": "",
+        "quantization": "awq",
+    }})
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.inventory import apply_vllm_model
+    from hermes_cli.vllm_runtime.recommend import MIN_CONTEXT
+
+    apply_vllm_model(hid)
+    vllm = load_config()["local_runtime"]["vllm"]
+    assert vllm["model"] == hid
+    assert int(vllm["max_model_len"]) == MIN_CONTEXT
+    assert vllm.get("kv_cache_dtype") == "fp8"
+    assert not (vllm.get("quantization") or "").strip()
+
+
 def test_apply_hermes4_overwrites_leftover_llama3_parser(tmp_path, monkeypatch):
     """Use Hermes-4 after a Llama leftover must pin --tool-call-parser hermes."""
     _, home = _client(tmp_path, monkeypatch)

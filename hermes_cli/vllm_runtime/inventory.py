@@ -1723,6 +1723,13 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
         parser = parser_for_hf_id(hid)
         if parser:
             save_config_value("local_runtime.vllm.tool_call_parser", parser)
+        from hermes_cli.vllm_runtime.recommend import serve_len_cap
+
+        cap = serve_len_cap(hid)
+        if cap is not None:
+            # Native 262144 leftover must not ride onto 30B-A3B-2507.
+            save_config_value("local_runtime.vllm.max_model_len", cap)
+            save_config_value("local_runtime.vllm.kv_cache_dtype", "fp8")
     return {"ok": True, "model": hid, "served_model_name": served_name_for(hid)}
 
 

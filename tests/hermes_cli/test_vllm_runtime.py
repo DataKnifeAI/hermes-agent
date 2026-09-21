@@ -217,6 +217,40 @@ def test_serve_argv_yarn_in_checkpoint_reaches_64k_with_rope_args(tmp_path, monk
     assert float(rope["factor"]) * 32768 >= 65536
 
 
+def test_serve_argv_caps_qwen3_30b_a3b_2507_at_64k_fp8(tmp_path, monkeypatch):
+    """Native 262144 leftover must not over-serve a 24 GB 30B-A3B-2507."""
+    hid = "cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit"
+    _hub_quant_config(tmp_path, monkeypatch, hid, "compressed-tensors", extra={
+        "max_position_embeddings": 262144,
+        "rope_scaling": None,
+        "num_hidden_layers": 48,
+        "num_key_value_heads": 4,
+        "head_dim": 128,
+    })
+    argv = serve_argv("/opt/venv/bin/vllm", {
+        "model": hid,
+        "max_model_len": 262144,
+        "kv_cache_dtype": "bf16",
+        "port": 18435,
+    })
+    assert _argv_max_model_len(argv) == MIN_CONTEXT
+    assert argv[argv.index("--kv-cache-dtype") + 1] == "fp8"
+    assert "--rope-scaling" not in argv
+
+    thinking = "Qwen/Qwen3-30B-A3B-Thinking-2507"
+    _hub_quant_config(tmp_path, monkeypatch, thinking, "fp8", extra={
+        "max_position_embeddings": 262144,
+    })
+    empty_kv = serve_argv("/opt/venv/bin/vllm", {
+        "model": thinking,
+        "max_model_len": 65536,
+        "kv_cache_dtype": "",
+        "port": 18435,
+    })
+    assert _argv_max_model_len(empty_kv) == MIN_CONTEXT
+    assert empty_kv[empty_kv.index("--kv-cache-dtype") + 1] == "fp8"
+
+
 def test_serve_environ_drops_allow_long_max_model_len(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     env = serve_environ("/opt/venv/bin/vllm")

@@ -298,10 +298,16 @@ def serve_len_and_rope(settings: dict) -> tuple[int, dict | None]:
 
     Hermes' 64k floor is a *request*. Serve ``min(request, native)`` unless the
     checkpoint's own ``rope_scaling`` yarn dict documents a higher length —
-    never ALLOW_LONG to fake 64k over a 40960 Qwen3.
+    never ALLOW_LONG to fake 64k over a 40960 Qwen3. 30B-A3B-2507 is also
+    capped at 64k so leftover ``max_model_len: 262144`` cannot over-serve.
     """
     requested = _requested_max_model_len(settings)
     hid = configured_model_id(settings)
+    from hermes_cli.vllm_runtime.recommend import serve_len_cap
+
+    cap = serve_len_cap(hid)
+    if cap is not None:
+        requested = min(requested, cap)
     from hermes_cli.vllm_runtime.inventory import (
         cached_model_config, documented_yarn_rope, native_max_model_len)
 
@@ -345,7 +351,13 @@ def serve_argv(executable: str | Path, settings: dict) -> list[str]:
     quant = serve_quantization(settings)
     if quant:
         argv.extend(["--quantization", quant])
+    from hermes_cli.vllm_runtime.recommend import is_qwen3_30b_a3b_2507
+
     kv = str(settings.get("kv_cache_dtype") or "").strip()
+    # 30B-A3B-2507 BF16 KV is ~26 GiB with weights — leftover empty/bf16
+    # must not drop --kv-cache-dtype on a 24 GB card.
+    if is_qwen3_30b_a3b_2507(model):
+        kv = "fp8"
     if kv:
         argv.extend(["--kv-cache-dtype", kv])
     served = str(settings.get("served_model_name") or "").strip()
