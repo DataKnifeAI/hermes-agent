@@ -34,6 +34,7 @@ vi.mock('@/hermes', () => ({
   searchVllmModels: vi.fn(),
   setLocalEngine: vi.fn(),
   setLocalServer: vi.fn(),
+  setVllmDevice: vi.fn(),
   setVllmModel: vi.fn(),
   sideloadLocalModel: vi.fn(),
   updateVllm: vi.fn(),
@@ -182,6 +183,7 @@ beforeEach(() => {
     tier: '24gb'
   })
   mocked.setLocalEngine.mockResolvedValue({ engine: 'vllm', ok: true })
+  mocked.setVllmDevice.mockResolvedValue({ engine: 'vllm', ok: true, vllm_device: 'cpu' })
   mocked.installVllm.mockResolvedValue({ job_id: 'v1' })
   mocked.useVllm.mockResolvedValue({ base_url: 'http://127.0.0.1:18435/v1', ok: true })
   mocked.getVllmModels.mockResolvedValue({
@@ -730,7 +732,7 @@ describe('vLLM engine', () => {
     renderPane()
     const picker = await screen.findByLabelText(/local backend/i)
     fireEvent.click(picker)
-    fireEvent.click(await screen.findByRole('option', { name: 'vLLM (GPU)' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'vLLM' }))
 
     await waitFor(() => {
       expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm')
@@ -738,16 +740,44 @@ describe('vLLM engine', () => {
     expect(mocked.setLocalServer).not.toHaveBeenCalled()
   })
 
-  it('lists llama.cpp, vLLM (GPU), and vLLM (CPU) as distinct engines', async () => {
+  it('lists llama.cpp and vLLM, with GPU and CPU on the vLLM page', async () => {
     renderPane()
     fireEvent.click(await screen.findByLabelText(/local backend/i))
     expect(await screen.findByRole('option', { name: 'llama.cpp' })).toBeTruthy()
-    expect(screen.getByRole('option', { name: 'vLLM (GPU)' })).toBeTruthy()
-    expect(screen.getByRole('option', { name: 'vLLM (CPU)' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('option', { name: 'vLLM (CPU)' }))
+    expect(screen.getByRole('option', { name: 'vLLM' })).toBeTruthy()
+    expect(screen.queryByRole('option', { name: /vLLM \(CPU\)/ })).toBeNull()
+    expect(screen.queryByRole('option', { name: /vLLM \(GPU\)/ })).toBeNull()
+    fireEvent.click(screen.getByRole('option', { name: 'vLLM' }))
     await waitFor(() => {
-      expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm-cpu')
+      expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm')
     })
+    expect(mocked.setLocalServer).not.toHaveBeenCalled()
+  })
+
+  it('selects the CPU device without stopping a server', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      engine_state: 'ready',
+      managed_engines: [
+        { device: 'gpu', engine: 'vllm', engine_state: 'ready', server_running: true, runtime_installed: true },
+        { device: 'cpu', engine: 'vllm', engine_state: 'stopped', server_running: false, runtime_installed: true }
+      ],
+      models: [{ id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
+      runtime_installed: true,
+      server_running: true,
+      tag: '0.28.0',
+      venv_ready: true,
+      vllm_device: 'gpu'
+    })
+    renderPane()
+    expect(await screen.findByText('vLLM (GPU) Ready · vLLM (CPU) Stopped')).toBeTruthy()
+    fireEvent.click(await screen.findByLabelText(/^device$/i))
+    fireEvent.click(await screen.findByRole('option', { name: 'vLLM (CPU)' }))
+    await waitFor(() => {
+      expect(mocked.setVllmDevice).toHaveBeenCalledWith('cpu')
+    })
+    expect(mocked.setLocalServer).not.toHaveBeenCalled()
+    expect(mocked.setLocalEngine).not.toHaveBeenCalled()
   })
 
   it('falls back to first-time setup when the vLLM inventory is empty', async () => {
@@ -1237,7 +1267,7 @@ describe('vLLM engine', () => {
       expect.arrayContaining(['flex', 'items-center', 'justify-end', 'gap-2'])
     )
     expect(screen.getAllByRole('button', { name: /turn on/i })).toHaveLength(1)
-    expect(screen.getByText('vLLM (GPU) 0.28.0')).toBeTruthy()
+    expect(screen.getByText('vLLM 0.28.0')).toBeTruthy()
     expect(screen.queryByText('vLLM runtime installed')).toBeNull()
     expect(screen.queryByText(/the latest release on PyPI/i)).toBeNull()
     expect(screen.queryByText(/installed at/i)).toBeNull()

@@ -28,11 +28,21 @@ def test_cpu_and_gpu_venvs_are_different_paths(tmp_path, monkeypatch):
     assert runtimes_root("gpu") != runtimes_root("cpu")
 
 
-def test_engine_from_config_distinguishes_cpu_and_gpu():
+def test_engine_from_config_is_llamacpp_or_vllm():
+    """One vLLM page. Legacy ``vllm-cpu`` folds to engine vllm + device cpu."""
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import CPU, PUBLIC_ENGINES
+
+    assert PUBLIC_ENGINES == frozenset({"llamacpp", ENGINE_GPU})
+    assert ENGINE_CPU not in PUBLIC_ENGINES
     assert engine_from_config({}) == "llamacpp"
     assert engine_from_config({"local_runtime": {"engine": "vllm"}}) == ENGINE_GPU
-    assert engine_from_config({"local_runtime": {"engine": "vllm-cpu"}}) == ENGINE_CPU
-    assert engine_from_config({"local_runtime": {"engine": "VLLM_CPU"}}) == ENGINE_CPU
+    assert engine_from_config({"local_runtime": {"engine": "vllm-cpu"}}) == ENGINE_GPU
+    assert engine_from_config({"local_runtime": {"engine": "VLLM_CPU"}}) == ENGINE_GPU
+    assert vllm_device_from_config({"local_runtime": {"engine": "vllm-cpu"}}) == CPU
+    assert vllm_device_from_config({
+        "local_runtime": {"engine": "vllm", "vllm": {"device": "cpu"}},
+    }) == CPU
 
 
 def test_cpu_serve_argv_uses_cpu_port_and_omits_cuda_flags():
@@ -93,6 +103,7 @@ def test_cpu_start_skips_gpu_occupancy(tmp_path, monkeypatch):
     cfg = {"local_runtime": {"engine": "vllm-cpu", "vllm": {"model": "Qwen/Qwen3-8B-AWQ"}}}
     engine._start_configured_vllm(cfg, cfg["local_runtime"]["vllm"])
     assert "occupancy" not in order
+    assert "stop_llama" not in order
     assert "start" in order
 
 
@@ -158,10 +169,18 @@ def test_set_engine_accepts_vllm_cpu(tmp_path, monkeypatch):
     client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
     r = client.post("/api/local-models/engine", json={"engine": "vllm-cpu"})
     assert r.status_code == 200
-    assert r.json()["engine"] == "vllm-cpu"
+    assert r.json()["engine"] == "vllm"
+    assert r.json()["vllm_device"] == "cpu"
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["engine"] == "vllm-cpu"
+    saved = load_config()["local_runtime"]
+    assert saved["engine"] == "vllm"
+    assert saved["vllm"]["device"] == "cpu"
+    switched = client.post("/api/local-models/vllm/device", json={"device": "gpu"})
+    assert switched.status_code == 200
+    assert switched.json()["vllm_device"] == "gpu"
+    assert load_config()["local_runtime"]["vllm"]["device"] == "gpu"
+    assert load_config()["local_runtime"]["engine"] == "vllm"
 
 
 def test_cpu_catalog_keeps_official_qwen_when_gpu_is_24gb(monkeypatch):

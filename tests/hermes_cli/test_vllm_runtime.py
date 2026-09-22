@@ -613,7 +613,7 @@ def test_switch_to_llamacpp_stops_vllm_first(monkeypatch):
     order: list[str] = []
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.shutdown_vllm_runtime",
-        lambda: order.append("vllm_stop"))
+        lambda device=None: order.append("vllm_stop"))
     monkeypatch.setattr(
         "hermes_cli.local_runtime.bootstrap.ensure_local_runtime",
         lambda config=None, force=False: order.append("llama_start") or "sup")
@@ -667,7 +667,7 @@ def test_ensure_vllm_runtime_fake_server(tmp_path, monkeypatch):
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     import hermes_cli.vllm_runtime.bootstrap as boot
 
-    monkeypatch.setattr(boot, "_SUPERVISOR", None)
+    monkeypatch.setattr(boot, "_SUPERVISORS", {"gpu": None, "cpu": None})
     monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
     cfg = {
         "local_runtime": {

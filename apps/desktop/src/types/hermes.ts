@@ -1285,6 +1285,19 @@ export interface LocalModelLoadProgress {
 
 export type LocalEngine = 'llamacpp' | 'vllm' | 'vllm-cpu'
 
+export interface ManagedLocalEngine {
+  device?: 'cpu' | 'gpu'
+  engine: 'vllm' | 'vllm-cpu'
+  engine_state?: 'error' | 'not_installed' | 'ready' | 'starting' | 'stopped'
+  server_running?: boolean
+  server_base_url?: null | string
+  served_model_name?: null | string
+  pid?: null | number
+  runtime_installed?: boolean
+  last_error?: null | string
+  start_phase?: null | string
+}
+
 export interface LocalOccupancyHit {
   kind: string
   detail: string
@@ -1329,6 +1342,8 @@ export interface LocalModelsStatus {
   start_phase?: null | string
   last_error?: null | string
   model?: null | string
+  /** Both managed vLLM servers. The dropdown engine is still the chat default. */
+  managed_engines?: ManagedLocalEngine[]
 }
 
 export interface LocalHardware {
@@ -1371,6 +1386,8 @@ export interface LocalHardware {
   engine_state?: LocalModelsStatus['engine_state']
   pid?: null | number
   start_phase?: null | string
+  /** Both managed vLLM servers, including one that is not the chat engine. */
+  managed_engines?: ManagedLocalEngine[]
 }
 
 export interface LocalCatalogModel {

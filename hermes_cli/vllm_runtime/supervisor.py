@@ -22,7 +22,7 @@ from pathlib import Path
 
 from hermes_cli.vllm_runtime.device import (
     CPU, CPU_LISTEN_PORT, GPU_LISTEN_PORT, LLAMA_CPP_PORT, RESERVED_PORTS,
-    USER_SERVER_PORTS, default_listen_port, engine_to_device, normalize_device,
+    USER_SERVER_PORTS, default_listen_port, normalize_device,
 )
 from hermes_cli.vllm_runtime.venv import runtimes_root, server_log_path, vllm_executable
 
@@ -226,24 +226,41 @@ def last_serve_error_line(log_path: Path | None = None, device: str = "gpu") -> 
 def vllm_settings(config: dict | None) -> dict:
     """``local_runtime.vllm`` merged over DEFAULT_CONFIG so a partial section still serves.
 
-    On ``vllm-cpu``, an empty model or the GPU shipped AWQ id is the CPU BF16
-    default. Any other id is an explicit choice and is left alone.
+    Device ``cpu`` (or a legacy ``engine: vllm-cpu``) serves the BF16 default
+    when the model is empty or still the GPU shipped AWQ id. A legacy
+    ``vllm-cpu`` config with any other id keeps that explicit choice. A nested
+    ``vllm.cpu.model`` is the CPU checkpoint and does not replace the GPU model.
     """
     from hermes_cli.config_defaults import DEFAULT_CONFIG
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import ENGINE_CPU
 
     defaults = dict(DEFAULT_CONFIG["local_runtime"]["vllm"])
     local = (config or {}).get("local_runtime") or {}
+    if not isinstance(local, dict):
+        local = {}
     override = local.get("vllm") or {}
+    cpu_block: dict = {}
     if isinstance(override, dict):
-        defaults.update(override)
-    if engine_to_device(str(local.get("engine") or "")) == CPU:
-        from hermes_cli.vllm_runtime.recommend import (
-            as_vllm_config, gpu_shipped_model, recommend_vllm_cpu,
-        )
+        if isinstance(override.get("cpu"), dict):
+            cpu_block = dict(override["cpu"])
+        defaults.update({k: v for k, v in override.items() if k not in ("cpu", "device")})
+    defaults.pop("cpu", None)
+    defaults.pop("device", None)
+    if vllm_device_from_config(config) != CPU:
+        return defaults
+    from hermes_cli.vllm_runtime.recommend import (
+        as_vllm_config, gpu_shipped_model, recommend_vllm_cpu,
+    )
 
-        model = str(defaults.get("model") or "").strip()
-        if not model or model == gpu_shipped_model():
-            defaults.update(as_vllm_config(recommend_vllm_cpu()))
+    if str(cpu_block.get("model") or "").strip():
+        defaults.update({k: v for k, v in cpu_block.items() if k != "device"})
+        return defaults
+    model = str(defaults.get("model") or "").strip()
+    legacy = str(local.get("engine") or "").strip().lower().replace("_", "-") == ENGINE_CPU
+    if legacy and model and model != gpu_shipped_model():
+        return defaults
+    defaults.update(as_vllm_config(recommend_vllm_cpu()))
     return defaults
 
 

@@ -2325,12 +2325,14 @@ DEFAULT_CONFIG = {
         "region": "global",
     },
     # Managed local inference (docs: user-guide/local-models). llama.cpp is the default
-    # engine (official zips, GGUF catalog). vLLM is the optional Python/CUDA sibling —
-    # see hermes_cli/vllm_runtime/. Engine switch stops the other supervised server.
+    # engine (official zips, GGUF catalog). vLLM is the optional Python sibling —
+    # see hermes_cli/vllm_runtime/. GPU vLLM and llama.cpp share the GPU (starting
+    # one stops the other). CPU vLLM stays up beside either until Turn off.
     "local_runtime": {
         # Off = detection-only (Hermes still finds an external llama-server you run).
         "enabled": False,
-        # llamacpp | vllm | vllm-cpu. Additive; missing key deep-merges to llamacpp.
+        # llamacpp | vllm. vLLM's device is local_runtime.vllm.device (gpu|cpu).
+        # A legacy engine value vllm-cpu reads as vllm + device cpu.
         "engine": "llamacpp",
         # Pinned llama.cpp release tag; bumped by Hermes releases after validation.
         "tag": "b10679",
@@ -2347,6 +2349,8 @@ DEFAULT_CONFIG = {
         "vllm": {
             "port": 0,
             "host": "127.0.0.1",
+            # Which supervised server chat uses. gpu and cpu can both be running.
+            "device": "gpu",
             # GPU shipped id (16 GB AWQ). vllm-cpu does not start this —
             # empty / this id on the CPU engine becomes recommend_vllm_cpu()
             # (Qwen/Qwen3-4B-Instruct-2507 BF16). AWQ/FP8 cannot load there.

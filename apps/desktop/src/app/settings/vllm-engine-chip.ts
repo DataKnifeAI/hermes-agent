@@ -1,4 +1,4 @@
-import type { LocalModelsStatus, LocalRuntimeJob } from '@/types/hermes'
+import type { LocalModelsStatus, LocalRuntimeJob, ManagedLocalEngine } from '@/types/hermes'
 
 export type VllmEngineChipTone = 'destructive' | 'muted' | 'primary' | 'success' | 'warn'
 
@@ -149,4 +149,82 @@ export function vllmEngineChip({
   }
 
   return null
+}
+
+function chipStatus(row: ManagedLocalEngine): Parameters<typeof vllmEngineState>[0] {
+  return {
+    engine_state: row.engine_state,
+    last_error: row.last_error,
+    pid: row.pid,
+    runtime_installed: Boolean(row.runtime_installed),
+    server_running: Boolean(row.server_running),
+    start_phase: row.start_phase
+  }
+}
+
+function rowDevice(row: ManagedLocalEngine): 'cpu' | 'gpu' | null {
+  if (row.device === 'cpu' || row.device === 'gpu') {
+    return row.device
+  }
+
+  if (row.engine === 'vllm-cpu') {
+    return 'cpu'
+  }
+
+  if (row.engine === 'vllm') {
+    return 'gpu'
+  }
+
+  return null
+}
+
+function deviceStateWord(row: ManagedLocalEngine | undefined, copy: VllmEngineChipCopy): string {
+  if (!row) {
+    return copy.engineStopped
+  }
+
+  const state = vllmEngineState(chipStatus(row))
+
+  if (state === 'ready') {
+    return copy.engineReady
+  }
+
+  if (state === 'starting') {
+    return copy.engineStarting
+  }
+
+  if (state === 'error') {
+    return copy.engineFailed
+  }
+
+  return copy.engineStopped
+}
+
+/** One Runtime line for both servers: "vLLM (GPU) Ready · vLLM (CPU) Stopped". No model name. */
+export function vllmDevicesRuntimeLine(
+  engines: readonly ManagedLocalEngine[] | undefined,
+  copy: VllmEngineChipCopy & { deviceCpu: string; deviceGpu: string }
+): null | string {
+  if (!engines?.length) {
+    return null
+  }
+
+  let gpu: ManagedLocalEngine | undefined
+  let cpu: ManagedLocalEngine | undefined
+
+  for (const row of engines) {
+    const device = rowDevice(row)
+
+    if (device === 'gpu') {
+      gpu = row
+    } else if (device === 'cpu') {
+      cpu = row
+    }
+  }
+
+  if (!gpu && !cpu) {
+    return null
+  }
+
+  return `${copy.deviceGpu} ${deviceStateWord(gpu, copy)} · ${copy.deviceCpu} ${deviceStateWord(cpu, copy)}`
 }

@@ -103,7 +103,7 @@ def test_hardware_plain_facts(client):
         assert key in data
     assert data["models_storage_bytes"] >= 0
     assert data["disk_free_bytes"] >= 0
-    assert data["engine"] in ("llamacpp", "vllm", "vllm-cpu")
+    assert data["engine"] in ("llamacpp", "vllm")
 
 
 def test_hardware_cache_path_is_profile_aware_and_engine_specific(tmp_path, monkeypatch):

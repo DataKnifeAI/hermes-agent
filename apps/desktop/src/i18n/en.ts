@@ -1316,8 +1316,11 @@ export const en: Translations = {
       deleteFailed: 'Delete failed',
       engineLabel: 'Local backend',
       engineLlama: 'llama.cpp',
-      engineVllm: 'vLLM (GPU)',
+      engineVllm: 'vLLM',
       engineVllmCpu: 'vLLM (CPU)',
+      deviceLabel: 'Device',
+      deviceGpu: 'vLLM (GPU)',
+      deviceCpu: 'vLLM (CPU)',
       vllmInstallTitle: 'Install the vLLM runtime',
       vllmInstallDetail:
         'Downloads the vLLM inference engine. Models you download run entirely on this machine — no account, nothing leaves your computer. Hermes starts and manages the server for you.',

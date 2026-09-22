@@ -1146,6 +1146,9 @@ export interface Translations {
       engineLlama: string
       engineVllm: string
       engineVllmCpu: string
+      deviceLabel: string
+      deviceGpu: string
+      deviceCpu: string
       vllmInstallTitle: string
       vllmInstallDetail: string
       vllmNotFeasible: (reason: string) => string

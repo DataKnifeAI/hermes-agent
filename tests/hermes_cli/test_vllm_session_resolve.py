@@ -121,7 +121,7 @@ def test_ensure_vllm_runtime_occupancy_does_not_start(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch)
     import hermes_cli.vllm_runtime.bootstrap as boot
 
-    monkeypatch.setattr(boot, "_SUPERVISOR", None)
+    monkeypatch.setattr(boot, "_SUPERVISORS", {"gpu": None, "cpu": None})
 
     def _occupied():
         raise OccupyingLlmError(
@@ -130,7 +130,7 @@ def test_ensure_vllm_runtime_occupancy_does_not_start(tmp_path, monkeypatch):
 
     monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", _occupied)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.endpoint._state_endpoint", lambda: None)
+        "hermes_cli.vllm_runtime.endpoint._state_endpoint", lambda *a, **k: None)
 
     with pytest.raises(OccupyingLlmError, match="Stop it so managed vLLM"):
         boot.ensure_vllm_runtime(

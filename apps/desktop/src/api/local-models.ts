@@ -133,6 +133,15 @@ export function setLocalEngine(engine: LocalEngine): Promise<{ engine: LocalEngi
   })
 }
 
+export function setVllmDevice(device: 'cpu' | 'gpu'): Promise<{ engine: LocalEngine; ok: boolean; vllm_device: 'cpu' | 'gpu' }> {
+  return hermesApi<{ engine: LocalEngine; ok: boolean; vllm_device: 'cpu' | 'gpu' }>({
+    ...profileScoped(),
+    body: { device },
+    method: 'POST',
+    path: '/api/local-models/vllm/device'
+  })
+}
+
 export interface VllmRecommend {
   config: Record<string, number | string>
   feasible: boolean

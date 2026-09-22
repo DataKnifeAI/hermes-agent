@@ -434,8 +434,8 @@ def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch
         "hermes_cli.web_routers.local_models_engine.apply_recommend_and_install",
         lambda *a, **k: started.append("recommend"))
     monkeypatch.setattr(
-        "hermes_cli.local_engines.stop_vllm_engine",
-        lambda: started.append("stop"))
+        "hermes_cli.local_engines.stop_vllm_device",
+        lambda device="gpu": started.append("stop"))
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._spawn_job",
         lambda *a, **k: jobs.append(a))
@@ -634,10 +634,10 @@ def test_vllm_engine_state_ready_iff_healthy_endpoint(tmp_path, monkeypatch):
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: None)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda: None)
+        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda device=None: None)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.vllm_serve_starting",
-        lambda: False)
+        lambda device=None: False)
     idle = client.get("/api/local-models/status").json()
     assert idle["server_running"] is False
     assert idle["engine_state"] == "stopped"
@@ -673,7 +673,7 @@ def test_vllm_engine_state_spawned_not_healthy_is_starting(tmp_path, monkeypatch
         proc = _Warm()
 
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda: _Sup())
+        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda device=None: _Sup())
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine._vllm_last_error",
         lambda *a, **k: "stale leftover")
@@ -1184,7 +1184,7 @@ def test_vllm_quickstart_stops_leftover_running_id_starts_official(tmp_path, mon
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     order: list = []
 
-    def _stop():
+    def _stop(device=None):
         order.append("stop")
 
     class _Sup:
@@ -1205,7 +1205,7 @@ def test_vllm_quickstart_stops_leftover_running_id_starts_official(tmp_path, mon
         "hermes_cli.vllm_runtime.occupancy.require_gpu_free",
         lambda: occupied.append("occupancy"))
     monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
-    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", _stop)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_device", _stop)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
     monkeypatch.setattr(
@@ -1613,8 +1613,8 @@ def test_vllm_use_reloads_when_switching_cached_models(tmp_path, monkeypatch):
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: {"base_url": "http://127.0.0.1:9/v1", "pid": 1})
     monkeypatch.setattr(
-        "hermes_cli.local_engines.stop_vllm_engine",
-        lambda: order.append("stop"))
+        "hermes_cli.local_engines.stop_vllm_device",
+        lambda device="gpu": order.append("stop"))
     monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
     monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
 
@@ -1792,7 +1792,7 @@ def test_vllm_switch_in_flight_reports_starting(tmp_path, monkeypatch):
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: None)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda: None)
+        "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda device=None: None)
     from hermes_cli.web_routers.local_models_engine import mark_vllm_switch
 
     with mark_vllm_switch():

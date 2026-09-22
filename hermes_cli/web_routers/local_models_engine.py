@@ -169,7 +169,7 @@ def ctx_64k_feasible(total_bytes: int | None) -> bool | None:
     return int(total_bytes) >= floor
 
 
-def cache_and_runtime_fields(engine: str) -> dict[str, Any]:
+def cache_and_runtime_fields(engine: str, device: str | None = None) -> dict[str, Any]:
     """Download cache + runtime tree for the selected engine. One shape, both engines."""
     from hermes_cli.local_runtime import binaries, bootstrap
     from hermes_cli.vllm_runtime.inventory import hf_hub_dir
@@ -177,7 +177,7 @@ def cache_and_runtime_fields(engine: str) -> dict[str, Any]:
 
     if is_vllm_engine(engine):
         cache = hf_hub_dir()
-        runtime = vllm_runtimes_root(engine_to_device(engine))
+        runtime = vllm_runtimes_root(device or engine_to_device(engine))
     else:
         cache = bootstrap.models_dir()
         runtime = binaries.runtimes_root()
@@ -258,48 +258,75 @@ def vllm_switch_in_flight() -> bool:
         return _switch_in_flight > 0
 
 
-def vllm_serve_starting() -> bool:
-    """In-process start lock / supervisor, Use switch, or a start job."""
-    from hermes_cli.vllm_runtime.bootstrap import start_in_flight
+def vllm_serve_starting(device: str | None = None) -> bool:
+    """In-process start lock / supervisor, Use switch, or a start job.
 
-    return start_in_flight() or _vllm_start_job_running() or vllm_switch_in_flight()
+    The job and Use-switch flags belong to the configured engine. A CPU
+    start must not mark GPU as starting, or the GPU chip reads Stopped/Starting
+    while the other engine is the one in flight.
+    """
+    from hermes_cli.vllm_runtime.bootstrap import start_in_flight
+    from hermes_cli.vllm_runtime.device import normalize_device
+
+    if device is None:
+        return start_in_flight() or _vllm_start_job_running() or vllm_switch_in_flight()
+    dev = normalize_device(device)
+    if start_in_flight(dev):
+        return True
+    if dev != vllm_device_from_config(None):
+        return False
+    return _vllm_start_job_running() or vllm_switch_in_flight()
 
 
 def refuse_duplicate_vllm_start() -> None:
-    """Turn on must not start a second serve while Use / warmup is live."""
-    if is_vllm_engine(configured_engine()) and vllm_serve_starting():
+    """Turn on must not start a second serve of this engine while Use / warmup is live."""
+    if is_vllm_engine(configured_engine()) and vllm_serve_starting(vllm_device_from_config(None)):
         raise HTTPException(status_code=409, detail=_ALREADY_STARTING)
 
 
 def vllm_engine_snapshot(
     config: dict | None = None, *, with_occupancy: bool = True,
+    device: str | None = None,
 ) -> dict[str, Any]:
-    """Shared starting/ready/stopped for status and hardware. No VRAM."""
+    """Shared starting/ready/stopped for status and hardware. No VRAM.
+
+    ``device`` snapshots that vLLM engine even when the dropdown selects the
+    other one. Readiness is GET /v1/models on that engine's state file.
+    """
     from hermes_cli.vllm_runtime.bootstrap import get_supervisor
-    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.device import normalize_device
+    from hermes_cli.vllm_runtime.endpoint import _state_endpoint, resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.inventory import running_served_model_name
-    from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
+    from hermes_cli.vllm_runtime.supervisor import (
+        openai_base_url, probe_served_model_name, vllm_settings)
     from hermes_cli.vllm_runtime.venv import venv_ready
 
     cfg = config or {}
-    device = vllm_device_from_config(cfg)
+    explicit = device is not None
+    device = normalize_device(device) if explicit else vllm_device_from_config(cfg)
     settings = vllm_settings(cfg)
-    running = resolve_vllm_endpoint(cfg, wait_for_boot_s=0)
-    served = running_served_model_name() or None
+    if explicit:
+        running = _state_endpoint(device)
+        served = None
+        if running:
+            served = probe_served_model_name(str(running.get("base_url") or "")) or None
+    else:
+        running = resolve_vllm_endpoint(cfg, wait_for_boot_s=0)
+        served = running_served_model_name() or None
     ready = bool(served)
     occ = occupancy_payload() if with_occupancy else {
         "occupancy": [], "occupancy_message": None,
     }
     last_error = occ["occupancy_message"] or _vllm_last_error(device)
     installed = venv_ready(device)
-    sup = get_supervisor()
+    sup = get_supervisor(device)
     proc = getattr(sup, "proc", None) if sup is not None else None
     proc_live = proc is not None and getattr(proc, "poll", lambda: 0)() is None
     pid = (running or {}).get("pid")
     if pid is None and proc_live:
         pid = getattr(proc, "pid", None)
     starting = (not ready) and (
-        running is not None or proc_live or vllm_serve_starting()
+        running is not None or proc_live or vllm_serve_starting(device)
     )
     engine_state = classify_vllm_engine_state(
         ready=ready, starting=starting, last_error=last_error, installed=installed,
@@ -397,9 +424,36 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
              "size_label": m.get("size_label") or "—"}
             for m in inventory if m.get("cached") or m.get("active")
         ],
-        **{k: v for k, v in cache_and_runtime_fields(engine if is_vllm_engine(engine) else ENGINE_GPU).items()
+        **{k: v for k, v in cache_and_runtime_fields(
+            engine if is_vllm_engine(engine) else ENGINE_GPU,
+            device if is_vllm_engine(engine) else None,
+        ).items()
            if k in ("models_dir", "models_dir_display", "runtime_dir", "runtime_dir_display")},
+        "managed_engines": managed_vllm_engines(cfg),
     }
+
+
+def managed_vllm_engines(config: dict | None = None) -> list[dict[str, Any]]:
+    """GPU and CPU vLLM rows. A running engine is ready here even when the dropdown shows the other."""
+    from hermes_cli.vllm_runtime.device import CPU, GPU, device_to_engine
+
+    cfg = config or {}
+    rows: list[dict[str, Any]] = []
+    for device in (GPU, CPU):
+        snap = vllm_engine_snapshot(cfg, with_occupancy=False, device=device)
+        rows.append({
+            "device": device,
+            "engine": device_to_engine(device),
+            "engine_state": snap["engine_state"],
+            "server_running": bool(snap["ready"]),
+            "server_base_url": snap["server_base_url"],
+            "served_model_name": snap["served"],
+            "pid": snap["pid"],
+            "runtime_installed": bool(snap["installed"]),
+            "last_error": snap["last_error"],
+            "start_phase": snap["start_phase"],
+        })
+    return rows
 
 
 def recommend_payload() -> dict[str, Any]:
@@ -426,21 +480,44 @@ def recommend_payload() -> dict[str, Any]:
 
 
 def set_engine(name: str) -> dict[str, Any]:
-    """Persist ``local_runtime.engine`` only — a view of which pane is configured.
+    """Persist which Local Models page is configured. Does not stop a server.
 
-    Does not stop a running supervisor. Starting the newly selected engine is
-    what stops the other (one GPU, one resident weights file).
+    Pages are llama.cpp and vLLM. A legacy ``vllm-cpu`` write folds to the
+    vLLM page with ``local_runtime.vllm.device: cpu``.
     """
     from cli import save_config_value
+    from hermes_cli.vllm_runtime.device import CPU, ENGINE_CPU
 
     engine = str(name or "").strip().lower().replace("_", "-")
+    if engine == ENGINE_CPU:
+        save_config_value("local_runtime.engine", ENGINE_GPU)
+        save_config_value("local_runtime.vllm.device", CPU)
+        return {"ok": True, "engine": ENGINE_GPU, "vllm_device": CPU}
     if engine not in _ENGINE_NAMES:
         raise HTTPException(
             status_code=400,
-            detail="engine must be 'llamacpp', 'vllm', or 'vllm-cpu'",
+            detail="engine must be 'llamacpp' or 'vllm'",
         )
     save_config_value("local_runtime.engine", engine)
     return {"ok": True, "engine": engine}
+
+
+def set_vllm_device(device: str) -> dict[str, Any]:
+    """Select which vLLM device chat follows. Does not stop either server."""
+    from cli import save_config_value
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.device import CPU, ENGINE_CPU, GPU, normalize_device
+
+    raw = str(device or "").strip().lower()
+    if raw not in (GPU, CPU):
+        raise HTTPException(status_code=400, detail="device must be 'gpu' or 'cpu'")
+    chosen = normalize_device(raw)
+    save_config_value("local_runtime.vllm.device", chosen)
+    section = (load_config().get("local_runtime") or {})
+    stored = str(section.get("engine") or "").strip().lower().replace("_", "-")
+    if stored == ENGINE_CPU:
+        save_config_value("local_runtime.engine", ENGINE_GPU)
+    return {"ok": True, "engine": ENGINE_GPU, "vllm_device": chosen}
 
 
 def stop_active_engine() -> None:
@@ -474,12 +551,12 @@ def recover_vllm_after_failed_start(
     Returns the hid that started, or None when nothing could start. Never
     re-enters ``start_active_engine(recover=True)``.
     """
-    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.local_engines import stop_vllm_device
     from hermes_cli.vllm_runtime.inventory import repo_is_cached
     from hermes_cli.vllm_runtime.supervisor import read_last_error, write_last_error
 
     failure = read_last_error()
-    stop_vllm_engine()
+    stop_vllm_device(vllm_device_from_config(None))
     prev_model = str((previous or {}).get("model") or "").strip()
     candidates: list[tuple[str, dict[str, Any]]] = []
     if (
@@ -503,7 +580,7 @@ def recover_vllm_after_failed_start(
                 write_last_error(failure)
             return cand_id
         except Exception:  # noqa: BLE001 — try the next rung
-            stop_vllm_engine()
+            stop_vllm_device(vllm_device_from_config(None))
 
     if prev_model and prev_model != failed_id:
         _persist_vllm_overlay(_vllm_overlay_from_settings(previous or {}))
@@ -515,7 +592,7 @@ def recover_vllm_after_failed_start(
 
 
 def _start_configured_vllm(cfg: dict, settings: dict) -> None:
-    from hermes_cli.local_engines import stop_llama_engine, stop_vllm_engine
+    from hermes_cli.local_engines import stop_llama_engine, stop_vllm_device
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
     from hermes_cli.vllm_runtime.supervisor import (
         MODEL_REMOVED_MSG, configured_cache_missing,
@@ -523,7 +600,9 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
         state_served_model_name, write_last_error)
 
     device = vllm_device_from_config(cfg)
-    stop_llama_engine()
+    # GPU shares the card with llama.cpp. CPU vLLM does not stop either.
+    if device != CPU:
+        stop_llama_engine()
     blocked = configured_unservable_reason(settings)
     if blocked:
         write_last_error(blocked, device)
@@ -536,7 +615,7 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
     wanted = str(settings.get("served_model_name") or "").strip()
     got = state_served_model_name(device)
     if wanted and got and wanted != got:
-        stop_vllm_engine()
+        stop_vllm_device(device)
     if device != CPU:
         require_gpu_free()
     from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
@@ -562,12 +641,13 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
 
 
 def start_active_engine(*, recover: bool = True) -> None:
-    """Start the configured engine; stop the other first. Occupancy is not swallowed.
+    """Start the configured engine. Occupancy is not swallowed.
 
+    GPU vLLM and llama.cpp stop each other. CPU vLLM is left running.
     A failed vLLM start restores the previous serve when the caller asked, else
     the official recommended row — never a crash-loop on the dead id.
     """
-    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.local_engines import stop_vllm_device
     from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError
     from hermes_cli.vllm_runtime.supervisor import configured_model_id, vllm_settings
 
@@ -587,7 +667,7 @@ def start_active_engine(*, recover: bool = True) -> None:
                     failed_id=failed_id, previous=None, was_running=False)
             raise
         return
-    stop_vllm_engine()
+    stop_vllm_device("gpu")
     lm._start_local_server(cfg, lm._SERVER_START_FAILED)
 
 
@@ -652,7 +732,7 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     """
     from cli import save_config_value
     from hermes_cli.config import load_config
-    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.local_engines import stop_vllm_device
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
     from hermes_cli.vllm_runtime.supervisor import (
@@ -671,9 +751,10 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     # CPU vLLM does not take the GPU — skip occupancy.
     if device != CPU:
         require_gpu_free()
-    # Stop leftover BEFORE overlay/enable. Writing Qwen while Nemotron is up
-    # lets desktop boot + kick spawn a second serve (SIGKILL / rc=-9).
-    stop_vllm_engine()
+    # Stop this device's leftover BEFORE overlay/enable. Writing Qwen while
+    # Nemotron is up lets desktop boot + kick spawn a second serve (SIGKILL).
+    # The sibling vLLM server is not that leftover.
+    stop_vllm_device(device)
     disable_auto_start()
     clear_last_error(device)
     for key, value in overlay.items():
@@ -768,7 +849,7 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
             detail=f"{hid} is not downloaded — Download it first",
         )
     from hermes_cli.config import load_config
-    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.local_engines import stop_vllm_device
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
@@ -778,8 +859,8 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
         running = resolve_vllm_endpoint(wait_for_boot_s=0) is not None
         set_vllm_model(hid)
         if running and current != hid:
-            # New weights need a new serve. Same-id reuse leaves a healthy process up.
-            stop_vllm_engine()
+            # New weights need a new serve on THIS device. The sibling stays up.
+            stop_vllm_device(device)
         try:
             start_active_engine(recover=False)
             result = activate_vllm()
@@ -869,7 +950,7 @@ def delete_vllm_model(hf_id: str) -> dict[str, Any]:
     """
     from cli import save_config_value
     from hermes_cli.config import load_config
-    from hermes_cli.local_engines import stop_vllm_engine
+    from hermes_cli.local_engines import stop_vllm_device
     from hermes_cli.vllm_runtime.inventory import cached_repo_ids, delete_cached_repo
     from hermes_cli.vllm_runtime.supervisor import (
         MODEL_REMOVED_MSG, clear_last_error, configured_model_id, vllm_settings,
@@ -887,7 +968,7 @@ def delete_vllm_model(hf_id: str) -> dict[str, Any]:
             raise HTTPException(
                 status_code=404, detail=f"{hid} is not in the local Hugging Face cache")
     if was_configured or not cached_repo_ids():
-        stop_vllm_engine()
+        stop_vllm_device(vllm_device_from_config(load_config()))
     if not cached_repo_ids():
         # Last hub dir (or leftover config with no dir): first-time setup,
         # official default, not Gemma-from-search.

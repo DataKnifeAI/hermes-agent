@@ -17,10 +17,12 @@ from hermes_cli.vllm_runtime.endpoint import is_loopback_url as _is_loopback_url
 
 logger = logging.getLogger(__name__)
 
-_SUPERVISOR = None
-# Serialize spawn. Desktop lifespan boot + Restore + on-demand kick all call
-# ensure; without this lock two ``vllm serve`` share a port and one dies SIGKILL.
-_START_LOCK = threading.Lock()
+# One supervisor per device. GPU and CPU vLLM run at the same time; replacing
+# a model stops only that device's process.
+_SUPERVISORS: dict[str, object | None] = {"gpu": None, "cpu": None}
+# Serialize spawn per device. Two starts of the same device must not share a
+# port. The other device has its own lock and is not stopped.
+_START_LOCKS = {"gpu": threading.Lock(), "cpu": threading.Lock()}
 
 
 def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
@@ -30,23 +32,25 @@ def ensure_vllm_runtime(config: dict | None = None, force: bool = False,
     First start downloads HF weights inside ``vllm serve``, so the default
     ready-timeout is long. Tests inject a fake executable and a short timeout.
     """
-    global _SUPERVISOR
     section = (config or {}).get("local_runtime") or {}
     if not force and not section.get("enabled"):
         return None
 
-    with _START_LOCK:
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import normalize_device
+
+    device = normalize_device(vllm_device_from_config(config))
+    with _START_LOCKS[device]:
         return _ensure_vllm_runtime_locked(
             config, force=force, executable=executable, timeout_s=timeout_s)
 
 
 def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
                                 executable, timeout_s: int):
-    global _SUPERVISOR
     from pathlib import Path
 
     from hermes_cli.local_engines import vllm_device_from_config
-    from hermes_cli.vllm_runtime.device import CPU
+    from hermes_cli.vllm_runtime.device import CPU, normalize_device
     from hermes_cli.vllm_runtime.endpoint import _state_endpoint
     from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError, require_gpu_free
     from hermes_cli.vllm_runtime.supervisor import (
@@ -55,24 +59,26 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
         state_served_model_name, vllm_settings, write_last_error)
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
-    device = vllm_device_from_config(config)
+    device = normalize_device(vllm_device_from_config(config))
     settings = vllm_settings(config)
     wanted = str(settings.get("served_model_name") or "").strip()
-    if _SUPERVISOR is not None:
-        same_device = getattr(_SUPERVISOR, "device", "gpu") == device
-        got = str(_SUPERVISOR.settings.get("served_model_name") or "").strip()
-        if same_device and (not wanted or not got or wanted == got):
-            return _SUPERVISOR
-        _SUPERVISOR.stop()
-        _SUPERVISOR = None
+    current = _SUPERVISORS.get(device)
+    if current is not None:
+        got = str(getattr(current, "settings", {}).get("served_model_name") or "").strip()
+        if not wanted or not got or wanted == got:
+            return current
+        current.stop()
+        _SUPERVISORS[device] = None
     state = _state_endpoint(device)
     if state is not None:
         got = state_served_model_name(device)
         if not wanted or not got or wanted == got:
             logger.info("managed vLLM already running (another process)")
+            if device == CPU:
+                _bind_cpu_compression(state.get("base_url"), state.get("served_model_name"))
             return None
-        # Leftover Nemotron (or any other id) still resident — Restore / Use
-        # must replace it, not occupy the same GPU.
+        # Leftover model still resident on THIS device — replace it.
+        # The sibling vLLM server is not this state file.
         from hermes_cli.local_engines import stop_state_pid
         from hermes_cli.vllm_runtime.supervisor import state_path
 
@@ -112,49 +118,84 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
     sup = None
     try:
         sup = VllmSupervisor(settings, executable=exe_path, device=device)
-        # Visible to stop_vllm_engine before wait_ready returns, so Restore
-        # can abort an in-flight desktop boot instead of SIGKILL via state pid.
-        _SUPERVISOR = sup
+        # Visible to stop before wait_ready returns, so Restore can abort an
+        # in-flight boot of THIS device instead of SIGKILL via the state pid.
+        _SUPERVISORS[device] = sup
         sup.start(timeout_s=timeout_s)
+        if device == CPU:
+            _bind_cpu_compression(sup.base_url, settings.get("served_model_name"))
         return sup
     except OccupyingLlmError:
-        if _SUPERVISOR is sup:
-            _SUPERVISOR = None
+        if _SUPERVISORS.get(device) is sup:
+            _SUPERVISORS[device] = None
         raise
     except Exception as exc:  # noqa: BLE001 — never break session start
-        if _SUPERVISOR is sup and sup is not None:
+        if _SUPERVISORS.get(device) is sup and sup is not None:
             with suppress(Exception):
                 sup.stop()
-            _SUPERVISOR = None
+            _SUPERVISORS[device] = None
         logger.warning("managed vLLM runtime unavailable: %s", exc)
         if not (sup is not None and sup._stopping):
             disable_auto_start()
         return None
 
 
-def shutdown_vllm_runtime() -> None:
-    """Must not take ``_START_LOCK`` — Restore stops an in-flight wait_ready."""
-    global _SUPERVISOR
-    sup = _SUPERVISOR
-    _SUPERVISOR = None
-    if sup is not None:
-        sup.stop()
+def _bind_cpu_compression(base_url, model) -> None:
+    try:
+        from hermes_cli.local_engines import maybe_bind_cpu_compression
+
+        maybe_bind_cpu_compression(str(base_url or ""), str(model or ""))
+    except Exception as exc:  # noqa: BLE001 — serve is up; compression pin is best-effort
+        logger.warning("CPU vLLM compression base_url was not written: %s", exc)
 
 
-def get_supervisor():
-    return _SUPERVISOR
+def shutdown_vllm_runtime(device: str | None = None) -> None:
+    """Stop one device, or both when ``device`` is omitted.
+
+    Must not take the start lock — Restore stops an in-flight wait_ready.
+    """
+    from hermes_cli.vllm_runtime.device import CPU, GPU, normalize_device
+
+    devices = (GPU, CPU) if device is None else (normalize_device(device),)
+    for dev in devices:
+        sup = _SUPERVISORS.get(dev)
+        _SUPERVISORS[dev] = None
+        if sup is not None:
+            sup.stop()
 
 
-def start_in_flight() -> bool:
+def get_supervisor(device: str | None = None):
+    """In-process supervisor for ``device``, or the only live one when omitted."""
+    from hermes_cli.vllm_runtime.device import normalize_device
+
+    if device is not None:
+        return _SUPERVISORS.get(normalize_device(device))
+    live = [sup for sup in _SUPERVISORS.values() if sup is not None]
+    if len(live) == 1:
+        return live[0]
+    return None
+
+
+def iter_live_supervisors():
+    return [sup for sup in _SUPERVISORS.values() if sup is not None]
+
+
+def start_in_flight(device: str | None = None) -> bool:
     """Serve is spawning or warming in this process. Status polls this.
 
-    ``ensure_vllm_runtime`` holds ``_START_LOCK`` through ``wait_ready``
-    (GET /v1/models). ``_SUPERVISOR`` is assigned before that wait so a
-    concurrent status read does not see "no pid → stopped".
+    ``ensure_vllm_runtime`` holds that device's lock through ``wait_ready``
+    (GET /v1/models). The supervisor is assigned before that wait so a
+    concurrent status read does not see "no pid → stopped". Omit ``device``
+    to ask whether either engine is in flight.
     """
-    if _SUPERVISOR is not None:
+    from hermes_cli.vllm_runtime.device import CPU, GPU, normalize_device
+
+    if device is None:
+        return any(start_in_flight(dev) for dev in (GPU, CPU))
+    dev = normalize_device(device)
+    if _SUPERVISORS.get(dev) is not None:
         return True
-    return _START_LOCK.locked()
+    return _START_LOCKS[dev].locked()
 
 
 def _model_section(config: dict | None) -> dict:
@@ -178,7 +219,9 @@ def activate_vllm_provider(config: dict | None = None) -> str:
     from hermes_cli.vllm_runtime.recommend import _DEFAULT_SERVED
 
     served = str(settings.get("served_model_name") or _DEFAULT_SERVED)
-    sup = get_supervisor()
+    from hermes_cli.local_engines import vllm_device_from_config
+
+    sup = get_supervisor(vllm_device_from_config(cfg))
     if sup is not None:
         managed = sup.base_url
     else:

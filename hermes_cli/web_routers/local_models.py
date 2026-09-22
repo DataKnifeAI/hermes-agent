@@ -88,7 +88,11 @@ class SideloadBody(BaseModel):
 
 
 class EngineBody(BaseModel):
-    engine: str                 # "llamacpp" | "vllm" | "vllm-cpu"
+    engine: str                 # "llamacpp" | "vllm" (legacy "vllm-cpu" folds to vllm + device cpu)
+
+
+class VllmDeviceBody(BaseModel):
+    device: str                 # "gpu" | "cpu"
 
 
 class VllmModelBody(BaseModel):
@@ -522,6 +526,7 @@ def local_models_status():
         "served_model_name": None,
         "start_phase": None,
         "last_error": None,
+        "managed_engines": engine_mod.managed_vllm_engines(config),
     }
 
 
@@ -613,7 +618,11 @@ def local_models_hardware():
         out["vram_total_bytes"] = smi_total
         out["vram_label"] = _human_gb(smi_total)
     out.update(smi)
-    out.update(engine_mod.cache_and_runtime_fields(engine))
+    vllm_device = (
+        engine_mod.vllm_device_from_config(_load_config())
+        if engine_mod.is_vllm_engine(engine) else None
+    )
+    out.update(engine_mod.cache_and_runtime_fields(engine, vllm_device))
     out["ctx_64k_feasible"] = engine_mod.ctx_64k_feasible(out.get("vram_total_bytes"))
     from hermes_cli.vllm_runtime.occupancy import gpu_vram_attribution
 
@@ -624,14 +633,15 @@ def local_models_hardware():
     if engine_mod.is_vllm_engine(engine):
         from hermes_cli.vllm_runtime.venv import installed_vllm_version
 
-        device = engine_mod.engine_to_device(engine)
-        out["vllm_version"] = (installed_vllm_version(device) or "").strip() or None
-        out["vllm_device"] = device
+        out["vllm_version"] = (installed_vllm_version(vllm_device) or "").strip() or None
+        out["vllm_device"] = vllm_device
         # Same starting/ready/stopped rule as /status — VRAM stays live smi.
         snap = engine_mod.vllm_engine_snapshot(_load_config(), with_occupancy=False)
         out["engine_state"] = snap["engine_state"]
         out["pid"] = snap["pid"]
         out["start_phase"] = snap["start_phase"]
+    out["managed_engines"] = _quiet(
+        lambda: engine_mod.managed_vllm_engines(_load_config()), [])
     return out
 
 
@@ -941,7 +951,9 @@ _SERVER_ACTIONS = {"stop": engine_mod.stop_active_engine, "start": engine_mod.st
 
 @router.post("/api/local-models/server")
 async def local_models_server(body: ServerActionBody):
-    """Turn the selected local engine off or on. Stops the other supervisor first on start.
+    """Turn the selected local engine off or on.
+
+    GPU vLLM and llama.cpp stop each other on start. CPU vLLM does not.
     OccupyingLlmError is returned to the client — never swallowed."""
     action = (body.action or "").strip().lower()
     if action not in _SERVER_ACTIONS:
@@ -1093,6 +1105,12 @@ async def local_models_sideload(body: SideloadBody):
 def local_models_set_engine(body: EngineBody):
     """Persist which engine pane is configured. Does not stop a running supervisor."""
     return engine_mod.set_engine(body.engine)
+
+
+@router.post("/api/local-models/vllm/device")
+def local_models_set_vllm_device(body: VllmDeviceBody):
+    """Select GPU or CPU vLLM for chat. Does not stop the other device."""
+    return engine_mod.set_vllm_device(body.device)
 
 
 @router.get("/api/local-models/vllm/recommend")

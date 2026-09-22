@@ -27,6 +27,7 @@ import {
   searchHFModels,
   setLocalEngine,
   setLocalServer,
+  setVllmDevice,
   sideloadLocalModel,
   updateVllm,
   type VllmInventoryModel,
@@ -62,7 +63,7 @@ import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus }
 import { CONTROL_TEXT } from './constants'
 import { LocalModelsMachineStats } from './local-models-machine-stats'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
-import { vllmEngineChip, vllmEnginePower } from './vllm-engine-chip'
+import { vllmDevicesRuntimeLine, vllmEngineChip, vllmEnginePower } from './vllm-engine-chip'
 import { VllmModelsPane } from './vllm-models-pane'
 
 function ProgressBar({ percent }: { percent: number | undefined }) {
@@ -89,16 +90,19 @@ export function isVllmEngine(engine: LocalEngine | string | undefined): engine i
 }
 
 function engineOf(status: LocalModelsStatus | null): LocalEngine {
-  const engine = status?.engine
-  if (engine === 'vllm-cpu') {
-    return 'vllm-cpu'
-  }
-
-  return engine === 'vllm' ? 'vllm' : 'llamacpp'
+  return isVllmEngine(status?.engine) ? 'vllm' : 'llamacpp'
 }
 
-function vllmEngineLabel(engine: LocalEngine, copy: { engineVllm: string; engineVllmCpu: string }): string {
-  return engine === 'vllm-cpu' ? copy.engineVllmCpu : copy.engineVllm
+function vllmDeviceOf(status: LocalModelsStatus | null): 'cpu' | 'gpu' {
+  if (status?.vllm_device === 'cpu' || status?.engine === 'vllm-cpu') {
+    return 'cpu'
+  }
+
+  return 'gpu'
+}
+
+function vllmEngineLabel(copy: { engineVllm: string }): string {
+  return copy.engineVllm
 }
 
 function vllmLibraryEmpty(status: LocalModelsStatus): boolean {
@@ -124,6 +128,55 @@ function vllmServedIdentity(status: LocalModelsStatus): {
   }
 }
 
+function VllmDeviceSelect({
+  device,
+  disabled,
+  onChange
+}: {
+  device: 'cpu' | 'gpu'
+  disabled?: boolean
+  onChange: (next: 'cpu' | 'gpu') => void
+}) {
+  const { t } = useI18n()
+  const copy = t.settings.localModels
+
+  return (
+    <label className="flex flex-col items-start gap-1 text-left">
+      <span className="text-[0.72rem] text-muted-foreground">{copy.deviceLabel}</span>
+      <Select disabled={disabled} onValueChange={next => onChange(next === 'cpu' ? 'cpu' : 'gpu')} value={device}>
+        <SelectTrigger aria-label={copy.deviceLabel} className={cn('min-w-28', CONTROL_TEXT)}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="gpu">{copy.deviceGpu}</SelectItem>
+          <SelectItem value="cpu">{copy.deviceCpu}</SelectItem>
+        </SelectContent>
+      </Select>
+    </label>
+  )
+}
+
+function EngineControls({
+  device,
+  disabled,
+  engine,
+  onDeviceChange,
+  onEngineChange
+}: {
+  device: 'cpu' | 'gpu'
+  disabled?: boolean
+  engine: LocalEngine
+  onDeviceChange: (next: 'cpu' | 'gpu') => void
+  onEngineChange: (next: LocalEngine) => void
+}) {
+  return (
+    <div className="flex flex-wrap items-end gap-3">
+      <EngineSelect disabled={disabled} engine={engine} onChange={onEngineChange} />
+      {isVllmEngine(engine) ? <VllmDeviceSelect device={device} disabled={disabled} onChange={onDeviceChange} /> : null}
+    </div>
+  )
+}
+
 function EngineSelect({
   disabled,
   engine,
@@ -146,7 +199,6 @@ function EngineSelect({
         <SelectContent>
           <SelectItem value="llamacpp">{copy.engineLlama}</SelectItem>
           <SelectItem value="vllm">{copy.engineVllm}</SelectItem>
-          <SelectItem value="vllm-cpu">{copy.engineVllmCpu}</SelectItem>
         </SelectContent>
       </Select>
     </label>
@@ -345,6 +397,23 @@ export function LocalModelsSettings() {
     }
   }
 
+  async function handleDeviceChange(next: 'cpu' | 'gpu') {
+    if (next === vllmDeviceOf(status)) {
+      return
+    }
+
+    setEngineBusy(true)
+
+    try {
+      await setVllmDevice(next)
+      refresh()
+    } catch (err) {
+      notifyError(err, copy.quickstartFailed)
+    } finally {
+      setEngineBusy(false)
+    }
+  }
+
   async function handleQuickstart() {
     try {
       await quickstartLocalModels()
@@ -523,7 +592,7 @@ export function LocalModelsSettings() {
   const heroModel = catalog?.find(c => c.recommended && c.fits) ?? catalog?.find(c => c.fits) ?? null
 
   if (isVllmEngine(engine) && (vllmSetupJob || (needsSetup && !configure))) {
-    const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || vllmEngineLabel(engine, copy)
+    const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || vllmEngineLabel(copy)
     const vllmPhase = vllmSetupJob?.phase ?? ''
     const vllmStageIndex = ['starting-server', 'setting-default'].includes(vllmPhase)
       ? 2
@@ -555,7 +624,13 @@ export function LocalModelsSettings() {
             <p className="mt-2 text-[0.8rem] leading-5 text-muted-foreground">{liveDetail}</p>
 
             <div className="mt-5 flex justify-center">
-              <EngineSelect disabled={engineBusy || Boolean(vllmSetupJob)} engine={engine} onChange={next => void handleEngineChange(next)} />
+              <EngineControls
+                device={vllmDeviceOf(status)}
+                disabled={engineBusy || Boolean(vllmSetupJob)}
+                engine={engine}
+                onDeviceChange={next => void handleDeviceChange(next)}
+                onEngineChange={next => void handleEngineChange(next)}
+              />
             </div>
 
             {vllmSetupJob ? (
@@ -697,7 +772,13 @@ export function LocalModelsSettings() {
                 </p>
 
                 <div className="mt-5 flex justify-center">
-                  <EngineSelect disabled={engineBusy} engine={engine} onChange={next => void handleEngineChange(next)} />
+                  <EngineControls
+                    device={vllmDeviceOf(status)}
+                    disabled={engineBusy}
+                    engine={engine}
+                    onDeviceChange={next => void handleDeviceChange(next)}
+                    onEngineChange={next => void handleEngineChange(next)}
+                  />
                 </div>
 
                 <div className="mt-6 flex items-center justify-center gap-3">
@@ -735,18 +816,31 @@ export function LocalModelsSettings() {
           }
         : null
   const vllmPower = isVllmEngine(engine) ? vllmEnginePower({ copy, jobs, serverBusy, status }) : null
+  const devicesLine = isVllmEngine(engine) ? vllmDevicesRuntimeLine(status.managed_engines, copy) : null
 
   return (
     <SettingsContent>
       {/* ── Runtime ── */}
       <SettingsSection
-        aside={vllmChip ? <Pill tone={vllmChip.tone}>{vllmChip.label}</Pill> : undefined}
+        aside={
+          devicesLine ? (
+            <span>{devicesLine}</span>
+          ) : vllmChip ? (
+            <Pill tone={vllmChip.tone}>{vllmChip.label}</Pill>
+          ) : undefined
+        }
         icon={Zap}
-        meta={isVllmEngine(engine) ? (vllmVersion ? `${vllmEngineLabel(engine, copy)} ${vllmVersion}` : vllmEngineLabel(engine, copy)) : status.tag}
+        meta={isVllmEngine(engine) ? (vllmVersion ? `${vllmEngineLabel(copy)} ${vllmVersion}` : vllmEngineLabel(copy)) : status.tag}
         title={copy.runtimeTitle}
       >
         <div className="mb-3">
-          <EngineSelect disabled={engineBusy} engine={engine} onChange={next => void handleEngineChange(next)} />
+          <EngineControls
+            device={vllmDeviceOf(status)}
+            disabled={engineBusy}
+            engine={engine}
+            onDeviceChange={next => void handleDeviceChange(next)}
+            onEngineChange={next => void handleEngineChange(next)}
+          />
         </div>
 
         {isVllmEngine(engine) ? (

@@ -76,7 +76,6 @@ describe('LocalModelsMachineStats', () => {
     renderStats()
 
     expect(screen.getByText(/AMD Ryzen 9 7950X/)).toBeTruthy()
-    expect(screen.getByText(/32 cores/)).toBeTruthy()
     expect(screen.getByText('NVIDIA GeForce RTX 5090')).toBeTruthy()
     expect(screen.getByText(/6\.0 GB \/ 32\.0 GB used/)).toBeTruthy()
     expect(screen.getByText(/56\.0 GB \/ 256\.0 GB used/)).toBeTruthy()
@@ -93,12 +92,14 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.getByText(/driver 560/)).toBeTruthy()
     expect(screen.getByText(/this engine 5\.0 GB/)).toBeTruthy()
     expect(screen.getByText(/~\/\.hermes\/models/)).toBeTruthy()
-    expect(screen.getByText(/vLLM \(GPU\) 0\.14\.1/)).toBeTruthy()
+    expect(screen.getByText(/vLLM 0\.14\.1/)).toBeTruthy()
+    expect(screen.getByText('hermes3:8b')).toBeTruthy()
+    expect(screen.getByText(/vLLM 0\.14\.1/)).toBeTruthy()
     expect(screen.getByText('hermes3:8b')).toBeTruthy()
     expect(screen.getByText(/64k context fits this GPU/)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /^show less$/i }))
-    expect(screen.queryByText(/vLLM \(GPU\) 0\.14\.1/)).toBeNull()
+    expect(screen.queryByText(/vLLM 0\.14\.1/)).toBeNull()
     expect(screen.getByText('NVIDIA GeForce RTX 5090')).toBeTruthy()
     expect(screen.getByText(/AMD Ryzen 9 7950X/)).toBeTruthy()
   })
@@ -106,15 +107,14 @@ describe('LocalModelsMachineStats', () => {
   it('uses hardware.vllm_version on the Engine line before status.tag', () => {
     renderStats({ hardware: { vllm_version: '1.2.3' }, status: { tag: '', vllm_version: null } })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM \(GPU\) 1\.2\.3/)).toBeTruthy()
+    expect(screen.getByText(/vLLM 1\.2\.3/)).toBeTruthy()
   })
 
   it('falls back to status.tag when vllm_version is absent', () => {
     renderStats({ status: { tag: '0.9.0', vllm_version: null } })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM \(GPU\) 0\.9\.0/)).toBeTruthy()
+    expect(screen.getByText(/vLLM 0\.9\.0/)).toBeTruthy()
   })
-
   it('Show more Serving uses starting/ready — not a leftover configured model', () => {
     renderStats({
       status: {
@@ -149,14 +149,38 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.queryByText('Qwen/Qwen3-14B')).toBeNull()
   })
 
-  it('labels the CPU vLLM engine as vLLM (CPU)', () => {
+  it('keeps one vLLM engine line when the selected device is CPU', () => {
     renderStats({
       engine: 'vllm-cpu',
       hardware: { engine: 'vllm-cpu' },
       status: { engine: 'vllm-cpu', vllm_version: '0.14.1' }
     })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM \(CPU\) 0\.14.1/)).toBeTruthy()
+    expect(screen.getByText(/vLLM 0\.14\.1/)).toBeTruthy()
+    expect(screen.queryByText(/vLLM \(CPU\)/)).toBeNull()
+    expect(screen.queryByText(/vLLM \(GPU\)/)).toBeNull()
+  })
+
+  it('shows a running CPU vLLM when the selected GPU engine is stopped', () => {
+    renderStats({
+      engine: 'vllm',
+      hardware: {
+        managed_engines: [
+          { device: 'gpu', engine: 'vllm', engine_state: 'stopped', server_running: false },
+          {
+            device: 'cpu',
+            engine: 'vllm-cpu',
+            engine_state: 'ready',
+            server_running: true,
+            server_base_url: 'http://127.0.0.1:18436/v1'
+          }
+        ]
+      },
+      status: { engine_state: 'stopped', server_running: false, served_model_name: null }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
+    expect(screen.getByText(/vLLM \(CPU\).*18436.*ready/)).toBeTruthy()
+    expect(screen.queryByText(/vLLM \(CPU\).*Stopped/)).toBeNull()
   })
 
   it('prefers ram_used_bytes over total minus available', () => {

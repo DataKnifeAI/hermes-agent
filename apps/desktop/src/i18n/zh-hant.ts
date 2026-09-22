@@ -1162,8 +1162,11 @@ export const zhHant = defineLocale({
       deleteFailed: '刪除失敗',
       engineLabel: '本機後端',
       engineLlama: 'llama.cpp',
-      engineVllm: 'vLLM (GPU)',
+      engineVllm: 'vLLM',
       engineVllmCpu: 'vLLM (CPU)',
+      deviceLabel: '裝置',
+      deviceGpu: 'vLLM (GPU)',
+      deviceCpu: 'vLLM (CPU)',
       vllmInstallTitle: '安裝 vLLM 執行環境',
       vllmInstallDetail:
         '下載 vLLM 推論引擎。你下載的模型完全在本機執行——無需帳號，資料不會離開這台電腦。伺服器由 Hermes 啟動並管理。',

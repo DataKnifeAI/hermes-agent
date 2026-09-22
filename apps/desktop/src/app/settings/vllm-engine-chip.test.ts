@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { vllmEngineChip, vllmEnginePower, type VllmEngineChipCopy } from './vllm-engine-chip'
+import { vllmDevicesRuntimeLine, vllmEngineChip, vllmEnginePower, type VllmEngineChipCopy } from './vllm-engine-chip'
 
 const copy: VllmEngineChipCopy = {
   engineFailed: 'Failed',
@@ -149,5 +149,46 @@ describe('vllmEngineChip', () => {
         status: idle
       })
     ).toEqual({ label: 'Updating', tone: 'warn' })
+  })
+})
+
+describe('vllmDevicesRuntimeLine', () => {
+  const devices = { ...copy, deviceCpu: 'vLLM (CPU)', deviceGpu: 'vLLM (GPU)' }
+
+  it('names both devices without a model id', () => {
+    expect(
+      vllmDevicesRuntimeLine(
+        [
+          { device: 'gpu', engine: 'vllm', engine_state: 'ready', server_running: true, runtime_installed: true },
+          {
+            device: 'cpu',
+            engine: 'vllm',
+            engine_state: 'stopped',
+            server_running: false,
+            runtime_installed: true,
+            served_model_name: 'qwen3:4b'
+          }
+        ],
+        devices
+      )
+    ).toBe('vLLM (GPU) Ready · vLLM (CPU) Stopped')
+  })
+
+  it('keeps a live CPU server visible when the GPU row is stopped', () => {
+    const line = vllmDevicesRuntimeLine(
+      [
+        { engine: 'vllm', engine_state: 'stopped', server_running: false, runtime_installed: true },
+        {
+          engine: 'vllm-cpu',
+          engine_state: 'ready',
+          server_running: true,
+          runtime_installed: true
+        }
+      ],
+      devices
+    )
+
+    expect(line).toBe('vLLM (GPU) Stopped · vLLM (CPU) Ready')
+    expect(line).not.toMatch(/vLLM \(CPU\) Stopped/)
   })
 })

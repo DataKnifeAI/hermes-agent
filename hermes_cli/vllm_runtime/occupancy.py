@@ -164,8 +164,27 @@ def _collect_managed_state(path) -> tuple[set[int], set[int]]:
     return pids, ports
 
 
+def _live_vllm_supervisor_pids() -> set[int]:
+    """In-process GPU and CPU serve pids, so a sibling is not a foreign LLM."""
+    found: set[int] = set()
+    with suppress(Exception):
+        from hermes_cli.vllm_runtime.bootstrap import iter_live_supervisors
+
+        for sup in iter_live_supervisors():
+            proc = getattr(sup, "proc", None)
+            pid = int(getattr(proc, "pid", 0) or 0)
+            if pid > 0:
+                found.add(pid)
+    return found
+
+
 def _our_managed() -> tuple[set[int], set[int]]:
-    """Pids and listen ports of *this install's* supervised servers (skip as foreign)."""
+    """Pids and listen ports of *this install's* supervised servers (skip as foreign).
+
+    Both managed vLLM devices are included, plus each serve pid's descendants
+    (EngineCore holds the GPU, not the parent). A CPU serve is not a foreign
+    LLM to the GPU scan, and a GPU serve is not foreign to that same set.
+    """
     pids: set[int] = set()
     ports: set[int] = set()
     with suppress(Exception):
@@ -175,6 +194,7 @@ def _our_managed() -> tuple[set[int], set[int]]:
             vp, vo = _collect_managed_state(vllm_state(device))
             pids |= vp
             ports |= vo
+    pids |= _live_vllm_supervisor_pids()
     with suppress(Exception):
         from hermes_cli.local_runtime.supervisor import state_path as llama_state
 

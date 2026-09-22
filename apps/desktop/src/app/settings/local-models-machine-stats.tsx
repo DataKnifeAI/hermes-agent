@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { useI18n } from '@/i18n'
 import { AlertTriangle, Cpu, FolderOpen, Package, Zap } from '@/lib/icons'
-import type { LocalEngine, LocalHardware, LocalModelsStatus } from '@/types/hermes'
+import type { LocalEngine, LocalHardware, LocalModelsStatus, ManagedLocalEngine } from '@/types/hermes'
 
 import { Pill } from './primitives'
 import { vllmEngineState } from './vllm-engine-chip'
@@ -22,6 +22,32 @@ function gbLabel(bytes: number | null | undefined): string {
   }
 
   return `${(bytes / (1 << 30)).toFixed(1)} GB`
+}
+
+function managedDevice(row: ManagedLocalEngine): 'cpu' | 'gpu' | null {
+  if (row.device === 'cpu' || row.device === 'gpu') {
+    return row.device
+  }
+
+  if (row.engine === 'vllm-cpu') {
+    return 'cpu'
+  }
+
+  if (row.engine === 'vllm') {
+    return 'gpu'
+  }
+
+  return null
+}
+
+function liveManagedEngines(hardware: LocalHardware, status: LocalModelsStatus | null): ManagedLocalEngine[] {
+  return (hardware.managed_engines ?? status?.managed_engines ?? []).filter(row => {
+    if (managedDevice(row) == null) {
+      return false
+    }
+
+    return row.engine_state === 'ready' || row.engine_state === 'starting' || Boolean(row.server_running)
+  })
 }
 
 function vllmVersionOf(
@@ -96,11 +122,11 @@ export function LocalModelsMachineStats({
   const used = hardware.vram_used_bytes
   const total = hardware.vram_total_bytes
   const vllmVersion = vllmVersionOf(engine, hardware, status)
-  const vllmLabel = engine === 'vllm-cpu' ? copy.engineVllmCpu : copy.engineVllm
+  const liveEngines = liveManagedEngines(hardware, status)
   const engineValue = isVllmEngine(engine)
     ? vllmVersion
-      ? `${vllmLabel} ${vllmVersion}`
-      : vllmLabel
+      ? `${copy.engineVllm} ${vllmVersion}`
+      : copy.engineVllm
     : copy.engineLlama
   const cpuLabel = [
     hardware.cpu_name,
@@ -219,6 +245,27 @@ export function LocalModelsMachineStats({
               </span>
             }
           />
+
+          {liveEngines.map(row => {
+            const device = managedDevice(row)
+            const label = device === 'cpu' ? copy.deviceCpu : copy.deviceGpu
+            const state =
+              row.engine_state === 'starting' && !row.server_running ? copy.servingStarting : copy.servingReady
+
+            return (
+              <StatLine
+                key={device ?? row.engine}
+                label={copy.engineStat}
+                value={
+                  <span>
+                    {label}
+                    {row.server_base_url ? ` · ${row.server_base_url}` : ''}
+                    {` · ${state}`}
+                  </span>
+                }
+              />
+            )
+          })}
 
           {(served || servingLabel) && (
             <StatLine
