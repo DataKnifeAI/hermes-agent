@@ -638,7 +638,7 @@ def test_activate_writes_loopback_v1_and_preserves_remote(tmp_path, monkeypatch)
     cfg = load_config()
     assert cfg["model"]["provider"] == "vllm"
     assert cfg["model"]["default"]
-    assert (cfg.get("providers") or {}).get("vllm", {}).get("name") == "Local"
+    assert (cfg.get("providers") or {}).get("vllm", {}).get("name") == "vLLM GPU"
     assert url.endswith("/v1")
     host = url.split("://", 1)[-1].split(":")[0]
     assert host in ("127.0.0.1", "localhost")

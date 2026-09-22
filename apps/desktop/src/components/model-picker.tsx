@@ -8,7 +8,7 @@ import { modelSearchText } from '@/lib/model-search-text'
 import { currentPickerSelection } from '@/lib/model-status-label'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
-import { isLocalProviderSlug } from '@/lib/local-provider'
+import { isLocalProviderSlug, pickerHeaderProviderLabel, providerGroupLabel } from '@/lib/local-provider'
 import { $localModelsEnabled } from '@/store/local-models-flag'
 import { $localRuntimeJobs, runningModelDownloads, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
 import type { LocalModelLoadProgress, ModelOptionProvider, ModelPricing } from '@/types/hermes'
@@ -186,7 +186,13 @@ export function ModelPickerDialog({
           <DialogTitle>{copy.title}</DialogTitle>
           <DialogDescription className="font-mono text-xs leading-relaxed">
             {copy.current} {optionsModel || currentModel || copy.unknown}
-            {optionsProvider || currentProvider ? ` · ${optionsProvider || currentProvider}` : ''}
+            {optionsProvider || currentProvider
+              ? ` · ${pickerHeaderProviderLabel(
+                  providers.find(provider => provider.slug === (optionsProvider || currentProvider)),
+                  optionsProvider || currentProvider,
+                  copy.localDownloadsHeading
+                )}`
+              : ''}
           </DialogDescription>
         </DialogHeader>
 
@@ -507,7 +513,7 @@ function ProviderHeading({ provider }: { provider: ModelOptionProvider }) {
 
   return (
     <span className="flex min-w-0 items-center gap-2">
-      <span className="truncate">{isLocalProviderSlug(provider.slug) ? copy.localDownloadsHeading : provider.name}</span>
+      <span className="truncate">{providerGroupLabel(provider, copy.localDownloadsHeading)}</span>
       <span className="font-mono text-xs font-normal normal-case tracking-normal text-muted-foreground">
         {isLocalProviderSlug(provider.slug) ? 'local' : provider.slug} · {provider.total_models ?? provider.models?.length ?? 0}
       </span>

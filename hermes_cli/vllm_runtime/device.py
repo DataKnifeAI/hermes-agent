@@ -57,3 +57,67 @@ def server_log_name(device: str | None) -> str:
 
 def install_log_name(device: str | None) -> str:
     return "vllm-cpu-install.log" if normalize_device(device) == CPU else "vllm-install.log"
+
+
+# Picker / settings labels for the two managed serves. Routing stays
+# ``provider: vllm`` or ``provider: custom``; only the display name differs.
+GPU_ENDPOINT_NAME = "vLLM GPU"
+CPU_ENDPOINT_NAME = "vLLM CPU"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def managed_endpoint_name(device: str | None) -> str:
+    """User-facing name of the managed serve for *device*."""
+    return CPU_ENDPOINT_NAME if normalize_device(device) == CPU else GPU_ENDPOINT_NAME
+
+
+def _loopback_port(url: str | None) -> int | None:
+    from urllib.parse import urlparse
+
+    text = str(url or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host not in _LOOPBACK_HOSTS and not host.startswith("127."):
+        return None
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return None
+
+
+def managed_endpoint_name_for_url(url: str | None) -> str | None:
+    """``vLLM GPU`` / ``vLLM CPU`` when *url* is a managed loopback serve.
+
+    Default ports win. A rebound ephemeral port matches the live supervisor
+    state for that device. Other hosts and llama.cpp / Ollama ports stay
+    unnamed so a user endpoint is not relabeled.
+    """
+    port = _loopback_port(url)
+    if port is None or port in (LLAMA_CPP_PORT, 11434) or port in USER_SERVER_PORTS:
+        return None
+    if port == CPU_LISTEN_PORT:
+        return CPU_ENDPOINT_NAME
+    if port == GPU_LISTEN_PORT:
+        return GPU_ENDPOINT_NAME
+    try:
+        from hermes_cli.vllm_runtime.endpoint import _state_endpoint
+    except Exception:
+        return None
+    target = str(url or "").strip().rstrip("/").lower()
+    for device in (GPU, CPU):
+        try:
+            state = _state_endpoint(device)
+        except Exception:
+            continue
+        live = str((state or {}).get("base_url") or "").strip().rstrip("/").lower()
+        if live and live == target:
+            return managed_endpoint_name(device)
+    return None

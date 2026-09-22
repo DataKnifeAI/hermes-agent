@@ -24,7 +24,7 @@ import { useI18n } from '@/i18n'
 import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
-import { isLocalProviderSlug } from '@/lib/local-provider'
+import { isLocalProviderSlug, providerGroupLabel } from '@/lib/local-provider'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
@@ -485,7 +485,7 @@ export function ModelCatalogMenu({
                     <HighlightMatches
                       foldSeparators
                       query={search}
-                      text={isLocalProviderSlug(group.provider.slug) ? copyPicker.localDownloadsHeading : group.provider.name}
+                      text={providerGroupLabel(group.provider, copyPicker.localDownloadsHeading)}
                     />
                   </span>
                   <DisclosureCaret

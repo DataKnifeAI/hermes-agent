@@ -382,16 +382,22 @@ def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             endpoint_id = str(provider_id)
             models = _models_from_custom_endpoint_entry(raw_entry)
+            from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+            saved_name = str(raw_entry.get("name") or endpoint_id)
             endpoints.append(_endpoint_row(
-                endpoint_id, str(raw_entry.get("name") or endpoint_id), base_url,
+                endpoint_id, managed_endpoint_name_for_url(base_url) or saved_name, base_url,
                 str(raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else "")),
                 models, raw_entry.get("context_length"), bool(raw_entry.get("discover_models", True)),
                 raw_entry, endpoint_id == current_provider, "providers",
             ))
 
     if current_provider.lower() == "custom" and current_base_url and not any(e["id"] == "custom" for e in endpoints):
+        from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
         endpoints.insert(0, _endpoint_row(
-            "custom", "Custom", current_base_url, current_model, [current_model] if current_model else [],
+            "custom", managed_endpoint_name_for_url(current_base_url) or "Custom", current_base_url, current_model,
+            [current_model] if current_model else [],
             model_cfg.get("context_length"), True, model_cfg, True, "direct-config",
         ))
 

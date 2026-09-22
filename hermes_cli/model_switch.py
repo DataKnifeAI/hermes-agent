@@ -1236,7 +1236,9 @@ def _route_from_model_input(st: _Switch) -> Optional[ModelSwitchResult]:
 def _switch_provider_label(st: _Switch) -> str:
     label = get_label(st.target_provider)
     if st.target_provider == "custom" and st.current_base_url:
-        label = "Custom endpoint"
+        from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+        label = managed_endpoint_name_for_url(st.current_base_url) or "Custom endpoint"
     if st.target_provider.startswith("custom:"):
         custom_pdef = resolve_provider_full(st.target_provider, st.user_providers, st.custom_providers)
         if custom_pdef is not None:

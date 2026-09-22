@@ -664,11 +664,14 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
 
 
 def _vllm_runtime_row(ctx: "ConfigContext") -> dict | None:
-    """Served vLLM id as a selectable Local row when that engine is configured."""
+    """Served vLLM id as a selectable row named for the configured device."""
     from hermes_cli.config import load_config
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
-    settings = vllm_settings(load_config())
+    cfg = load_config()
+    settings = vllm_settings(cfg)
     served = str(settings.get("served_model_name") or settings.get("model") or "").strip()
     if not served:
         return None
@@ -682,8 +685,9 @@ def _vllm_runtime_row(ctx: "ConfigContext") -> dict | None:
                            == str(managed.get("base_url") or "").rstrip("/"))
         except Exception:
             current = False
-    return _row("vllm", "Local", current, models=[served], total_models=1,
-                source="local-runtime", authenticated=True, auth_type="local", warning=None)
+    return _row("vllm", managed_endpoint_name(vllm_device_from_config(cfg)), current,
+                models=[served], total_models=1, source="local-runtime",
+                authenticated=True, auth_type="local", warning=None)
 
 
 def _local_runtime_row(ctx: "ConfigContext") -> dict | None:

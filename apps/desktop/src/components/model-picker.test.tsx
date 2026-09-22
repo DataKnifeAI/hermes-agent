@@ -109,14 +109,14 @@ describe('ModelPickerDialog download rows', () => {
     expect(item?.getAttribute('aria-disabled')).toBe('true')
   })
 
-  it('labels a vLLM provider group Local, not vLLM', async () => {
+  it('labels a vLLM provider group with its device name', async () => {
     vi.mocked(requestModelOptions).mockResolvedValue({
       model: 'hermes3:8b',
       provider: 'vllm',
       providers: [
         {
           slug: 'vllm',
-          name: 'vLLM',
+          name: 'vLLM GPU',
           models: ['hermes3:8b'],
           is_current: true,
           authenticated: true
@@ -126,9 +126,32 @@ describe('ModelPickerDialog download rows', () => {
     renderPicker({ currentModel: 'hermes3:8b', currentProvider: 'vllm' })
 
     expect(await screen.findByText('hermes3:8b')).toBeTruthy()
-    expect(screen.getByText('Local')).toBeTruthy()
+    expect(screen.getAllByText('vLLM GPU').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Local')).toBeNull()
     expect(screen.queryByText('vLLM')).toBeNull()
     expect(screen.queryByText('llama.cpp')).toBeNull()
+  })
+
+  it('labels a managed CPU custom endpoint vLLM CPU', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue({
+      model: 'qwen3:4b',
+      provider: 'custom',
+      providers: [
+        {
+          slug: 'custom',
+          name: 'vLLM CPU',
+          models: ['qwen3:4b'],
+          is_current: true,
+          authenticated: true
+        }
+      ]
+    })
+    renderPicker({ currentModel: 'qwen3:4b', currentProvider: 'custom' })
+
+    expect(await screen.findByText('qwen3:4b')).toBeTruthy()
+    expect(screen.getAllByText('vLLM CPU').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Custom endpoint')).toBeNull()
+    expect(screen.queryByText('custom')).toBeNull()
   })
 
   it('shows a first-ever download under its own Local group when no local provider exists yet', async () => {

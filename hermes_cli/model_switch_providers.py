@@ -644,6 +644,11 @@ class _PickerBuild:
         self, slug: str, name: str, api_url: str, models: list, is_current: bool, native_catalog_empty: bool,
         *, source: str = "user-config", shown: list | None = None) -> None:
         """Append a user-defined endpoint row (sections 3, 3b, 4)."""
+        from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+        managed = managed_endpoint_name_for_url(api_url)
+        if managed:
+            name = managed
         self.results.append({
             "slug": slug, "name": name, "is_current": is_current, "is_user_defined": True,
             "models": models if shown is None else shown, "total_models": len(models), "source": source,

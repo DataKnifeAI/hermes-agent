@@ -220,8 +220,10 @@ def activate_vllm_provider(config: dict | None = None) -> str:
 
     served = str(settings.get("served_model_name") or _DEFAULT_SERVED)
     from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name
 
-    sup = get_supervisor(vllm_device_from_config(cfg))
+    device = vllm_device_from_config(cfg)
+    sup = get_supervisor(device)
     if sup is not None:
         managed = sup.base_url
     else:
@@ -241,7 +243,7 @@ def activate_vllm_provider(config: dict | None = None) -> str:
         providers = {}
     entry = dict(providers.get("vllm") or {}) if isinstance(providers.get("vllm"), dict) else {}
     entry.update({
-        "name": "Local",
+        "name": managed_endpoint_name(device),
         "base_url": write_url.rstrip("/"),
         "model": served,
         "discover_models": True,

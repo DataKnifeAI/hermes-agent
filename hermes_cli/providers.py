@@ -473,7 +473,10 @@ def _vllm_pdef() -> Optional[ProviderDef]:
         endpoint = None
     if not endpoint:
         return None
-    return ProviderDef(id="vllm", name="Local", transport="openai_chat", api_key_env_vars=(),
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+    name = managed_endpoint_name_for_url(endpoint.get("base_url")) or "Local"
+    return ProviderDef(id="vllm", name=name, transport="openai_chat", api_key_env_vars=(),
                        base_url=endpoint["base_url"], source="local-runtime")
 
 
