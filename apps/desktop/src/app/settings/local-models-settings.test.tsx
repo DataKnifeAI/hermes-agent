@@ -784,7 +784,11 @@ describe('vLLM engine', () => {
       vllm_device: 'gpu'
     })
     renderPane()
-    expect(await screen.findByText('GPU Ready · CPU Stopped')).toBeTruthy()
+    expect(await screen.findByRole('img', { name: 'GPU' })).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'CPU' })).toBeTruthy()
+    expect(screen.getByText('Ready')).toBeTruthy()
+    expect(screen.getByText('Stopped')).toBeTruthy()
+    expect(screen.queryByText('GPU Ready · CPU Stopped')).toBeNull()
     expect(screen.getByText('GPU 0.28.0 · CPU 0.27.1')).toBeTruthy()
     expect(screen.queryByText('vLLM 0.28.0')).toBeNull()
     fireEvent.click(await screen.findByLabelText(/^device$/i))

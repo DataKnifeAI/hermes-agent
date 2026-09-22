@@ -178,33 +178,45 @@ function rowDevice(row: ManagedLocalEngine): 'cpu' | 'gpu' | null {
   return null
 }
 
-function deviceStateWord(row: ManagedLocalEngine | undefined, copy: VllmEngineChipCopy): string {
+export interface VllmDeviceRuntimePart {
+  device: 'cpu' | 'gpu'
+  label: string
+  tone: VllmEngineChipTone
+}
+
+function deviceState(
+  row: ManagedLocalEngine | undefined,
+  copy: VllmEngineChipCopy
+): { label: string; tone: VllmEngineChipTone } {
   if (!row) {
-    return copy.engineStopped
+    return { label: copy.engineStopped, tone: 'muted' }
   }
 
   const state = vllmEngineState(chipStatus(row))
 
   if (state === 'ready') {
-    return copy.engineReady
+    return { label: copy.engineReady, tone: 'success' }
   }
 
   if (state === 'starting') {
-    return copy.engineStarting
+    return { label: copy.engineStarting, tone: 'warn' }
   }
 
   if (state === 'error') {
-    return copy.engineFailed
+    return { label: copy.engineFailed, tone: 'destructive' }
   }
 
-  return copy.engineStopped
+  return { label: copy.engineStopped, tone: 'muted' }
 }
 
-/** One Runtime line for both servers: "GPU Ready · CPU Stopped". No model name. */
-export function vllmDevicesRuntimeLine(
+/**
+ * Runtime status for both servers, icon-first in the UI.
+ * Labels are Ready / Stopped / … — no device word and no model name.
+ */
+export function vllmDevicesRuntimeParts(
   engines: readonly ManagedLocalEngine[] | undefined,
-  copy: VllmEngineChipCopy & { deviceCpu: string; deviceGpu: string }
-): null | string {
+  copy: VllmEngineChipCopy
+): null | VllmDeviceRuntimePart[] {
   if (!engines?.length) {
     return null
   }
@@ -226,7 +238,13 @@ export function vllmDevicesRuntimeLine(
     return null
   }
 
-  return `${copy.deviceGpu} ${deviceStateWord(gpu, copy)} · ${copy.deviceCpu} ${deviceStateWord(cpu, copy)}`
+  const gpuState = deviceState(gpu, copy)
+  const cpuState = deviceState(cpu, copy)
+
+  return [
+    { device: 'gpu', label: gpuState.label, tone: gpuState.tone },
+    { device: 'cpu', label: cpuState.label, tone: cpuState.tone }
+  ]
 }
 
 /**

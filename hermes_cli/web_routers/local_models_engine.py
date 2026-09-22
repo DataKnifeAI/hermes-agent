@@ -831,7 +831,9 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
         write_last_error(blocked)
         disable_auto_start()
         raise HTTPException(status_code=400, detail=blocked)
-    from hermes_cli.vllm_runtime.inventory import TOO_BIG_USE_MSG, cached_repo_fit
+    from hermes_cli.vllm_runtime.inventory import (
+        TOO_BIG_USE_MSG, cached_repo_fit, cpu_fit_ram_bytes,
+    )
     from hermes_cli.vllm_runtime.recommend import recommend_vllm
 
     from hermes_cli.config import load_config as _load_for_device
@@ -843,7 +845,8 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
 
         _total, _used, ram_avail = hw._ram_stats()
         tags = cached_repo_fit(
-            hid, total_vram=0, total_ram=ram_avail or _total, device=CPU)
+            hid, total_vram=0, total_ram=cpu_fit_ram_bytes(_total, ram_avail),
+            device=CPU)
     else:
         tags = cached_repo_fit(hid, total_vram=rec.probe.total_bytes or 0)
     if tags.get("fit") == "too-big":

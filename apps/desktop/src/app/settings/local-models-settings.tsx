@@ -63,7 +63,13 @@ import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus }
 import { CONTROL_TEXT } from './constants'
 import { LocalModelsMachineStats } from './local-models-machine-stats'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
-import { vllmDevicesRuntimeLine, vllmEngineChip, vllmEnginePower, vllmInstalledVersionsLine } from './vllm-engine-chip'
+import {
+  vllmDevicesRuntimeParts,
+  vllmEngineChip,
+  vllmEnginePower,
+  vllmInstalledVersionsLine,
+  type VllmDeviceRuntimePart
+} from './vllm-engine-chip'
 import { VllmModelsPane } from './vllm-models-pane'
 
 function ProgressBar({ percent }: { percent: number | undefined }) {
@@ -168,6 +174,34 @@ function VllmDeviceSelect({
         </SelectContent>
       </Select>
     </label>
+  )
+}
+
+function VllmDevicesStatus({ parts }: { parts: VllmDeviceRuntimePart[] }) {
+  const { t } = useI18n()
+  const copy = t.settings.localModels
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+      {parts.map((part, index) => {
+        const Icon = part.device === 'gpu' ? Zap : Cpu
+        const name = part.device === 'gpu' ? copy.deviceGpu : copy.deviceCpu
+
+        return (
+          <span key={part.device} className="inline-flex items-center gap-1">
+            {index > 0 ? (
+              <span aria-hidden="true" className="text-muted-foreground">
+                ·
+              </span>
+            ) : null}
+            <span aria-label={name} className="inline-flex" role="img">
+              <Icon aria-hidden className="size-3.5 shrink-0" />
+            </span>
+            <Pill tone={part.tone}>{part.label}</Pill>
+          </span>
+        )
+      })}
+    </span>
   )
 }
 
@@ -860,15 +894,15 @@ export function LocalModelsSettings() {
           }
         : null
   const vllmPower = isVllmEngine(engine) ? vllmEnginePower({ copy, jobs, serverBusy, status }) : null
-  const devicesLine = isVllmEngine(engine) ? vllmDevicesRuntimeLine(status.managed_engines, copy) : null
+  const deviceParts = isVllmEngine(engine) ? vllmDevicesRuntimeParts(status.managed_engines, copy) : null
 
   return (
     <SettingsContent>
       {/* ── Runtime ── */}
       <SettingsSection
         aside={
-          devicesLine ? (
-            <span>{devicesLine}</span>
+          deviceParts ? (
+            <VllmDevicesStatus parts={deviceParts} />
           ) : vllmChip ? (
             <Pill tone={vllmChip.tone}>{vllmChip.label}</Pill>
           ) : undefined

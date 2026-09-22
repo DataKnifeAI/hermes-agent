@@ -294,6 +294,81 @@ def test_cpu_catalog_keeps_official_qwen_when_gpu_is_24gb(monkeypatch):
     assert hide_catalog_row_by_default(forty) is False
 
 
+def test_cpu_in_use_stays_visible_when_own_serve_holds_ram(monkeypatch):
+    """Free RAM after our CPU serve starts must not hide the model in use.
+
+    Fit credits that process's RSS back, so the running checkpoint does not
+    flip to Too big. The same checkpoint still hides when the server is
+    stopped and free RAM is below the fit budget. A row that does not fit
+    the restored budget stays hidden. GPU too-big rows are a different probe.
+    """
+    from hermes_cli.vllm_runtime.inventory import (
+        catalog_models, classify_vllm_repo, hide_catalog_row_by_default,
+        visible_catalog_models,
+    )
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, VllmRecommendation, catalog_tiers
+
+    hid = "Qwen/Qwen3-4B-Instruct-2507"
+    bigger = "Qwen/Qwen3-32B-AWQ"
+    _gib = 1 << 30
+    tight = None
+    roomy = None
+    for n in range(1, 96):
+        ram = n * _gib
+        four = classify_vllm_repo(hid, device="cpu", total_ram=ram)["fit"]
+        wide = classify_vllm_repo(bigger, device="cpu", total_ram=ram)["fit"]
+        if four == "too-big":
+            tight = ram
+        elif tight is not None and four == "needs-ram" and wide == "too-big":
+            roomy = ram
+            break
+    assert tight is not None and roomy is not None and tight < roomy
+
+    pick = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(NvidiaProbe(24 * _gib, 24 * _gib, "data"), pick, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.list_cached_repos", lambda: [])
+    monkeypatch.setattr("hermes_cli.vllm_runtime.supervisor.vllm_settings", lambda cfg=None: {})
+    held = {"bytes": 0}
+    served = {"name": ""}
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.occupancy.managed_device_rss_bytes",
+        lambda device="cpu": held["bytes"] if device == "cpu" else 0,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: served["name"],
+    )
+    total = roomy + (8 * _gib)
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.hardware._ram_stats",
+        lambda: (total, total - tight, tight),
+    )
+    cfg = {"local_runtime": {"engine": "vllm-cpu"}}
+
+    stopped = {r["id"]: r for r in catalog_models(cfg)}
+    assert stopped[hid]["fit"] == "too-big"
+    assert stopped[hid]["hide_by_default"] is True
+    assert stopped[hid]["active"] is False
+    assert hid not in {r["id"] for r in visible_catalog_models(list(stopped.values()))}
+
+    held["bytes"] = roomy - tight
+    served["name"] = hid
+    running = {r["id"]: r for r in catalog_models(cfg)}
+    assert running[hid]["active"] is True
+    assert running[hid]["fit"] == "needs-ram"
+    assert running[hid]["hide_by_default"] is False
+    assert hide_catalog_row_by_default(running[hid]) is False
+    visible = {r["id"] for r in visible_catalog_models(list(running.values()))}
+    assert hid in visible
+    assert running[bigger]["fit"] == "too-big"
+    assert running[bigger]["hide_by_default"] is True
+    assert bigger not in visible
+    assert hide_catalog_row_by_default(
+        {"active": True, "added_by_you": False, "fit": "too-big", "fits": False}
+    ) is False
+
+
 def test_cpu_default_is_bf16_qwen3_4b_not_gpu_awq(tmp_path, monkeypatch):
     """CPU recommend / start / catalog use a small BF16 checkpoint.
 

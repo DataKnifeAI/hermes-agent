@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  vllmDevicesRuntimeLine,
+  vllmDevicesRuntimeParts,
   vllmEngineChip,
   vllmEnginePower,
   vllmInstalledVersionsLine,
@@ -158,12 +158,10 @@ describe('vllmEngineChip', () => {
   })
 })
 
-describe('vllmDevicesRuntimeLine', () => {
-  const devices = { ...copy, deviceCpu: 'CPU', deviceGpu: 'GPU' }
-
-  it('names both devices without a model id', () => {
+describe('vllmDevicesRuntimeParts', () => {
+  it('reports both devices without a device word or a model id', () => {
     expect(
-      vllmDevicesRuntimeLine(
+      vllmDevicesRuntimeParts(
         [
           { device: 'gpu', engine: 'vllm', engine_state: 'ready', server_running: true, runtime_installed: true },
           {
@@ -175,28 +173,33 @@ describe('vllmDevicesRuntimeLine', () => {
             served_model_name: 'qwen3:4b'
           }
         ],
-        devices
+        copy
       )
-    ).toBe('GPU Ready · CPU Stopped')
-    expect(
-      vllmDevicesRuntimeLine(
-        [
-          {
-            device: 'gpu',
-            engine: 'vllm',
-            engine_state: 'ready',
-            server_running: true,
-            runtime_installed: true,
-            served_model_name: 'qwen3:14b'
-          }
-        ],
-        devices
-      )
-    ).not.toMatch(/qwen3/)
+    ).toEqual([
+      { device: 'gpu', label: 'Ready', tone: 'success' },
+      { device: 'cpu', label: 'Stopped', tone: 'muted' }
+    ])
+
+    const gpuOnly = vllmDevicesRuntimeParts(
+      [
+        {
+          device: 'gpu',
+          engine: 'vllm',
+          engine_state: 'ready',
+          server_running: true,
+          runtime_installed: true,
+          served_model_name: 'qwen3:14b'
+        }
+      ],
+      copy
+    )
+
+    expect(gpuOnly?.map(part => part.label).join(' ')).not.toMatch(/qwen3/)
+    expect(gpuOnly?.map(part => part.label).join(' ')).not.toMatch(/GPU|CPU/)
   })
 
   it('keeps a live CPU server visible when the GPU row is stopped', () => {
-    const line = vllmDevicesRuntimeLine(
+    const parts = vllmDevicesRuntimeParts(
       [
         { engine: 'vllm', engine_state: 'stopped', server_running: false, runtime_installed: true },
         {
@@ -206,11 +209,14 @@ describe('vllmDevicesRuntimeLine', () => {
           runtime_installed: true
         }
       ],
-      devices
+      copy
     )
 
-    expect(line).toBe('GPU Stopped · CPU Ready')
-    expect(line).not.toMatch(/CPU Stopped/)
+    expect(parts).toEqual([
+      { device: 'gpu', label: 'Stopped', tone: 'muted' },
+      { device: 'cpu', label: 'Ready', tone: 'success' }
+    ])
+    expect(parts?.find(part => part.device === 'cpu')?.label).not.toBe('Stopped')
   })
 })
 

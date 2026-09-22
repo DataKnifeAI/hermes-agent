@@ -11,6 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 import json
 import logging
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -147,6 +148,57 @@ def expand_managed_pids(root_pids: set[int], *, children_of=None) -> set[int]:
     for pid in root_pids:
         out |= set(lookup(pid) or ())
     return out
+
+
+def _process_rss_bytes(pid: int) -> int:
+    """Resident bytes for one pid. 0 when the process is gone."""
+    if pid <= 0:
+        return 0
+    with suppress(Exception):
+        import psutil  # type: ignore
+
+        return max(0, int(psutil.Process(pid).memory_info().rss))
+    status = Path(f"/proc/{pid}/status")
+    with suppress(OSError, ValueError, IndexError):
+        for line in status.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    return 0
+
+
+def _live_device_pids(device: str) -> set[int]:
+    """In-process serve pid for one device, including the warmup before state is written."""
+    found: set[int] = set()
+    want = (device or "").strip().lower()
+    with suppress(Exception):
+        from hermes_cli.vllm_runtime.bootstrap import iter_live_supervisors
+
+        for sup in iter_live_supervisors():
+            if str(getattr(sup, "device", "") or "").strip().lower() != want:
+                continue
+            proc = getattr(sup, "proc", None)
+            pid = int(getattr(proc, "pid", 0) or 0)
+            if pid > 0:
+                found.add(pid)
+    return found
+
+
+def managed_device_rss_bytes(device: str = "cpu") -> int:
+    """RSS of this install's supervised serve for ``device``, including children.
+
+    Zero when that engine is not running. CPU catalog fit adds the CPU
+    figure back to free RAM so our own reservation is not "doesn't fit".
+    """
+    want = (device or "cpu").strip().lower() or "cpu"
+    roots: set[int] = set()
+    with suppress(Exception):
+        from hermes_cli.vllm_runtime.supervisor import state_path
+
+        roots, _ports = _collect_managed_state(state_path(want))
+    roots |= _live_device_pids(want)
+    if not roots:
+        return 0
+    return sum(_process_rss_bytes(pid) for pid in expand_managed_pids(roots))
 
 
 def _collect_managed_state(path) -> tuple[set[int], set[int]]:

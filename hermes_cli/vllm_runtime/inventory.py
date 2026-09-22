@@ -659,6 +659,27 @@ def _fit_on_ram(min_bytes: int, total_ram: int, *, headroom_frac: float = 0.20) 
     return "needs-ram" if min_bytes <= usable else "too-big"
 
 
+def cpu_fit_ram_bytes(total: int, available: int) -> int:
+    """Free RAM plus this install's CPU vLLM RSS, capped at physical total.
+
+    Fit uses free RAM. Once our serve reserves that RAM, free drops and the
+    running model looks too big. The reservation is ours — add it back. A
+    stopped engine reports 0, so a model that does not fit free RAM still
+    reads as too big. GPU fit does not call this.
+    """
+    from hermes_cli.vllm_runtime.occupancy import managed_device_rss_bytes
+
+    base = int(available or 0)
+    if base <= 0:
+        base = int(total or 0)
+    held = max(0, int(managed_device_rss_bytes("cpu") or 0))
+    credited = base + held
+    physical = int(total or 0)
+    if physical > 0:
+        return min(physical, credited)
+    return credited
+
+
 def _format_param_label(params: float | None) -> str | None:
     if params is None:
         return None
@@ -1592,9 +1613,11 @@ def hide_catalog_row_by_default(row: dict[str, Any]) -> bool:
     """Official catalog rows the probe says cannot run at 64k stay in the catalog.
 
     User-added / cached extras stay visible even when Too big — the user
-    already knows they are there. Search hits are not catalog rows.
+    already knows they are there. The model currently served stays visible:
+    free-RAM fit must not hide it after our own engine reserved that RAM.
+    Search hits are not catalog rows.
     """
-    if row.get("added_by_you"):
+    if row.get("added_by_you") or row.get("active"):
         return False
     return row.get("fit") == "too-big" or row.get("fits") is False
 
@@ -1638,7 +1661,7 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
         from hermes_cli.local_runtime.hardware import _ram_stats
 
         total, _used, avail = _ram_stats()
-        ram = avail or total
+        ram = cpu_fit_ram_bytes(total, avail)
         lead = cpu_tier()
         tiers = [lead, *tiers]
         recommended_id = lead.model

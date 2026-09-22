@@ -274,8 +274,10 @@ export function VllmModelsPane({
   const [setting, setSetting] = useState<null | string>(null)
   const [showUnfitting, setShowUnfitting] = useState(false)
   const anyDownloadRunning = jobs.some(j => j.kind === 'model-download' && j.status === 'running')
-  const hiddenCount = models.filter(hideByDefault).length
-  const visible = models.filter(model => showUnfitting || !hideByDefault(model))
+  const hidden = (model: VllmInventoryModel) =>
+    !isServedModel(model, activeModelId, servedModelName) && hideByDefault(model)
+  const hiddenCount = models.filter(hidden).length
+  const visible = models.filter(model => showUnfitting || !hidden(model))
 
   async function handleUse(model: VllmInventoryModel) {
     setSetting(model.id)
@@ -349,7 +351,7 @@ export function VllmModelsPane({
             const dJob = runningDownloadFor(jobs, model.id)
             const fit = fitOf(model)
             const tooBig = fit === 'too-big'
-            const officialTooBig = hideByDefault(model)
+            const officialTooBig = hidden(model)
 
             return (
               <ListRow
