@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { vllmDevicesRuntimeLine, vllmEngineChip, vllmEnginePower, type VllmEngineChipCopy } from './vllm-engine-chip'
+import {
+  vllmDevicesRuntimeLine,
+  vllmEngineChip,
+  vllmEnginePower,
+  vllmInstalledVersionsLine,
+  type VllmEngineChipCopy
+} from './vllm-engine-chip'
 
 const copy: VllmEngineChipCopy = {
   engineFailed: 'Failed',
@@ -153,7 +159,7 @@ describe('vllmEngineChip', () => {
 })
 
 describe('vllmDevicesRuntimeLine', () => {
-  const devices = { ...copy, deviceCpu: 'vLLM (CPU)', deviceGpu: 'vLLM (GPU)' }
+  const devices = { ...copy, deviceCpu: 'CPU', deviceGpu: 'GPU' }
 
   it('names both devices without a model id', () => {
     expect(
@@ -171,7 +177,22 @@ describe('vllmDevicesRuntimeLine', () => {
         ],
         devices
       )
-    ).toBe('vLLM (GPU) Ready · vLLM (CPU) Stopped')
+    ).toBe('GPU Ready · CPU Stopped')
+    expect(
+      vllmDevicesRuntimeLine(
+        [
+          {
+            device: 'gpu',
+            engine: 'vllm',
+            engine_state: 'ready',
+            server_running: true,
+            runtime_installed: true,
+            served_model_name: 'qwen3:14b'
+          }
+        ],
+        devices
+      )
+    ).not.toMatch(/qwen3/)
   })
 
   it('keeps a live CPU server visible when the GPU row is stopped', () => {
@@ -188,7 +209,40 @@ describe('vllmDevicesRuntimeLine', () => {
       devices
     )
 
-    expect(line).toBe('vLLM (GPU) Stopped · vLLM (CPU) Ready')
-    expect(line).not.toMatch(/vLLM \(CPU\) Stopped/)
+    expect(line).toBe('GPU Stopped · CPU Ready')
+    expect(line).not.toMatch(/CPU Stopped/)
+  })
+})
+
+describe('vllmInstalledVersionsLine', () => {
+  const devices = { deviceCpu: 'CPU', deviceGpu: 'GPU' }
+
+  it('names each venv version and omits a device that is not installed', () => {
+    expect(
+      vllmInstalledVersionsLine(
+        [
+          { device: 'gpu', engine: 'vllm', vllm_version: '0.10.0' },
+          { device: 'cpu', engine: 'vllm-cpu', vllm_version: '0.11.2' }
+        ],
+        devices
+      )
+    ).toBe('GPU 0.10.0 · CPU 0.11.2')
+
+    expect(
+      vllmInstalledVersionsLine(
+        [
+          { device: 'gpu', engine: 'vllm', vllm_version: '0.10.0' },
+          { device: 'cpu', engine: 'vllm-cpu', vllm_version: null }
+        ],
+        devices,
+        { device: 'cpu', version: '0.10.0' }
+      )
+    ).toBe('GPU 0.10.0')
+  })
+
+  it('uses the selected-device version only when rows did not report one', () => {
+    expect(vllmInstalledVersionsLine(undefined, devices, { device: 'gpu', version: '0.9.0' })).toBe('GPU 0.9.0')
+    expect(vllmInstalledVersionsLine(undefined, devices, { device: 'cpu', version: '0.9.0' })).toBe('CPU 0.9.0')
+    expect(vllmInstalledVersionsLine([], devices, { device: 'gpu', version: '' })).toBeNull()
   })
 })

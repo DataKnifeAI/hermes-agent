@@ -63,7 +63,7 @@ import type { LocalCatalogModel, LocalEngine, LocalHardware, LocalModelsStatus }
 import { CONTROL_TEXT } from './constants'
 import { LocalModelsMachineStats } from './local-models-machine-stats'
 import { ListRow, Pill, SettingsContent, SettingsSection, SettingsSkeleton } from './primitives'
-import { vllmDevicesRuntimeLine, vllmEngineChip, vllmEnginePower } from './vllm-engine-chip'
+import { vllmDevicesRuntimeLine, vllmEngineChip, vllmEnginePower, vllmInstalledVersionsLine } from './vllm-engine-chip'
 import { VllmModelsPane } from './vllm-models-pane'
 
 function ProgressBar({ percent }: { percent: number | undefined }) {
@@ -806,6 +806,12 @@ export function LocalModelsSettings() {
   // serving. Shown whenever true — not only right after an update.
   const updateApplied = status.runtime_installed && !status.update_available && status.tag === status.configured_tag
   const vllmVersion = (status.vllm_version || (isVllmEngine(engine) ? status.tag : '') || '').trim()
+  const deviceVersions = isVllmEngine(engine)
+    ? vllmInstalledVersionsLine(status.managed_engines, copy, {
+        device: vllmDeviceOf(status),
+        version: vllmVersion
+      })
+    : null
   const vllmChip =
     isVllmEngine(engine)
       ? vllmEngineChip({ copy, jobs, serverBusy, status })
@@ -830,7 +836,7 @@ export function LocalModelsSettings() {
           ) : undefined
         }
         icon={Zap}
-        meta={isVllmEngine(engine) ? (vllmVersion ? `${vllmEngineLabel(copy)} ${vllmVersion}` : vllmEngineLabel(copy)) : status.tag}
+        meta={isVllmEngine(engine) ? (deviceVersions ?? undefined) : status.tag}
         title={copy.runtimeTitle}
       >
         <div className="mb-3">

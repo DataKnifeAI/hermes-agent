@@ -343,19 +343,40 @@ def ensure_both_vllm_venvs(python_pin: str | None = "", *, upgrade: bool = False
     return out
 
 
+# Status and hardware poll both venvs. Re-probe only when pip rewrites the
+# venv python or the ``vllm`` script (an upgrade of one device leaves the other).
+_installed_version_cache: dict[str, tuple[int, int, str]] = {}
+
+
 def installed_vllm_version(device: str = "gpu") -> str:
     """Version of the ``vllm`` package inside the isolated venv — never Hermes ``sys.prefix``."""
     py = venv_python(device)
     if not py.is_file():
         return ""
     _assert_isolated(py)
+    exe = vllm_executable(device)
     try:
-        return subprocess.check_output(
+        py_ns = py.stat().st_mtime_ns
+    except OSError:
+        return ""
+    try:
+        exe_ns = exe.stat().st_mtime_ns if exe.is_file() else 0
+    except OSError:
+        exe_ns = 0
+    key = str(py)
+    cached = _installed_version_cache.get(key)
+    if cached is not None and cached[0] == py_ns and cached[1] == exe_ns:
+        return cached[2]
+    try:
+        version = subprocess.check_output(
             [str(py), "-c", "import importlib.metadata as m; print(m.version('vllm'))"],
             text=True, timeout=30,
         ).strip()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return ""
+    if version:
+        _installed_version_cache[key] = (py_ns, exe_ns, version)
+    return version
 
 
 def _parse_pep440_head(s: str) -> tuple[int, ...]:

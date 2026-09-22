@@ -132,6 +132,41 @@ def test_hardware_vllm_version_from_isolated_venv(tmp_path, monkeypatch):
     assert data["vllm_version"] == reported
 
 
+def test_managed_engine_versions_follow_each_venv(tmp_path, monkeypatch):
+    """GPU and CPU wheels are separate installs. An update upgrades one device."""
+    client, home = _client(tmp_path, monkeypatch)
+    _write_engine(home, "vllm")
+    versions = {"gpu": "0.10.0", "cpu": "0.11.2"}
+
+    def _version(device="gpu", *_args, **_kwargs):
+        return versions.get(device, "")
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", _version)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name",
+        lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.occupancy_payload",
+        lambda: {"occupancy": [], "occupancy_message": None})
+
+    data = client.get("/api/local-models/status").json()
+    by_device = {row["device"]: row.get("vllm_version") for row in data["managed_engines"]}
+    assert by_device["gpu"] == "0.10.0"
+    assert by_device["cpu"] == "0.11.2"
+    assert data["vllm_version"] == "0.10.0"
+    assert "0.11.2" not in (data["vllm_version"] or "")
+
+    hardware = client.get("/api/local-models/hardware").json()
+    hw = {row["device"]: row.get("vllm_version") for row in hardware["managed_engines"]}
+    assert hw == by_device
+
+
 def test_hardware_vllm_version_null_when_not_installed(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")

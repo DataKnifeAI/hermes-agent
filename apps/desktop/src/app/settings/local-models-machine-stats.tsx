@@ -6,7 +6,7 @@ import { AlertTriangle, Cpu, FolderOpen, Package, Zap } from '@/lib/icons'
 import type { LocalEngine, LocalHardware, LocalModelsStatus, ManagedLocalEngine } from '@/types/hermes'
 
 import { Pill } from './primitives'
-import { vllmEngineState } from './vllm-engine-chip'
+import { vllmEngineState, vllmInstalledVersionsLine } from './vllm-engine-chip'
 
 function isVllmEngine(engine: LocalEngine | string | undefined): boolean {
   return engine === 'vllm' || engine === 'vllm-cpu'
@@ -123,11 +123,21 @@ export function LocalModelsMachineStats({
   const total = hardware.vram_total_bytes
   const vllmVersion = vllmVersionOf(engine, hardware, status)
   const liveEngines = liveManagedEngines(hardware, status)
+  const selectedDevice: 'cpu' | 'gpu' =
+    engine === 'vllm-cpu' || status?.engine === 'vllm-cpu' || status?.vllm_device === 'cpu' ? 'cpu' : 'gpu'
+  const versionLine = isVllmEngine(engine)
+    ? vllmInstalledVersionsLine(hardware.managed_engines ?? status?.managed_engines, copy, {
+        device: selectedDevice,
+        version: vllmVersion
+      })
+    : null
+  // Live rows already show a running server's URL. Keep it on the Engine line
+  // only when those rows are absent (older backend, one listen address).
   const engineValue = isVllmEngine(engine)
-    ? vllmVersion
-      ? `${copy.engineVllm} ${vllmVersion}`
-      : copy.engineVllm
-    : copy.engineLlama
+    ? [versionLine, versionLine && liveEngines.some(row => row.server_base_url) ? null : listenUrl]
+        .filter(Boolean)
+        .join(' · ')
+    : [copy.engineLlama, listenUrl].filter(Boolean).join(' · ')
   const cpuLabel = [
     hardware.cpu_name,
     hardware.cpu_cores != null ? copy.cpuCores(hardware.cpu_cores) : null
@@ -236,15 +246,12 @@ export function LocalModelsMachineStats({
             />
           )}
 
-          <StatLine
-            label={copy.engineStat}
-            value={
-              <span>
-                {engineValue}
-                {listenUrl ? ` · ${listenUrl}` : ''}
-              </span>
-            }
-          />
+          {engineValue && (
+            <StatLine
+              label={copy.engineStat}
+              value={<span>{engineValue}</span>}
+            />
+          )}
 
           {liveEngines.map(row => {
             const device = managedDevice(row)

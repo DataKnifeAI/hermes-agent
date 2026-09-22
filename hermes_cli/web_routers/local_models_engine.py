@@ -434,8 +434,14 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
 
 
 def managed_vllm_engines(config: dict | None = None) -> list[dict[str, Any]]:
-    """GPU and CPU vLLM rows. A running engine is ready here even when the dropdown shows the other."""
+    """GPU and CPU vLLM rows. A running engine is ready here even when the dropdown shows the other.
+
+    ``vllm_version`` is that venv's installed package, not the sibling's.
+    Setup may pass one pin to both, but an update upgrades only the selected
+    device, so the two numbers are allowed to differ.
+    """
     from hermes_cli.vllm_runtime.device import CPU, GPU, device_to_engine
+    from hermes_cli.vllm_runtime.venv import installed_vllm_version
 
     cfg = config or {}
     rows: list[dict[str, Any]] = []
@@ -452,6 +458,7 @@ def managed_vllm_engines(config: dict | None = None) -> list[dict[str, Any]]:
             "runtime_installed": bool(snap["installed"]),
             "last_error": snap["last_error"],
             "start_phase": snap["start_phase"],
+            "vllm_version": (installed_vllm_version(device) or "").strip() or None,
         })
     return rows
 
@@ -715,7 +722,7 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
         )
     return {
         "model": hid,
-        "display_name": overlay["served_model_name"] or hid.rsplit("/", 1)[-1],
+        "display_name": hid,
         "needs_runtime": not (venv_ready("gpu") and venv_ready("cpu")),
         "needs_download": not repo_is_cached(hid),
         "apply_recommend": True,
@@ -760,7 +767,8 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     for key, value in overlay.items():
         save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
-    lm._step(job, "installing-runtime", "Installing vLLM GPU and CPU")
+    installing = "Installing vLLM on the CPU" if device == CPU else "Installing vLLM on the GPU"
+    lm._step(job, "installing-runtime", installing)
     _raise_if_both_venvs_failed(
         ensure_both_vllm_venvs(str(settings.get("python") or "")))
     if not repo_is_cached(hid):
@@ -777,7 +785,7 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
         raise
     lm._step(job, "setting-default", "Making it your default")
     activate_vllm()
-    done = notice or f"{overlay['served_model_name'] or hid.rsplit('/', 1)[-1]} is ready — new chats use it"
+    done = notice or f"{hid} is ready — new chats use it"
     lm._finish(job, done)
 
 

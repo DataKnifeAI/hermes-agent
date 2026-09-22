@@ -200,7 +200,7 @@ function deviceStateWord(row: ManagedLocalEngine | undefined, copy: VllmEngineCh
   return copy.engineStopped
 }
 
-/** One Runtime line for both servers: "vLLM (GPU) Ready · vLLM (CPU) Stopped". No model name. */
+/** One Runtime line for both servers: "GPU Ready · CPU Stopped". No model name. */
 export function vllmDevicesRuntimeLine(
   engines: readonly ManagedLocalEngine[] | undefined,
   copy: VllmEngineChipCopy & { deviceCpu: string; deviceGpu: string }
@@ -227,4 +227,48 @@ export function vllmDevicesRuntimeLine(
   }
 
   return `${copy.deviceGpu} ${deviceStateWord(gpu, copy)} · ${copy.deviceCpu} ${deviceStateWord(cpu, copy)}`
+}
+
+/**
+ * Installed package per venv: "GPU 0.10.0 · CPU 0.11.2".
+ * A missing venv is omitted. The fallback fills only the selected device, and
+ * only when rows did not report versions (older backend).
+ */
+export function vllmInstalledVersionsLine(
+  engines: readonly ManagedLocalEngine[] | undefined,
+  copy: { deviceCpu: string; deviceGpu: string },
+  fallback?: { device?: 'cpu' | 'gpu' | null; version?: null | string }
+): null | string {
+  const found: Partial<Record<'cpu' | 'gpu', string>> = {}
+  let reported = false
+
+  for (const row of engines ?? []) {
+    const device = rowDevice(row)
+
+    if (!device) {
+      continue
+    }
+
+    if (row.vllm_version !== undefined) {
+      reported = true
+    }
+
+    const version = (row.vllm_version || '').trim()
+
+    if (version) {
+      found[device] = version
+    }
+  }
+
+  const fallbackVersion = (fallback?.version || '').trim()
+
+  if (!reported && fallback?.device && fallbackVersion) {
+    found[fallback.device] = fallbackVersion
+  }
+
+  const parts = [found.gpu ? `${copy.deviceGpu} ${found.gpu}` : null, found.cpu ? `${copy.deviceCpu} ${found.cpu}` : null].filter(
+    (part): part is string => Boolean(part)
+  )
+
+  return parts.length ? parts.join(' · ') : null
 }

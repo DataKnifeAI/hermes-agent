@@ -83,7 +83,7 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.queryByText(/driver 560/)).toBeNull()
     expect(screen.queryByText(/this engine/)).toBeNull()
     expect(screen.queryByText(/~\/\.hermes\/models/)).toBeNull()
-    expect(screen.queryByText(/vLLM 0\.14\.1/)).toBeNull()
+    expect(screen.queryByText(/GPU 0\.14\.1/)).toBeNull()
     expect(screen.queryByText('hermes3:8b')).toBeNull()
     expect(screen.queryByText(/64k context/)).toBeNull()
 
@@ -92,14 +92,13 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.getByText(/driver 560/)).toBeTruthy()
     expect(screen.getByText(/this engine 5\.0 GB/)).toBeTruthy()
     expect(screen.getByText(/~\/\.hermes\/models/)).toBeTruthy()
-    expect(screen.getByText(/vLLM 0\.14\.1/)).toBeTruthy()
+    expect(screen.getByText(/GPU 0\.14\.1/)).toBeTruthy()
     expect(screen.getByText('hermes3:8b')).toBeTruthy()
-    expect(screen.getByText(/vLLM 0\.14\.1/)).toBeTruthy()
-    expect(screen.getByText('hermes3:8b')).toBeTruthy()
+    expect(screen.queryByText(/vLLM 0\.14\.1/)).toBeNull()
     expect(screen.getByText(/64k context fits this GPU/)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /^show less$/i }))
-    expect(screen.queryByText(/vLLM 0\.14\.1/)).toBeNull()
+    expect(screen.queryByText(/GPU 0\.14\.1/)).toBeNull()
     expect(screen.getByText('NVIDIA GeForce RTX 5090')).toBeTruthy()
     expect(screen.getByText(/AMD Ryzen 9 7950X/)).toBeTruthy()
   })
@@ -107,13 +106,14 @@ describe('LocalModelsMachineStats', () => {
   it('uses hardware.vllm_version on the Engine line before status.tag', () => {
     renderStats({ hardware: { vllm_version: '1.2.3' }, status: { tag: '', vllm_version: null } })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM 1\.2\.3/)).toBeTruthy()
+    expect(screen.getByText(/GPU 1\.2\.3/)).toBeTruthy()
+    expect(screen.queryByText(/vLLM 1\.2\.3/)).toBeNull()
   })
 
   it('falls back to status.tag when vllm_version is absent', () => {
     renderStats({ status: { tag: '0.9.0', vllm_version: null } })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM 0\.9\.0/)).toBeTruthy()
+    expect(screen.getByText(/GPU 0\.9\.0/)).toBeTruthy()
   })
   it('Show more Serving uses starting/ready — not a leftover configured model', () => {
     renderStats({
@@ -156,9 +156,8 @@ describe('LocalModelsMachineStats', () => {
       status: { engine: 'vllm-cpu', vllm_version: '0.14.1' }
     })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM 0\.14\.1/)).toBeTruthy()
-    expect(screen.queryByText(/vLLM \(CPU\)/)).toBeNull()
-    expect(screen.queryByText(/vLLM \(GPU\)/)).toBeNull()
+    expect(screen.getByText(/CPU 0\.14\.1/)).toBeTruthy()
+    expect(screen.queryByText(/vLLM/)).toBeNull()
   })
 
   it('shows a running CPU vLLM when the selected GPU engine is stopped', () => {
@@ -179,8 +178,24 @@ describe('LocalModelsMachineStats', () => {
       status: { engine_state: 'stopped', server_running: false, served_model_name: null }
     })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM \(CPU\).*18436.*ready/)).toBeTruthy()
-    expect(screen.queryByText(/vLLM \(CPU\).*Stopped/)).toBeNull()
+    expect(screen.getByText(/CPU.*18436.*ready/)).toBeTruthy()
+    expect(screen.queryByText(/CPU.*Stopped/)).toBeNull()
+  })
+
+  it('shows each installed venv version and does not copy one onto the other', () => {
+    renderStats({
+      hardware: {
+        managed_engines: [
+          { device: 'gpu', engine: 'vllm', engine_state: 'stopped', server_running: false, vllm_version: '0.10.0' },
+          { device: 'cpu', engine: 'vllm-cpu', engine_state: 'stopped', server_running: false, vllm_version: '0.11.2' }
+        ],
+        vllm_version: '0.10.0'
+      },
+      status: { engine_state: 'stopped', server_running: false, server_base_url: null }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
+    expect(screen.getByText('GPU 0.10.0 · CPU 0.11.2')).toBeTruthy()
+    expect(screen.queryByText(/vLLM/)).toBeNull()
   })
 
   it('prefers ram_used_bytes over total minus available', () => {

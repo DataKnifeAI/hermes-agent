@@ -1209,10 +1209,10 @@ export const ja = defineLocale({
       engineLabel: 'ローカルバックエンド',
       engineLlama: 'llama.cpp',
       engineVllm: 'vLLM',
-      engineVllmCpu: 'vLLM (CPU)',
+      engineVllmCpu: 'CPU',
       deviceLabel: 'デバイス',
-      deviceGpu: 'vLLM (GPU)',
-      deviceCpu: 'vLLM (CPU)',
+      deviceGpu: 'GPU',
+      deviceCpu: 'CPU',
       vllmInstallTitle: 'vLLM ランタイムをインストール',
       vllmInstallDetail:
         'vLLM 推論エンジンをダウンロードします。ダウンロードしたモデルはこのマシンだけで動きます——アカウント不要、データは外に出ません。サーバーは Hermes が起動・管理します。',

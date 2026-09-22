@@ -759,8 +759,22 @@ describe('vLLM engine', () => {
       ...VLLM_STATUS,
       engine_state: 'ready',
       managed_engines: [
-        { device: 'gpu', engine: 'vllm', engine_state: 'ready', server_running: true, runtime_installed: true },
-        { device: 'cpu', engine: 'vllm', engine_state: 'stopped', server_running: false, runtime_installed: true }
+        {
+          device: 'gpu',
+          engine: 'vllm',
+          engine_state: 'ready',
+          server_running: true,
+          runtime_installed: true,
+          vllm_version: '0.28.0'
+        },
+        {
+          device: 'cpu',
+          engine: 'vllm',
+          engine_state: 'stopped',
+          server_running: false,
+          runtime_installed: true,
+          vllm_version: '0.27.1'
+        }
       ],
       models: [{ id: 'Qwen/Qwen3-8B-AWQ', size_bytes: 5 * 2 ** 30, size_label: '5.0 GB' }],
       runtime_installed: true,
@@ -770,9 +784,11 @@ describe('vLLM engine', () => {
       vllm_device: 'gpu'
     })
     renderPane()
-    expect(await screen.findByText('vLLM (GPU) Ready · vLLM (CPU) Stopped')).toBeTruthy()
+    expect(await screen.findByText('GPU Ready · CPU Stopped')).toBeTruthy()
+    expect(screen.getByText('GPU 0.28.0 · CPU 0.27.1')).toBeTruthy()
+    expect(screen.queryByText('vLLM 0.28.0')).toBeNull()
     fireEvent.click(await screen.findByLabelText(/^device$/i))
-    fireEvent.click(await screen.findByRole('option', { name: 'vLLM (CPU)' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'CPU' }))
     await waitFor(() => {
       expect(mocked.setVllmDevice).toHaveBeenCalledWith('cpu')
     })
@@ -1267,7 +1283,8 @@ describe('vLLM engine', () => {
       expect.arrayContaining(['flex', 'items-center', 'justify-end', 'gap-2'])
     )
     expect(screen.getAllByRole('button', { name: /turn on/i })).toHaveLength(1)
-    expect(screen.getByText('vLLM 0.28.0')).toBeTruthy()
+    expect(screen.getByText('GPU 0.28.0')).toBeTruthy()
+    expect(screen.queryByText('vLLM 0.28.0')).toBeNull()
     expect(screen.queryByText('vLLM runtime installed')).toBeNull()
     expect(screen.queryByText(/the latest release on PyPI/i)).toBeNull()
     expect(screen.queryByText(/installed at/i)).toBeNull()

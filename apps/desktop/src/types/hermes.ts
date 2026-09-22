@@ -1296,6 +1296,8 @@ export interface ManagedLocalEngine {
   runtime_installed?: boolean
   last_error?: null | string
   start_phase?: null | string
+  /** This venv's installed ``vllm`` package. Null when that device is not installed. */
+  vllm_version?: null | string
 }
 
 export interface LocalOccupancyHit {
