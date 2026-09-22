@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import suppress
 import json
 import logging
+import math
 import os
 import socket
 import subprocess
@@ -384,11 +385,150 @@ def serve_environ(executable: str | Path, base: dict | None = None, *,
     return env
 
 
+# vLLM's CPU worker treats this flag as a fraction of the NUMA node's
+# *total* RAM (``ceil(total * fraction)``) and aborts when that exceeds
+# what is free. Omitting it selects the engine default, 0.92.
+_CPU_NODE_MEM_HEADROOM = 0.90
+_CPU_NODE_AVAILABLE_KEYS = (
+    "MemFree", "Active(file)", "Inactive(file)", "SReclaimable",
+)
+
+
+def parse_vllm_node_meminfo(text: str) -> tuple[int, int] | None:
+    """(total, available) bytes. Same sum vLLM uses, not MemAvailable."""
+    fields: dict[str, int] = {}
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            fields[parts[2].rstrip(":")] = int(parts[3]) * 1024
+        except ValueError:
+            continue
+    total = fields.get("MemTotal") or 0
+    if total <= 0:
+        return None
+    available = sum(fields.get(key, 0) for key in _CPU_NODE_AVAILABLE_KEYS)
+    return total, max(0, available)
+
+
+def format_memory_utilization(value: float) -> str:
+    """Four-decimal flag text. ``0.75`` stays ``0.75``."""
+    millis = int(round(float(value) * 10000))
+    millis = min(10000, max(0, millis))
+    whole, frac = divmod(millis, 10000)
+    return f"{whole}.{frac:04d}".rstrip("0").rstrip(".")
+
+
+def fit_cpu_memory_utilization(
+    total: int, available: int, requested: float,
+) -> float:
+    """Largest fraction of ``total`` that still fits in free node RAM.
+
+    ``requested`` (config, usually 0.75) is a ceiling. vLLM compares
+    ``ceil(total * fraction)`` to available and refuses the start when
+    the reservation is larger. A 10% headroom covers RAM taken between
+    argv build and the worker check.
+    """
+    try:
+        requested_f = float(requested)
+    except (TypeError, ValueError):
+        requested_f = 0.75
+    if not math.isfinite(requested_f) or requested_f <= 0 or requested_f > 1:
+        requested_f = 0.75
+    if total <= 0 or available <= 0:
+        return requested_f
+    budget = int(available * _CPU_NODE_MEM_HEADROOM)
+    if budget <= 0:
+        return requested_f
+    millis = math.floor(min(requested_f, budget / total) * 10000)
+    while millis > 0:
+        flag = float(format_memory_utilization(millis / 10000))
+        if math.ceil(total * flag) <= budget:
+            break
+        millis -= 1
+    if millis <= 0:
+        return requested_f
+    return millis / 10000
+
+
+def _first_allowed_cpu() -> int | None:
+    if not hasattr(os, "sched_getaffinity"):
+        return 0
+    try:
+        allowed = os.sched_getaffinity(0)
+    except OSError:
+        return None
+    return min(allowed) if allowed else None
+
+
+def _node_for_cpu(cpu: int) -> int | None:
+    cpu_dir = Path(f"/sys/devices/system/cpu/cpu{cpu}")
+    if not cpu_dir.is_dir():
+        return None
+    for child in cpu_dir.iterdir():
+        name = child.name
+        if name.startswith("node") and name[4:].isdigit():
+            return int(name[4:])
+    return None
+
+
+def cpu_rank0_node_memory() -> tuple[int, int] | None:
+    """RAM vLLM's CPU worker checks: NUMA node of the first allowed CPU.
+
+    The worker reads that node's meminfo (not system-wide MemAvailable)
+    and applies ``--gpu-memory-utilization`` to the node total. No sysfs
+    node falls back to psutil, which is vLLM's non-NUMA path.
+    """
+    cpu = _first_allowed_cpu()
+    node = _node_for_cpu(cpu) if cpu is not None else None
+    if node is None:
+        node = 0
+    path = Path(f"/sys/devices/system/node/node{node}/meminfo")
+    if path.is_file():
+        with suppress(OSError):
+            parsed = parse_vllm_node_meminfo(path.read_text(encoding="utf-8"))
+            if parsed is not None:
+                return parsed
+    try:
+        import psutil
+
+        vm = psutil.virtual_memory()
+        total, avail = int(vm.total), int(vm.available)
+    except Exception:
+        return None
+    if total <= 0:
+        return None
+    return total, max(0, avail)
+
+
+def _cpu_serve_memory_utilization(settings: dict) -> float:
+    requested = settings.get("gpu_memory_utilization") or 0.75
+    node = cpu_rank0_node_memory()
+    if node is None:
+        return fit_cpu_memory_utilization(0, 0, requested)
+    util = fit_cpu_memory_utilization(node[0], node[1], requested)
+    try:
+        configured = float(requested)
+    except (TypeError, ValueError):
+        configured = 0.75
+    if util + 1e-9 < configured:
+        logger.info(
+            "CPU vLLM memory utilization %s (configured %s) so the "
+            "reservation fits free RAM on the worker NUMA node",
+            format_memory_utilization(util), requested,
+        )
+    return util
+
+
 def serve_argv(executable: str | Path, settings: dict, *, device: str = "gpu") -> list[str]:
     """``vllm serve`` argv. Bind host comes from settings; 1-click default is loopback.
 
     CPU uses the official CPU-built ``vllm`` — never ``--device cpu`` (that is
-    the CUDA-wheel trap). GPU-only flags stay off the CPU argv.
+    the CUDA-wheel trap). ``--kv-cache-dtype`` stays off (no GPU KV pool).
+    ``--gpu-memory-utilization`` is still passed: on the CPU wheel it is the
+    fraction of the NUMA node's total RAM to reserve, and the engine default
+    (0.92) aborts when a desktop already holds that RAM.
     """
     model = str(settings.get("model") or "").strip()
     if not model:
@@ -404,7 +544,13 @@ def serve_argv(executable: str | Path, settings: dict, *, device: str = "gpu") -
         "--enable-auto-tool-choice",
         "--tool-call-parser", str(settings.get("tool_call_parser") or "hermes"),
     ]
-    if device != CPU:
+    if device == CPU:
+        util = _cpu_serve_memory_utilization(settings)
+        argv.extend([
+            "--gpu-memory-utilization",
+            format_memory_utilization(util),
+        ])
+    else:
         argv.extend([
             "--gpu-memory-utilization",
             str(settings.get("gpu_memory_utilization") or 0.75),

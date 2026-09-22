@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import os
@@ -13,7 +14,10 @@ from hermes_cli.local_engines import engine_from_config
 from hermes_cli.vllm_runtime.device import (
     CPU_LISTEN_PORT, ENGINE_CPU, ENGINE_GPU, GPU_LISTEN_PORT, USER_SERVER_PORTS,
 )
-from hermes_cli.vllm_runtime.supervisor import serve_argv, serve_environ
+from hermes_cli.vllm_runtime.supervisor import (
+    fit_cpu_memory_utilization, format_memory_utilization, parse_vllm_node_meminfo,
+    serve_argv, serve_environ,
+)
 from hermes_cli.vllm_runtime.venv import runtimes_root, venv_dir
 
 
@@ -58,7 +62,9 @@ def test_cpu_serve_argv_uses_cpu_port_and_omits_cuda_flags():
     }, device="cpu")
     assert "--device" not in argv
     assert argv[argv.index("--port") + 1] == str(CPU_LISTEN_PORT)
-    assert "--gpu-memory-utilization" not in argv
+    # CPU still passes the flag: vLLM uses it as a fraction of node RAM.
+    cpu_util = float(argv[argv.index("--gpu-memory-utilization") + 1])
+    assert 0 < cpu_util <= 0.75
     assert "--kv-cache-dtype" not in argv
     assert str(GPU_LISTEN_PORT) not in argv
     for banned in USER_SERVER_PORTS:
@@ -72,6 +78,59 @@ def test_cpu_serve_argv_uses_cpu_port_and_omits_cuda_flags():
     }, device="gpu")
     assert gpu[gpu.index("--port") + 1] == str(GPU_LISTEN_PORT)
     assert "--gpu-memory-utilization" in gpu
+    assert gpu[gpu.index("--gpu-memory-utilization") + 1] == "0.75"
+
+
+def test_parse_vllm_node_meminfo_matches_worker_formula():
+    text = "\n".join([
+        "Node 0 MemTotal:       65766604 kB",
+        "Node 0 MemFree:         2097152 kB",
+        "Node 0 MemAvailable:   35861299 kB",
+        "Node 0 Active(file):   10485760 kB",
+        "Node 0 Inactive(file): 20971520 kB",
+        "Node 0 SReclaimable:    5242880 kB",
+    ])
+    total, available = parse_vllm_node_meminfo(text)
+    assert total == 65766604 * 1024
+    # MemAvailable is not the worker's number.
+    assert available == (2097152 + 10485760 + 20971520 + 5242880) * 1024
+
+
+def test_cpu_memory_utilization_fits_busy_numa_node():
+    """0.92 of node total wanted 57.68 GiB; node 0 had 34.2 of 62.7 free."""
+    gib = 1024 ** 3
+    total = int(62.7 * gib)
+    available = int(34.2 * gib)
+    assert math.ceil(total * 0.92) > available
+    assert math.ceil(total * 0.75) > available
+    util = fit_cpu_memory_utilization(total, available, 0.75)
+    assert math.ceil(total * float(format_memory_utilization(util))) <= available
+    assert util < 0.75
+
+
+def test_cpu_memory_utilization_keeps_configured_cap_when_node_is_free():
+    gib = 1024 ** 3
+    util = fit_cpu_memory_utilization(64 * gib, 60 * gib, 0.75)
+    assert util == 0.75
+    assert format_memory_utilization(util) == "0.75"
+
+
+def test_cpu_serve_argv_shrinks_reservation_to_free_node_ram(monkeypatch):
+    gib = 1024 ** 3
+    total = int(62.7 * gib)
+    available = int(34.2 * gib)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.cpu_rank0_node_memory",
+        lambda: (total, available),
+    )
+    argv = serve_argv("/opt/cpu-venv/bin/vllm", {
+        "model": "Qwen/Qwen3-4B-Instruct-2507",
+        "port": 18436,
+        "gpu_memory_utilization": 0.75,
+    }, device="cpu")
+    flag = argv[argv.index("--gpu-memory-utilization") + 1]
+    assert math.ceil(total * float(flag)) <= available
+    assert float(flag) < 0.75
 
 
 def test_cpu_serve_env_selects_cpu_platform_before_import(tmp_path, monkeypatch):
@@ -308,7 +367,8 @@ def test_cpu_default_is_bf16_qwen3_4b_not_gpu_awq(tmp_path, monkeypatch):
     assert hid in argv
     assert "--quantization" not in argv
     assert "--kv-cache-dtype" not in argv
-    assert "--gpu-memory-utilization" not in argv
+    cpu_util = float(argv[argv.index("--gpu-memory-utilization") + 1])
+    assert 0 < cpu_util <= float(fresh.get("gpu_memory_utilization") or 0.75)
     assert argv[argv.index("--tool-call-parser") + 1] == "hermes"
     served_len = int(argv[argv.index("--max-model-len") + 1])
     assert served_len >= MIN_CONTEXT
