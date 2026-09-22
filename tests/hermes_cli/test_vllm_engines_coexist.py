@@ -136,9 +136,69 @@ def test_turn_off_one_vllm_leaves_the_other(monkeypatch):
         assert stopped == ["gpu"]
         assert boot.get_supervisor("cpu") is not None
         stopped.clear()
-        name = stop_configured_engine({"local_runtime": {"engine": "vllm-cpu"}})
-        assert name == "vllm"
+        boot._SUPERVISORS["gpu"] = _Sup("gpu", stopped)
+        stop_configured_engine({
+            "local_runtime": {"engine": "vllm", "vllm": {"device": "cpu"}},
+        })
         assert stopped == ["cpu"]
+        assert boot.get_supervisor("gpu") is not None
+    finally:
+        _reset_supervisors()
+
+
+def test_gpu_boot_does_not_stop_matching_cpu_supervisor(monkeypatch):
+    """Same-device idempotent boot returns that supervisor and leaves the sibling."""
+    import hermes_cli.vllm_runtime.bootstrap as boot
+
+    stopped: list[str] = []
+    scanned: list[str] = []
+    _reset_supervisors()
+    boot._SUPERVISORS["gpu"] = _Sup("hermes3:8b", stopped)
+    boot._SUPERVISORS["cpu"] = _Sup("qwen3:4b", stopped)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.occupancy.require_gpu_free",
+        lambda: scanned.append("occupancy"))
+    cfg = {
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {"device": "gpu", "model": "org/gpu", "served_model_name": "hermes3:8b"},
+        }
+    }
+    try:
+        got = boot.ensure_vllm_runtime(cfg, force=True, timeout_s=1)
+        assert got is boot.get_supervisor("gpu")
+        assert stopped == []
+        assert boot.get_supervisor("cpu") is not None
+        assert scanned == []
+    finally:
+        _reset_supervisors()
+
+
+def test_cpu_boot_does_not_stop_gpu_supervisor_or_scan_gpu(monkeypatch):
+    import hermes_cli.vllm_runtime.bootstrap as boot
+
+    stopped: list[str] = []
+    scanned: list[str] = []
+    _reset_supervisors()
+    boot._SUPERVISORS["gpu"] = _Sup("hermes3:8b", stopped)
+    boot._SUPERVISORS["cpu"] = _Sup("qwen3:4b", stopped)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.occupancy.require_gpu_free",
+        lambda: scanned.append("occupancy"))
+    cfg = {
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {"device": "cpu", "model": "Qwen/Qwen3-4B-Instruct-2507", "served_model_name": "qwen3:4b"},
+        }
+    }
+    try:
+        got = boot.ensure_vllm_runtime(cfg, force=True, timeout_s=1)
+        assert got is boot.get_supervisor("cpu")
+        assert stopped == []
+        assert boot.get_supervisor("gpu") is not None
+        assert scanned == []
     finally:
         _reset_supervisors()
 
