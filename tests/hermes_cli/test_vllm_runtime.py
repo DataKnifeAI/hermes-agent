@@ -636,9 +636,11 @@ def test_activate_writes_loopback_v1_and_preserves_remote(tmp_path, monkeypatch)
     (home / "config.yaml").write_text(yaml.dump({"model": {}}), encoding="utf-8")
     url = activate_vllm_provider(load_config())
     cfg = load_config()
-    assert cfg["model"]["provider"] == "vllm"
+    assert cfg["model"]["provider"] == "custom"
     assert cfg["model"]["default"]
-    assert (cfg.get("providers") or {}).get("vllm", {}).get("name") == "vLLM GPU"
+    gpu = (cfg.get("providers") or {}).get("vllm-gpu") or {}
+    assert gpu.get("name") == "vLLM GPU"
+    assert gpu.get("base_url") == url
     assert url.endswith("/v1")
     host = url.split("://", 1)[-1].split(":")[0]
     assert host in ("127.0.0.1", "localhost")
@@ -647,7 +649,11 @@ def test_activate_writes_loopback_v1_and_preserves_remote(tmp_path, monkeypatch)
     save_config_value("model.base_url", "http://gpu-box.example:8000/v1")
     kept = activate_vllm_provider(load_config())
     assert kept == "http://gpu-box.example:8000/v1"
-    assert load_config()["model"]["base_url"] == kept
+    after = load_config()
+    assert after["model"]["base_url"] == kept
+    assert after["model"]["provider"] == "custom"
+    assert (after.get("providers") or {})["vllm-gpu"]["base_url"] == url
+    assert (after.get("providers") or {})["vllm-gpu"]["name"] == "vLLM GPU"
 
 
 def test_ensure_vllm_runtime_fake_server(tmp_path, monkeypatch):

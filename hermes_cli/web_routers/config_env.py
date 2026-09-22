@@ -352,6 +352,11 @@ def _config_api_key_is_env_ref(endpoint_id: str) -> bool:
     return bool(isinstance(raw_key, str) and re.search(r"\$\{[^}]+\}", raw_key))
 
 
+def _endpoint_urls_match(left: str | None, right: str | None) -> bool:
+    return str(left or "").strip().rstrip("/").lower() == str(right or "").strip().rstrip("/").lower() and bool(
+        str(left or "").strip())
+
+
 def _endpoint_row(
     endpoint_id: str, name: str, base_url: str, model: str, models: List[str], context_length,
     discover_models: bool, key_entry: Dict[str, Any], is_current: bool, source: str,
@@ -385,14 +390,21 @@ def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
             from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
 
             saved_name = str(raw_entry.get("name") or endpoint_id)
+            # ``provider: custom`` points at one device by URL. That record is
+            # current; the other device's record stays listed beside it.
+            is_current = endpoint_id == current_provider or (
+                current_provider.lower() == "custom" and _endpoint_urls_match(base_url, current_base_url))
             endpoints.append(_endpoint_row(
                 endpoint_id, managed_endpoint_name_for_url(base_url) or saved_name, base_url,
                 str(raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else "")),
                 models, raw_entry.get("context_length"), bool(raw_entry.get("discover_models", True)),
-                raw_entry, endpoint_id == current_provider, "providers",
+                raw_entry, is_current, "providers",
             ))
 
-    if current_provider.lower() == "custom" and current_base_url and not any(e["id"] == "custom" for e in endpoints):
+    already_listed = any(
+        e["id"] == "custom" or _endpoint_urls_match(e.get("base_url"), current_base_url)
+        for e in endpoints)
+    if current_provider.lower() == "custom" and current_base_url and not already_listed:
         from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
 
         endpoints.insert(0, _endpoint_row(

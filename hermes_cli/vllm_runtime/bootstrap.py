@@ -203,14 +203,116 @@ def _model_section(config: dict | None) -> dict:
     return model if isinstance(model, dict) else {}
 
 
-def activate_vllm_provider(config: dict | None = None) -> str:
-    """Point ``model.provider`` at managed (or already-remote) vLLM via the config API.
+def _serve_from_state_file(device: str) -> tuple[str, str]:
+    """``(base_url, served_model_name)`` from that device's ``server.json``.
 
-    Overwrites ``model.base_url`` only when the current URL is empty or loopback.
-    A remote ``provider: vllm`` URL is left alone. Returns the URL that applies.
+    Pid liveness does not matter: a stopped serve still has a stable URL.
+    """
+    import json
+
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    path = state_path(device)
+    if not path.is_file():
+        return "", ""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return "", ""
+    if not isinstance(raw, dict):
+        return "", ""
+    return (
+        str(raw.get("base_url") or "").strip().rstrip("/"),
+        str(raw.get("served_model_name") or "").strip(),
+    )
+
+
+def _upsert_device_endpoint(providers: dict, device: str, *, base_url: str,
+                            model: str, only_if_absent: bool = False) -> None:
+    """Write one device's custom endpoint. Never reads or writes the sibling key."""
+    from hermes_cli.vllm_runtime.device import managed_endpoint_key, managed_endpoint_name
+
+    key = managed_endpoint_key(device)
+    current = providers.get(key)
+    existing = dict(current) if isinstance(current, dict) else {}
+    if only_if_absent and str(existing.get("base_url") or "").strip():
+        return
+    url = str(base_url or "").strip().rstrip("/")
+    if not url:
+        return
+    existing.update({
+        "name": managed_endpoint_name(device),
+        "base_url": url,
+        "discover_models": True,
+    })
+    served = str(model or "").strip()
+    if served:
+        existing["model"] = served
+        models = dict(existing.get("models") or {}) if isinstance(existing.get("models"), dict) else {}
+        models.setdefault(served, {})
+        existing["models"] = models
+    providers[key] = existing
+
+
+def _retire_shared_vllm_slot(providers: dict) -> None:
+    """Hide the old single ``providers.vllm`` slot once its URL is a managed loopback.
+
+    ``save_config(merge_existing=True)`` cannot delete keys, so the slot stays
+    with an empty URL and drops out of the custom-endpoint list. A remote
+    ``providers.vllm`` URL is a user's GPU box and is left alone. If the shared
+    slot still holds a device URL that device does not have yet, that record is
+    copied across before the slot is hidden.
+    """
+    from hermes_cli.vllm_runtime.device import (
+        CPU, CPU_ENDPOINT_NAME, GPU, GPU_ENDPOINT_NAME, managed_endpoint_key,
+        managed_endpoint_name, managed_endpoint_name_for_url,
+    )
+
+    legacy = providers.get("vllm")
+    if not isinstance(legacy, dict):
+        return
+    url = str(legacy.get("base_url") or legacy.get("url") or legacy.get("api") or "").strip().rstrip("/")
+    if not url or not _is_loopback_url(url):
+        return
+    label = managed_endpoint_name_for_url(url)
+    name = str(legacy.get("name") or "")
+    # URL wins when the shared slot's name was overwritten by the other device.
+    if label == CPU_ENDPOINT_NAME:
+        device = CPU
+    elif label == GPU_ENDPOINT_NAME:
+        device = GPU
+    elif name == CPU_ENDPOINT_NAME:
+        device = CPU
+    elif name == GPU_ENDPOINT_NAME:
+        device = GPU
+    else:
+        return
+    key = managed_endpoint_key(device)
+    held = providers.get(key)
+    if not isinstance(held, dict) or not str(held.get("base_url") or "").strip():
+        copied = dict(legacy)
+        copied["name"] = managed_endpoint_name(device)
+        copied["base_url"] = url
+        copied.pop("enabled", None)
+        providers[key] = copied
+    retired = dict(legacy)
+    retired["base_url"] = ""
+    retired["enabled"] = False
+    providers["vllm"] = retired
+
+
+def activate_vllm_provider(config: dict | None = None) -> str:
+    """Point chat at the selected device and record that device's endpoint.
+
+    GPU and CPU are separate ``providers`` records (``vllm-gpu``, ``vllm-cpu``).
+    Starting one updates its own name and URL only. Chat stays ``provider:
+    custom`` and ``model.base_url`` follows ``local_runtime.vllm.device`` when
+    the current URL is empty or loopback. A remote URL is left alone. Returns
+    the URL that applies to chat.
     """
     from cli import save_config_value
     from hermes_cli.config import load_config, save_config
+    from hermes_cli.vllm_runtime.device import CPU, GPU, normalize_device
     from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
 
@@ -220,42 +322,39 @@ def activate_vllm_provider(config: dict | None = None) -> str:
 
     served = str(settings.get("served_model_name") or _DEFAULT_SERVED)
     from hermes_cli.local_engines import vllm_device_from_config
-    from hermes_cli.vllm_runtime.device import managed_endpoint_name
 
-    device = vllm_device_from_config(cfg)
+    device = normalize_device(vllm_device_from_config(cfg))
     sup = get_supervisor(device)
     if sup is not None:
-        managed = sup.base_url
+        managed = str(sup.base_url)
     else:
         state = resolve_vllm_endpoint(cfg, wait_for_boot_s=0)
-        managed = (state or {}).get("base_url") or openai_base_url(settings)
+        managed = str((state or {}).get("base_url") or openai_base_url(settings, device=device))
     current = str(_model_section(cfg).get("base_url") or "").strip()
-    write_url = managed if _is_loopback_url(current) else current
+    loopback = _is_loopback_url(current)
+    write_url = managed if loopback else current
 
-    save_config_value("model.provider", "vllm")
-    save_config_value("model.default", served)
-    if _is_loopback_url(current):
-        save_config_value("model.base_url", managed)
+    if loopback:
+        # Chat follows the selected device by URL. Provider stays custom.
+        save_config_value("model.provider", "custom")
+        save_config_value("model.default", served)
+        save_config_value("model.base_url", managed.rstrip("/"))
 
     live = load_config()
     providers = live.get("providers")
     if not isinstance(providers, dict):
         providers = {}
-    entry = dict(providers.get("vllm") or {}) if isinstance(providers.get("vllm"), dict) else {}
-    entry.update({
-        "name": managed_endpoint_name(device),
-        "base_url": write_url.rstrip("/"),
-        "model": served,
-        "discover_models": True,
-    })
-    models = dict(entry.get("models") or {}) if isinstance(entry.get("models"), dict) else {}
-    models.setdefault(served, {})
-    entry["models"] = models
-    providers["vllm"] = entry
+    _upsert_device_endpoint(providers, device, base_url=managed, model=served)
+    other = CPU if device == GPU else GPU
+    other_url, other_model = _serve_from_state_file(other)
+    if other_url:
+        _upsert_device_endpoint(
+            providers, other, base_url=other_url, model=other_model, only_if_absent=True)
+    _retire_shared_vllm_slot(providers)
     live["providers"] = providers
     with suppress(Exception):
         save_config(live, merge_existing=True)
-    return write_url
+    return write_url.rstrip("/")
 
 
 def start_managed_vllm(config: dict | None = None, *, apply_recommend: bool = True):

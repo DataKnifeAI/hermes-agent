@@ -59,16 +59,24 @@ def install_log_name(device: str | None) -> str:
     return "vllm-cpu-install.log" if normalize_device(device) == CPU else "vllm-install.log"
 
 
-# Picker / settings labels for the two managed serves. Routing stays
-# ``provider: vllm`` or ``provider: custom``; only the display name differs.
+# Picker labels and stable ``providers:`` keys. Chat stays ``provider: custom``
+# and points ``model.base_url`` at the selected device. The keys are not the
+# legacy engine id, even where the CPU string matches ``vllm-cpu``.
 GPU_ENDPOINT_NAME = "vLLM GPU"
 CPU_ENDPOINT_NAME = "vLLM CPU"
+GPU_ENDPOINT_KEY = "vllm-gpu"
+CPU_ENDPOINT_KEY = "vllm-cpu"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
 
 
 def managed_endpoint_name(device: str | None) -> str:
     """User-facing name of the managed serve for *device*."""
     return CPU_ENDPOINT_NAME if normalize_device(device) == CPU else GPU_ENDPOINT_NAME
+
+
+def managed_endpoint_key(device: str | None) -> str:
+    """``providers:`` key that belongs to one device and is never the other."""
+    return CPU_ENDPOINT_KEY if normalize_device(device) == CPU else GPU_ENDPOINT_KEY
 
 
 def _loopback_port(url: str | None) -> int | None:

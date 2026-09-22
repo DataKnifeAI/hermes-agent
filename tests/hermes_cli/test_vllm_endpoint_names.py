@@ -1,14 +1,17 @@
-"""Managed vLLM serves keep distinct display names.
+"""Managed vLLM serves keep distinct, stable custom endpoints.
 
-Routing stays ``provider: custom`` / ``provider: vllm``. Only the label saved
-and shown for the two loopback serves changes.
+Chat stays ``provider: custom`` and points ``model.base_url`` at the selected
+device. Starting GPU does not replace the CPU record, and the reverse.
 """
+
+import yaml
 
 from hermes_cli.inventory import ConfigContext, _vllm_runtime_row
 from hermes_cli.model_switch import list_authenticated_providers, switch_model
 from hermes_cli.vllm_runtime.device import (
     CPU_ENDPOINT_NAME,
     GPU_ENDPOINT_NAME,
+    managed_endpoint_key,
     managed_endpoint_name,
     managed_endpoint_name_for_url,
 )
@@ -26,6 +29,9 @@ def test_device_names_are_unique():
     assert managed_endpoint_name("gpu") == GPU_ENDPOINT_NAME == "vLLM GPU"
     assert managed_endpoint_name("cpu") == CPU_ENDPOINT_NAME == "vLLM CPU"
     assert managed_endpoint_name("gpu") != managed_endpoint_name("cpu")
+    assert managed_endpoint_key("gpu") == "vllm-gpu"
+    assert managed_endpoint_key("cpu") == "vllm-cpu"
+    assert managed_endpoint_key("gpu") != managed_endpoint_key("cpu")
 
 
 def test_managed_loopback_ports_map_to_device_names():
@@ -135,3 +141,115 @@ def test_switch_label_names_managed_cpu_without_changing_provider(monkeypatch):
     assert result.target_provider == "custom"
     assert result.provider_label == "vLLM CPU"
     assert result.base_url == "http://127.0.0.1:18436/v1"
+
+
+class _Serve:
+    def __init__(self, url: str):
+        self.base_url = url
+
+
+def _isolate_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("cli._hermes_home", home)
+    return home
+
+
+def _supervisor(device=None):
+    if device == "cpu":
+        return _Serve("http://127.0.0.1:18436/v1")
+    if device == "gpu":
+        return _Serve("http://127.0.0.1:18435/v1")
+    return None
+
+
+def test_starting_one_device_does_not_overwrite_the_other_endpoint(tmp_path, monkeypatch):
+    """CPU start leaves the GPU record; GPU start leaves the CPU record.
+
+    The old writer stored both serves in ``providers.vllm`` and renamed that
+    one slot to whichever device had just started.
+    """
+    home = _isolate_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.bootstrap.get_supervisor", _supervisor)
+    gpu = {
+        "name": "vLLM GPU",
+        "base_url": "http://127.0.0.1:53351/v1",
+        "model": "hermes3:8b",
+    }
+    cpu = {
+        "name": "vLLM CPU",
+        "base_url": "http://127.0.0.1:18436/v1",
+        "model": "qwen3:4b",
+    }
+    remote = {"name": "GPU box", "base_url": "http://gpu-box.example:8000/v1"}
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "model": {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:18436/v1",
+            "default": "qwen3:4b",
+        },
+        "providers": {"vllm": dict(remote), "vllm-gpu": dict(gpu), "vllm-cpu": dict(cpu)},
+        "auxiliary": {
+            "compression": {
+                "provider": "custom",
+                "model": "qwen3:4b",
+                "base_url": "http://127.0.0.1:18436/v1",
+            },
+        },
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {
+                "device": "cpu",
+                "model": "Qwen/Qwen3-4B-Instruct-2507",
+                "served_model_name": "qwen3:4b",
+            },
+        },
+    }), encoding="utf-8")
+
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
+    from hermes_cli.web_routers.config_env import _custom_endpoint_response
+
+    activate_vllm_provider(load_config())
+    after_cpu = load_config()
+    assert after_cpu["providers"]["vllm-gpu"]["name"] == "vLLM GPU"
+    assert after_cpu["providers"]["vllm-gpu"]["base_url"] == gpu["base_url"]
+    assert after_cpu["providers"]["vllm-gpu"]["model"] == "hermes3:8b"
+    assert after_cpu["providers"]["vllm-cpu"]["name"] == "vLLM CPU"
+    assert after_cpu["providers"]["vllm-cpu"]["base_url"] == "http://127.0.0.1:18436/v1"
+    assert after_cpu["providers"]["vllm"] == remote
+    assert after_cpu["model"]["provider"] == "custom"
+    assert after_cpu["model"]["base_url"] == "http://127.0.0.1:18436/v1"
+    assert after_cpu["auxiliary"]["compression"]["provider"] == "custom"
+    assert after_cpu["auxiliary"]["compression"]["base_url"] == "http://127.0.0.1:18436/v1"
+
+    listed = _custom_endpoint_response(after_cpu)["endpoints"]
+    by_id = {row["id"]: row for row in listed}
+    assert set(by_id) >= {"vllm-gpu", "vllm-cpu"}
+    assert "custom" not in by_id
+    assert by_id["vllm-cpu"]["is_current"] is True
+    assert by_id["vllm-gpu"]["is_current"] is False
+    assert by_id["vllm-gpu"]["name"] == "vLLM GPU"
+    assert by_id["vllm-cpu"]["name"] == "vLLM CPU"
+
+    from cli import save_config_value
+
+    save_config_value("local_runtime.vllm.device", "gpu")
+    cpu_frozen = {
+        "name": after_cpu["providers"]["vllm-cpu"]["name"],
+        "base_url": after_cpu["providers"]["vllm-cpu"]["base_url"],
+        "model": after_cpu["providers"]["vllm-cpu"]["model"],
+    }
+    activate_vllm_provider(load_config())
+    after_gpu = load_config()
+    assert after_gpu["providers"]["vllm-cpu"]["name"] == cpu_frozen["name"]
+    assert after_gpu["providers"]["vllm-cpu"]["base_url"] == cpu_frozen["base_url"]
+    assert after_gpu["providers"]["vllm-cpu"]["model"] == cpu_frozen["model"]
+    assert after_gpu["providers"]["vllm-gpu"]["name"] == "vLLM GPU"
+    assert after_gpu["providers"]["vllm-gpu"]["base_url"] == "http://127.0.0.1:18435/v1"
+    assert after_gpu["providers"]["vllm"] == remote
+    assert after_gpu["model"]["provider"] == "custom"
+    assert after_gpu["model"]["base_url"] == "http://127.0.0.1:18435/v1"
+    assert after_gpu["auxiliary"]["compression"]["base_url"] == "http://127.0.0.1:18436/v1"
