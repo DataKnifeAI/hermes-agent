@@ -3,8 +3,13 @@
 Machine-scoped (same rule as llama.cpp zips): profiles share one PyTorch wheel
 tree and must not fight over the port. Hermes creates this venv — the user does
 not pip-install vLLM, does not pick a Python, and does not clone a third-party
-installer. Empty ``local_runtime.vllm.python`` uses the interpreter already
-running Hermes.
+installer. Empty ``local_runtime.vllm.python`` uses Hermes' CPython when it is
+3.12 or 3.13. Python 3.14 is outside vLLM's supported range; uv fetches 3.12.
+
+The CPU venv installs the official ``+cpu`` wheel from
+``https://wheels.vllm.ai/<version>/cpu``. The PyPI ``vllm`` package is the CUDA
+build; ``--torch-backend=cpu`` only swaps torch and still leaves
+``libtorch_cuda.so`` on the import path.
 """
 
 from __future__ import annotations
@@ -90,43 +95,86 @@ def manifest_path(device: str = "gpu") -> Path:
     return runtimes_root(device) / "manifest.json"
 
 
+# vLLM documents CPython 3.10–3.13. 3.14 warns at startup and is not a supported
+# runtime (the CPU venv on 3.14.7 still imported the CUDA extension). FlashInfer,
+# pulled in by the GPU wheel, crashes on 3.11. The managed venv is 3.12 or 3.13.
+_PY_MIN = (3, 12)
+_PY_MAX = (3, 14)  # exclusive
+_CPU_WHEEL_INDEX = "https://wheels.vllm.ai/{version}/cpu"
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
+def _py_pair(text: str) -> tuple[int, int] | None:
+    bits = (text or "").strip().split(".")
+    if len(bits) < 2 or not bits[0].isdigit() or not bits[1].isdigit():
+        return None
+    return int(bits[0]), int(bits[1])
+
+
+def _py_supported(pair: tuple[int, int] | None) -> bool:
+    return pair is not None and _PY_MIN <= pair < _PY_MAX
+
+
+def _py_unsupported_message(got: str) -> str:
+    return (
+        "vLLM needs CPython >=3.12,<3.14 (3.14 is unsupported; FlashInfer "
+        f"crashes on 3.11); got {got}. Clear local_runtime.vllm.python to let "
+        "Hermes fetch 3.12 with uv"
+    )
+
+
+def _running_pair() -> tuple[int, int]:
+    return (sys.version_info[0], sys.version_info[1])
+
+
 def resolve_venv_python(pin: str | None = "") -> str:
     """Interpreter spec for the isolated venv: a path, or a ``3.12`` pin for uv.
 
-    Empty pin uses Hermes' CPython when it is 3.12+, otherwise the first
-    ``python3.{12,13,14}`` on PATH, otherwise ``3.12`` for ``uv --managed-python``.
-    FlashInfer (pulled in by current vLLM) subscripts ``array.array`` and crashes
-    on 3.11. The user does not install a second Python — uv fetches one.
+    Empty pin uses Hermes' CPython when it is 3.12 or 3.13, otherwise the first
+    ``python3.13`` / ``python3.12`` on PATH, otherwise ``3.12`` for
+    ``uv --managed-python``. Never 3.14, even when that is the Hermes interpreter.
+    The user does not install a second Python — uv fetches one.
     """
     pin = (pin or "").strip()
     if pin:
         as_path = Path(pin).expanduser()
         if as_path.is_file():
+            have = _venv_python_version(as_path)
+            if not _py_supported(_py_pair(have)):
+                raise RuntimeError(_py_unsupported_message(have or str(as_path)))
             return str(as_path)
         names = [pin, f"python{pin}"] if pin[0].isdigit() else [pin]
         for name in names:
             found = shutil.which(name)
             if found:
+                have = _venv_python_version(Path(found))
+                if not _py_supported(_py_pair(have)):
+                    raise RuntimeError(_py_unsupported_message(have or found))
                 return found
+        pair = _py_pair(pin) if pin[0].isdigit() else None
+        if pair is not None and not _py_supported(pair):
+            raise RuntimeError(_py_unsupported_message(pin))
         if pin[0].isdigit() and shutil.which("uv"):
             return pin
-        running = f"{sys.version_info.major}.{sys.version_info.minor}"
+        running = f"{_running_pair()[0]}.{_running_pair()[1]}"
         raise RuntimeError(
-            f"need CPython {pin} to create the vLLM venv; install that interpreter "
-            f"or clear local_runtime.vllm.python to let Hermes pick 3.12+ "
+            f"need CPython {pin} to create the vLLM venv (supported >=3.12,<3.14); "
+            f"install that interpreter or clear local_runtime.vllm.python "
             f"(running {running})"
         )
-    if sys.version_info >= (3, 12):
+    if _py_supported(_running_pair()):
         return str(Path(sys.executable))
-    for minor in (12, 13, 14):
+    for minor in (13, 12):
         found = shutil.which(f"python3.{minor}")
         if found:
             return found
     if shutil.which("uv"):
         return "3.12"
+    running = f"{_running_pair()[0]}.{_running_pair()[1]}"
     raise RuntimeError(
-        "need CPython 3.12+ for the vLLM venv (FlashInfer). Install Python 3.12+ "
-        "or uv (which can fetch it), or set local_runtime.vllm.python to that interpreter"
+        "need CPython >=3.12,<3.14 for the vLLM venv (3.14 is unsupported; "
+        "FlashInfer crashes on 3.11). Install Python 3.12 or 3.13, or uv "
+        f"(which can fetch 3.12). Running {running}"
     )
 
 
@@ -200,6 +248,47 @@ def _venv_python_version(exe: Path) -> str:
         return ""
 
 
+def _managed_serve_alive(device: str) -> bool:
+    """True when this device's supervised ``vllm serve`` still has a live pid.
+
+    Recreating a venv under a running server deletes the interpreter it is
+    using. CPU install must not do that to the GPU engine.
+    """
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    path = state_path(device)
+    if not path.is_file():
+        return False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    try:
+        pid = int(raw.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    return _pid_alive(pid)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Process exists. ``os.kill(pid, 0)`` on Windows calls TerminateProcess."""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+    except ImportError:
+        if os.name == "nt":
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    return bool(psutil.pid_exists(pid))
+
+
 def _needs_recreate(creator: str, device: str = "gpu") -> bool:
     py = venv_python(device)
     if not py.is_file():
@@ -241,18 +330,69 @@ def _assert_cuda(py: Path, device: str = "gpu") -> None:
         )
 
 
+# Version check first: forcing VLLM_TARGET_DEVICE=cpu on the CUDA wheel can
+# skip platforms/cuda.py and still pass an import, then die later on
+# libtorch_cuda.so. The official CPU artifact is published as ``<ver>+cpu``.
+_CPU_IMPORT_PROBE = """
+import os, sys
+os.environ["VLLM_TARGET_DEVICE"] = "cpu"
+import importlib.metadata as m
+ver = m.version("vllm")
+if "+cpu" not in ver.lower():
+    sys.stderr.write("cuda-wheel %s\\n" % ver)
+    raise SystemExit(2)
+import vllm
+from vllm.platforms import current_platform
+if not current_platform.is_cpu():
+    sys.stderr.write("platform %s\\n" % type(current_platform).__name__)
+    raise SystemExit(3)
+import torch
+if torch.cuda.is_available():
+    sys.stderr.write("torch cuda wheel\\n")
+    raise SystemExit(4)
+"""
+
+
 def _assert_cpu(py: Path, device: str = "cpu") -> None:
-    """CPU venv: torch must import; CUDA is not required and must not be the wheel."""
+    """CPU venv must be the official ``+cpu`` wheel, importing as the CPU platform.
+
+    Torch's CPU index is not enough: the PyPI ``vllm`` wheel is still the CUDA
+    build and ``import vllm`` loads ``libtorch_cuda.so``.
+    """
+    env = os.environ.copy()
+    env["VLLM_TARGET_DEVICE"] = "cpu"
+    lib = _intel_openmp_library(py)
+    if lib:
+        prior = [p for p in env.get("LD_PRELOAD", "").split(":") if p]
+        if lib not in prior:
+            prior.insert(0, lib)
+        env["LD_PRELOAD"] = ":".join(prior)
     probe = subprocess.run(
-        [str(py), "-c",
-         "import torch; raise SystemExit(0 if not torch.cuda.is_available() else 1)"],
-        capture_output=True, text=True, timeout=120,
+        [str(py), "-c", _CPU_IMPORT_PROBE],
+        capture_output=True, text=True, timeout=180, env=env,
     )
     if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"rc={probe.returncode}"
         raise RuntimeError(
-            "vLLM CPU venv PyTorch has CUDA — expected the official CPU build "
-            f"(VLLM_TARGET_DEVICE=cpu / CPU wheels). See {install_log_path(device)}"
+            "vLLM CPU venv is not the official CPU build "
+            "(wheels.vllm.ai <version>+cpu, VLLM_TARGET_DEVICE=cpu). "
+            f"{tail}. See {install_log_path(device)}"
         )
+
+
+def _intel_openmp_library(python_or_vllm: Path) -> str:
+    """``libiomp5.so`` from the intel-openmp wheel, if this venv shipped it.
+
+    Official CPU wheels require it on ``LD_PRELOAD`` before the first import.
+    """
+    if os.name == "nt":
+        return ""
+    # bin/python is often a symlink into uv's managed CPython. Don't resolve —
+    # libiomp5 lives in this venv's site-packages.
+    root = Path(python_or_vllm).parent.parent
+    found = sorted(root.glob("**/libiomp5.so"))
+    return str(found[0]) if found else ""
 
 
 def _ninja_executable(device: str = "gpu") -> Path:
@@ -265,7 +405,40 @@ def _install_env(device: str) -> dict[str, str]:
     env = _uv_install_env()
     if normalize_device(device) == CPU:
         env["VLLM_TARGET_DEVICE"] = "cpu"
+    elif env.get("VLLM_TARGET_DEVICE", "").strip().lower() == "cpu":
+        env.pop("VLLM_TARGET_DEVICE", None)
     return env
+
+
+def _vllm_requirement(version: str | None, *, device: str) -> str:
+    """Package spec. CPU pins ``vllm==<ver>+cpu``, which PyPI does not publish."""
+    ver = (version or "").strip().split("+", 1)[0]
+    if normalize_device(device) == CPU:
+        if not ver:
+            ver = latest_vllm_pypi_version().split("+", 1)[0]
+        if not ver:
+            raise RuntimeError(
+                "could not resolve a vLLM release for the CPU wheel "
+                "(https://wheels.vllm.ai/<version>/cpu). Refusing to pip install "
+                "the PyPI CUDA wheel into the CPU venv"
+            )
+        return f"vllm=={ver}+cpu"
+    if ver:
+        return f"vllm=={ver}"
+    return "vllm"
+
+
+def _cpu_wheel_index(requirement: str) -> str:
+    ver = requirement.split("==", 1)[1]
+    base = ver.split("+", 1)[0]
+    return _CPU_WHEEL_INDEX.format(version=base)
+
+
+def _cpu_wheel_missing(device: str) -> bool:
+    """True when the CPU venv has vLLM installed but it is not the ``+cpu`` build."""
+    if normalize_device(device) != CPU or not venv_ready(device):
+        return False
+    return "+cpu" not in installed_vllm_version(device).lower()
 
 
 def _install_packages(py: Path, dest: Path, log: Path, packages: list[str],
@@ -273,18 +446,31 @@ def _install_packages(py: Path, dest: Path, log: Path, packages: list[str],
     env = _install_env(device)
     cpu = normalize_device(device) == CPU
     if uv:
-        cmd = [uv, "--no-config", "pip", "install", "--python", str(py),
-               "--upgrade", *packages]
-        cmd.append("--torch-backend=cpu" if cpu else "--torch-backend=auto")
+        cmd = [uv, "--no-config", "pip", "install", "--python", str(py), "--upgrade"]
+        if cpu:
+            cmd.extend([
+                "--extra-index-url", _cpu_wheel_index(packages[0]),
+                "--index-strategy", "first-index",
+                "--torch-backend=cpu",
+            ])
+        else:
+            cmd.append("--torch-backend=auto")
+        cmd.extend(packages)
         _stream(cmd, log, cwd=dest.parent, env=env)
         return
     _stream([str(py), "-m", "pip", "install", "--upgrade", "pip"], log, env=env)
     if cpu:
         _stream(
             [str(py), "-m", "pip", "install", "--upgrade", "torch",
-             "--index-url", "https://download.pytorch.org/whl/cpu"],
+             "--index-url", _TORCH_CPU_INDEX],
             log, env=env,
         )
+        _stream(
+            [str(py), "-m", "pip", "install", "--upgrade", *packages,
+             "--extra-index-url", _cpu_wheel_index(packages[0])],
+            log, env=env,
+        )
+        return
     _stream([str(py), "-m", "pip", "install", "--upgrade", *packages], log, env=env)
 
 
@@ -293,9 +479,10 @@ def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False,
     """Create the isolated venv if needed and pip-install ``vllm``. Returns the ``vllm`` exe.
 
     GPU uses CUDA torch (``--torch-backend=auto``) and ``_assert_cuda``.
-    CPU uses the official CPU extra/build (``VLLM_TARGET_DEVICE=cpu`` /
-    ``--torch-backend=cpu``) and ``_assert_cpu`` — never ``--device cpu``
-    on a CUDA wheel. Never installs into ``sys.prefix``.
+    CPU installs ``vllm==<ver>+cpu`` from ``https://wheels.vllm.ai/<ver>/cpu``
+    with ``--torch-backend=cpu`` and ``VLLM_TARGET_DEVICE=cpu``. Never
+    ``pip install vllm`` (that is the CUDA wheel) and never ``--device cpu``
+    on that wheel. Never installs into ``sys.prefix``.
     """
     device = normalize_device(device)
     creator = resolve_venv_python(python_pin)
@@ -305,8 +492,14 @@ def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False,
     uv = shutil.which("uv")
 
     if _needs_recreate(creator, device) and dest.exists():
-        logger.info("recreating vLLM %s venv (Python pin changed)", device)
-        shutil.rmtree(dest)
+        if _managed_serve_alive(device):
+            logger.warning(
+                "not recreating the vLLM %s venv while its server is still running",
+                device,
+            )
+        else:
+            logger.info("recreating vLLM %s venv (Python pin changed)", device)
+            shutil.rmtree(dest)
 
     if not venv_python(device).is_file():
         _create_venv(creator, dest, log)
@@ -314,9 +507,10 @@ def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False,
     py = venv_python(device)
     _assert_isolated(py)
     need_wheels = not venv_ready(device) or upgrade or not _ninja_executable(device).is_file()
+    if _cpu_wheel_missing(device):
+        need_wheels = True
     if need_wheels:
-        spec = f"vllm=={version}" if (version or "").strip() else "vllm"
-        packages = [spec, "ninja"]
+        packages = [_vllm_requirement(version, device=device), "ninja"]
         _install_packages(py, dest, log, packages, device=device, uv=uv)
         if device == CPU:
             _assert_cpu(py, device)

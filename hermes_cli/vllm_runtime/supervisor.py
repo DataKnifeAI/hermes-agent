@@ -24,7 +24,9 @@ from hermes_cli.vllm_runtime.device import (
     CPU, CPU_LISTEN_PORT, GPU_LISTEN_PORT, LLAMA_CPP_PORT, RESERVED_PORTS,
     USER_SERVER_PORTS, default_listen_port, normalize_device,
 )
-from hermes_cli.vllm_runtime.venv import runtimes_root, server_log_path, vllm_executable
+from hermes_cli.vllm_runtime.venv import (
+    _intel_openmp_library, runtimes_root, server_log_path, vllm_executable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -355,12 +357,30 @@ def serve_len_and_rope(settings: dict) -> tuple[int, dict | None]:
     return min(requested, native), None
 
 
-def serve_environ(executable: str | Path, base: dict | None = None) -> dict[str, str]:
-    """Child env for ``vllm serve``. Never inherit ALLOW_LONG — it starts then dies."""
+def serve_environ(executable: str | Path, base: dict | None = None, *,
+                  device: str = "gpu") -> dict[str, str]:
+    """Child env for ``vllm serve``. Never inherit ALLOW_LONG — it starts then dies.
+
+    CPU sets ``VLLM_TARGET_DEVICE=cpu`` before vLLM imports so
+    ``platforms/cuda.py`` is not loaded. That module imports
+    ``vllm._C_stable_libtorch``, which needs ``libtorch_cuda.so`` — the CPU
+    wheel does not ship it. Unset means vLLM defaults the target to cuda.
+    GPU never forces the CPU platform, including when the parent inherited it.
+    """
     env = dict(os.environ if base is None else base)
     bindir = str(Path(executable).parent)
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
     env.pop(_ALLOW_LONG_ENV, None)
+    if normalize_device(device) == CPU:
+        env["VLLM_TARGET_DEVICE"] = "cpu"
+        lib = _intel_openmp_library(Path(executable))
+        if lib:
+            prior = [part for part in env.get("LD_PRELOAD", "").split(":") if part]
+            if lib not in prior:
+                prior.insert(0, lib)
+            env["LD_PRELOAD"] = ":".join(prior)
+    elif env.get("VLLM_TARGET_DEVICE", "").strip().lower() == "cpu":
+        env.pop("VLLM_TARGET_DEVICE", None)
     return env
 
 
@@ -476,7 +496,7 @@ class VllmSupervisor:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_handle = open(self.log_path, "ab")  # noqa: SIM115
         cmd = serve_argv(self.executable, self.settings, device=self.device)
-        env = serve_environ(self.executable)
+        env = serve_environ(self.executable, device=self.device)
         self.proc = subprocess.Popen(
             cmd, stdout=self._log_handle, stderr=subprocess.STDOUT, env=env)
         logger.info("vllm serve spawned pid=%s port=%s", self.proc.pid, self.port)

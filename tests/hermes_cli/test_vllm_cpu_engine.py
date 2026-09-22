@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import os
+
+import pytest
+
 from hermes_cli.local_engines import engine_from_config
 from hermes_cli.vllm_runtime.device import (
     CPU_LISTEN_PORT, ENGINE_CPU, ENGINE_GPU, GPU_LISTEN_PORT, USER_SERVER_PORTS,
 )
-from hermes_cli.vllm_runtime.supervisor import serve_argv
+from hermes_cli.vllm_runtime.supervisor import serve_argv, serve_environ
 from hermes_cli.vllm_runtime.venv import runtimes_root, venv_dir
 
 
@@ -68,6 +72,28 @@ def test_cpu_serve_argv_uses_cpu_port_and_omits_cuda_flags():
     }, device="gpu")
     assert gpu[gpu.index("--port") + 1] == str(GPU_LISTEN_PORT)
     assert "--gpu-memory-utilization" in gpu
+
+
+def test_cpu_serve_env_selects_cpu_platform_before_import(tmp_path, monkeypatch):
+    """CPU serve must not load platforms/cuda.py (that needs libtorch_cuda.so)."""
+    monkeypatch.delenv("VLLM_TARGET_DEVICE", raising=False)
+    root = tmp_path / "cpu-venv"
+    lib = root / "lib" / "python3.12" / "site-packages" / "intel_openmp" / "libiomp5.so"
+    lib.parent.mkdir(parents=True)
+    lib.write_bytes(b"")
+    exe = root / "bin" / "vllm"
+    exe.parent.mkdir()
+    exe.write_text("", encoding="utf-8")
+
+    env = serve_environ(exe, device="cpu")
+    assert env["VLLM_TARGET_DEVICE"] == "cpu"
+    assert env["LD_PRELOAD"].startswith(str(lib))
+    assert "libtorch_cuda" not in env.get("LD_PRELOAD", "")
+
+    monkeypatch.setenv("VLLM_TARGET_DEVICE", "cpu")
+    gpu_env = serve_environ(root / "bin" / "vllm", device="gpu")
+    assert gpu_env.get("VLLM_TARGET_DEVICE") != "cpu"
+    assert "VLLM_TARGET_DEVICE" not in gpu_env
 
 
 def test_cpu_start_skips_gpu_occupancy(tmp_path, monkeypatch):
@@ -461,3 +487,185 @@ def test_ensure_both_venvs_calls_gpu_and_cpu(monkeypatch):
     out = venv_mod.ensure_both_vllm_venvs("")
     assert seen == ["gpu", "cpu"]
     assert set(out) == {"gpu", "cpu"}
+
+
+def _isolate_runtime(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    return home
+
+
+def _bin_dir(dest: Path) -> Path:
+    return dest / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _touch_venv_bins(dest: Path) -> None:
+    bin_dir = _bin_dir(dest)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    py_name = "python.exe" if os.name == "nt" else "python"
+    (bin_dir / py_name).write_text("keep", encoding="utf-8")
+    exe = "vllm.exe" if os.name == "nt" else "vllm"
+    (bin_dir / exe).write_text("", encoding="utf-8")
+    ninja = "ninja.exe" if os.name == "nt" else "ninja"
+    (bin_dir / ninja).write_text("", encoding="utf-8")
+
+
+def test_cpu_install_uses_cpu_wheel_index_not_pypi_cuda(tmp_path, monkeypatch):
+    """A CPU venv that already has the CUDA ``vllm`` wheel must be replaced.
+
+    ``--torch-backend=cpu`` only selects the torch wheel. The vLLM package has
+    to come from ``wheels.vllm.ai/<version>/cpu`` as ``vllm==<version>+cpu``.
+    """
+    _isolate_runtime(tmp_path, monkeypatch)
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    dest = venv_mod.venv_dir("cpu")
+    _touch_venv_bins(dest)
+    calls: list[tuple[list[str], dict | None]] = []
+
+    def _fake_stream(cmd, log_path, cwd=None, env=None):
+        calls.append((list(cmd), env))
+
+    monkeypatch.setattr(venv_mod, "_stream", _fake_stream)
+    monkeypatch.setattr(venv_mod, "_assert_cpu", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "_venv_python_version", lambda exe: "3.12")
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda device="gpu": "0.30.0")
+    monkeypatch.setattr(venv_mod, "resolve_venv_python", lambda pin="": "3.12")
+    monkeypatch.setattr(venv_mod.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    venv_mod.ensure_vllm_venv("", device="cpu", version="0.30.0")
+    pip_cmds = [(c, e) for c, e in calls if "pip" in c]
+    assert pip_cmds
+    cmd, env = pip_cmds[-1]
+    joined = " ".join(cmd)
+    assert "vllm==0.30.0+cpu" in cmd
+    assert "--extra-index-url" in cmd
+    assert cmd[cmd.index("--extra-index-url") + 1] == "https://wheels.vllm.ai/0.30.0/cpu"
+    assert "--index-strategy" in cmd
+    assert cmd[cmd.index("--index-strategy") + 1] == "first-index"
+    assert "--torch-backend=cpu" in cmd
+    assert "files.pythonhosted.org" not in joined
+    assert env["VLLM_TARGET_DEVICE"] == "cpu"
+    assert "vllm==0.30.0 " not in joined + " "
+    assert "vllm==0.30.0+cpu" in joined
+
+
+def test_cpu_pip_fallback_does_not_install_pypi_vllm(tmp_path, monkeypatch):
+    _isolate_runtime(tmp_path, monkeypatch)
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    dest = venv_mod.venv_dir("cpu")
+    _touch_venv_bins(dest)
+    calls: list[list[str]] = []
+
+    def _fake_stream(cmd, log_path, cwd=None, env=None):
+        calls.append(list(cmd))
+
+    monkeypatch.setattr(venv_mod, "_stream", _fake_stream)
+    monkeypatch.setattr(venv_mod, "_assert_cpu", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "_venv_python_version", lambda exe: "3.12")
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda device="gpu": "0.30.0")
+    monkeypatch.setattr(venv_mod, "resolve_venv_python", lambda pin="": "3.12")
+    monkeypatch.setattr(venv_mod.shutil, "which", lambda name: None)
+
+    venv_mod.ensure_vllm_venv("", device="cpu", version="0.30.0")
+    vllm_cmds = [c for c in calls if any(part.startswith("vllm") for part in c)]
+    assert vllm_cmds
+    for cmd in vllm_cmds:
+        assert "vllm==0.30.0+cpu" in cmd
+        assert "--extra-index-url" in cmd
+        assert "https://wheels.vllm.ai/0.30.0/cpu" in cmd
+
+
+def test_cpu_wheel_already_installed_is_left_alone(tmp_path, monkeypatch):
+    _isolate_runtime(tmp_path, monkeypatch)
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    dest = venv_mod.venv_dir("cpu")
+    _touch_venv_bins(dest)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(venv_mod, "_stream", lambda *a, **k: calls.append(list(a[0])))
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "_venv_python_version", lambda exe: "3.12")
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda device="gpu": "0.30.0+cpu")
+    monkeypatch.setattr(venv_mod, "resolve_venv_python", lambda pin="": "3.12")
+
+    venv_mod.ensure_vllm_venv("", device="cpu")
+    assert calls == []
+
+
+def test_python_314_venv_recreated_unless_that_server_is_live(tmp_path, monkeypatch):
+    """3.14 venvs are recreated. A live GPU server is not deleted out from under itself."""
+    _isolate_runtime(tmp_path, monkeypatch)
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    gpu = venv_mod.venv_dir("gpu")
+    _touch_venv_bins(gpu)
+    py_name = "python.exe" if os.name == "nt" else "python"
+    marker = _bin_dir(gpu) / py_name
+    state = venv_mod.runtimes_root("gpu") / "server.json"
+    state.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    monkeypatch.setattr(venv_mod, "_venv_python_version", lambda exe: "3.14")
+    monkeypatch.setattr(venv_mod, "resolve_venv_python", lambda pin="": "3.12")
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda *a, **k: None)
+    monkeypatch.setattr(
+        venv_mod.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    def _boom(*a, **k):
+        raise AssertionError("refused to rewrite a live vLLM venv")
+
+    monkeypatch.setattr(venv_mod, "_stream", _boom)
+
+    venv_mod.ensure_vllm_venv("", device="gpu")
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+    cpu = venv_mod.venv_dir("cpu")
+    _touch_venv_bins(cpu)
+    created: list[list[str]] = []
+
+    def _fake_stream(cmd, log_path, cwd=None, env=None):
+        created.append(list(cmd))
+        _touch_venv_bins(cpu)
+
+    monkeypatch.setattr(venv_mod, "_stream", _fake_stream)
+    monkeypatch.setattr(venv_mod, "_assert_cpu", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda device="gpu": "")
+    venv_mod.ensure_vllm_venv("", device="cpu", version="0.30.0")
+    assert any("venv" in cmd for cmd in created)
+    pip_cmds = [cmd for cmd in created if "pip" in cmd]
+    assert pip_cmds
+    assert "vllm==0.30.0+cpu" in pip_cmds[-1]
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_assert_cpu_probe_requires_cpu_build(monkeypatch):
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    seen: dict = {}
+
+    def _run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs.get("env")
+
+        class _Proc:
+            returncode = 2
+            stderr = "cuda-wheel 0.30.0\n"
+            stdout = ""
+
+        return _Proc()
+
+    monkeypatch.setattr(venv_mod.subprocess, "run", _run)
+    with pytest.raises(RuntimeError, match="CPU"):
+        venv_mod._assert_cpu(Path("/opt/cpu-venv/bin/python"), "cpu")
+    assert seen["env"]["VLLM_TARGET_DEVICE"] == "cpu"
+    script = seen["cmd"][-1]
+    assert "+cpu" in script
+    assert 'os.environ["VLLM_TARGET_DEVICE"] = "cpu"' in script
+    assert "is_cpu" in script

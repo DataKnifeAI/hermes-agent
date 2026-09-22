@@ -829,6 +829,36 @@ def test_vllm_runtimes_are_machine_scoped(tmp_path, monkeypatch):
     assert "profiles" not in runtimes_root().parts
 
 
+def test_resolve_venv_python_skips_cpython_3_14(monkeypatch):
+    """Hermes on 3.14 must not build the vLLM venv with that interpreter."""
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    monkeypatch.setattr(venv_mod.sys, "version_info", (3, 14, 7, "final", 0))
+    monkeypatch.setattr(venv_mod.sys, "executable", "/usr/bin/python3.14")
+
+    def _which(name):
+        if name == "uv":
+            return "/usr/bin/uv"
+        if name == "python3.13":
+            return "/usr/bin/python3.13"
+        return None
+
+    monkeypatch.setattr(venv_mod.shutil, "which", _which)
+    assert venv_mod.resolve_venv_python("") == "/usr/bin/python3.13"
+    monkeypatch.setattr(venv_mod.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    assert venv_mod.resolve_venv_python("") == "3.12"
+    with pytest.raises(RuntimeError, match="<3.14"):
+        venv_mod.resolve_venv_python("3.14")
+
+
+def test_resolve_venv_python_keeps_supported_hermes(monkeypatch):
+    from hermes_cli.vllm_runtime import venv as venv_mod
+
+    monkeypatch.setattr(venv_mod.sys, "version_info", (3, 12, 8, "final", 0))
+    monkeypatch.setattr(venv_mod.sys, "executable", "/opt/hermes/bin/python")
+    assert venv_mod.resolve_venv_python("") == "/opt/hermes/bin/python"
+
+
 def test_venv_python_defaults_to_hermes_interpreter_not_a_pin():
     from hermes_cli.vllm_runtime.venv import resolve_venv_python
 
@@ -844,9 +874,9 @@ def test_venv_python_defaults_to_hermes_interpreter_not_a_pin():
             [str(path), "-c", "import json,sys; print(json.dumps(list(sys.version_info[:2])))"],
             text=True,
         ))
-        assert (major, minor) >= (3, 12)
+        assert (3, 12) <= (major, minor) < (3, 14)
     else:
-        assert resolved[0].isdigit()
+        assert resolved in {"3.12", "3.13"}
 
 
 def test_ensure_venv_never_installs_into_hermes_prefix(tmp_path, monkeypatch):
@@ -904,8 +934,11 @@ def test_uv_pip_install_ignores_project_exclude_newer(tmp_path, monkeypatch):
     monkeypatch.setattr(venv_mod, "resolve_venv_python", lambda pin="": str(Path(sys.executable)))
     calls: list[list[str]] = []
 
+    envs: list[dict | None] = []
+
     def _fake_stream(cmd, log_path, cwd=None, env=None):
         calls.append(list(cmd))
+        envs.append(env)
         dest = venv_mod.venv_dir()
         bin_dir = dest / ("Scripts" if sys.platform == "win32" else "bin")
         bin_dir.mkdir(parents=True, exist_ok=True)
@@ -921,9 +954,13 @@ def test_uv_pip_install_ignores_project_exclude_newer(tmp_path, monkeypatch):
     venv_mod.ensure_vllm_venv("", upgrade=True, version="0.28.0")
     pip_cmds = [c for c in calls if "pip" in c]
     assert pip_cmds
-    for cmd in pip_cmds:
+    for cmd, env in zip(pip_cmds, [e for c, e in zip(calls, envs) if "pip" in c]):
         assert "--no-config" in cmd
         assert "vllm==0.28.0" in cmd
+        assert "--torch-backend=auto" in cmd
+        assert "wheels.vllm.ai" not in " ".join(cmd)
+        assert "+cpu" not in " ".join(cmd)
+        assert (env or {}).get("VLLM_TARGET_DEVICE") != "cpu"
 
 
 def test_apply_vllm_update_refuses_silent_no_op(tmp_path, monkeypatch):
