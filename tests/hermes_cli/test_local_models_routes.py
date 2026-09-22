@@ -77,6 +77,9 @@ def test_hardware_plain_facts(client):
     # GPU fields are None-able (non-NVIDIA machines) but must exist.
     assert "gpu_name" in data and "gpu_util_percent" in data and "vram_used_bytes" in data
     assert "ram_used_bytes" in data and "vllm_version" in data
+    assert "cpu_name" in data and "cpu_cores" in data
+    if data["cpu_cores"] is not None:
+        assert data["cpu_cores"] >= 1
     # Used without total is useless — when both are present, used cannot exceed total.
     if data["vram_used_bytes"] is not None:
         assert data["vram_used_bytes"] <= data["vram_total_bytes"]
@@ -100,7 +103,7 @@ def test_hardware_plain_facts(client):
         assert key in data
     assert data["models_storage_bytes"] >= 0
     assert data["disk_free_bytes"] >= 0
-    assert data["engine"] in ("llamacpp", "vllm")
+    assert data["engine"] in ("llamacpp", "vllm", "vllm-cpu")
 
 
 def test_hardware_cache_path_is_profile_aware_and_engine_specific(tmp_path, monkeypatch):

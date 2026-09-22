@@ -273,7 +273,7 @@ def test_start_refuses_exl2_without_spawning(tmp_path, monkeypatch):
     hermes_constants._default_hermes_root_memo = None
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19997)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: 19997)
     fake = tmp_path / "vllm"
     fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     fake.chmod(0o755)
@@ -310,7 +310,7 @@ def test_start_refuses_dspark_and_log_shows_root_cause(tmp_path, monkeypatch):
     hermes_constants._default_hermes_root_memo = None
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19994)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: 19994)
     fake = tmp_path / "vllm"
     fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     fake.chmod(0o755)
@@ -356,7 +356,7 @@ def test_start_sigkill_writes_last_error_not_generic_failed(tmp_path, monkeypatc
     hermes_constants._default_hermes_root_memo = None
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19995)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: 19995)
     fake = tmp_path / "vllm"
     fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     fake.chmod(0o755)
@@ -399,7 +399,7 @@ def test_watch_stops_on_fatal_awq_config_error(tmp_path, monkeypatch):
     hermes_constants._default_hermes_root_memo = None
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19996)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: 19996)
     log_path = home / "runtimes" / "vllm" / "vllm-server.log"
     log_path.parent.mkdir(parents=True)
     log_path.write_text(
@@ -718,7 +718,7 @@ def test_watch_stops_when_configured_cache_is_gone(tmp_path, monkeypatch):
     hermes_constants._default_hermes_root_memo = None
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19999)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: 19999)
     fake = tmp_path / "vllm"
     fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     fake.chmod(0o755)
@@ -755,7 +755,7 @@ def test_start_refuses_when_configured_cache_is_gone(tmp_path, monkeypatch):
     hermes_constants._default_hermes_root_memo = None
     monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19998)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: 19998)
     fake = tmp_path / "vllm"
     fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     fake.chmod(0o755)
@@ -807,7 +807,7 @@ def test_installed_version_uses_isolated_python(tmp_path, monkeypatch):
         seen.append(list(cmd))
         return "0.10.0\n"
 
-    monkeypatch.setattr(venv_mod, "venv_python", lambda: fake_py)
+    monkeypatch.setattr(venv_mod, "venv_python", lambda *a, **k: fake_py)
     monkeypatch.setattr(venv_mod, "_assert_isolated", lambda py: None)
     monkeypatch.setattr(venv_mod.subprocess, "check_output", _out)
     assert venv_mod.installed_vllm_version() == "0.10.0"
@@ -863,7 +863,7 @@ def test_ensure_venv_never_installs_into_hermes_prefix(tmp_path, monkeypatch):
     hermes_prefix = Path(sys.prefix).resolve()
     calls: list[list[str]] = []
 
-    def _fake_stream(cmd, log_path):
+    def _fake_stream(cmd, log_path, **kwargs):
         calls.append(list(cmd))
         dest = venv_mod.venv_dir()
         bin_dir = dest / ("Scripts" if sys.platform == "win32" else "bin")
@@ -873,8 +873,8 @@ def test_ensure_venv_never_installs_into_hermes_prefix(tmp_path, monkeypatch):
         (bin_dir / exe).write_text("", encoding="utf-8")
 
     monkeypatch.setattr(venv_mod, "_stream", _fake_stream)
-    monkeypatch.setattr(venv_mod, "_assert_cuda", lambda py: None)
-    monkeypatch.setattr(venv_mod, "_write_manifest", lambda py: None)
+    monkeypatch.setattr(venv_mod, "_assert_cuda", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda *a, **k: None)
     monkeypatch.setattr(venv_mod, "shutil", venv_mod.shutil)
     monkeypatch.setattr(venv_mod.shutil, "which", lambda name: None)
 
@@ -914,8 +914,8 @@ def test_uv_pip_install_ignores_project_exclude_newer(tmp_path, monkeypatch):
         (bin_dir / exe).write_text("", encoding="utf-8")
 
     monkeypatch.setattr(venv_mod, "_stream", _fake_stream)
-    monkeypatch.setattr(venv_mod, "_assert_cuda", lambda py: None)
-    monkeypatch.setattr(venv_mod, "_write_manifest", lambda py: None)
+    monkeypatch.setattr(venv_mod, "_assert_cuda", lambda *a, **k: None)
+    monkeypatch.setattr(venv_mod, "_write_manifest", lambda *a, **k: None)
     monkeypatch.setattr(venv_mod.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
 
     venv_mod.ensure_vllm_venv("", upgrade=True, version="0.28.0")
@@ -943,8 +943,8 @@ def test_apply_vllm_update_refuses_silent_no_op(tmp_path, monkeypatch):
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
     monkeypatch.setattr(venv_mod, "latest_vllm_pypi_version", lambda: "0.28.0")
     monkeypatch.setattr(venv_mod, "ensure_vllm_venv", lambda *a, **k: Path("/tmp/vllm"))
-    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda: "0.27.1")
-    monkeypatch.setattr(venv_mod, "install_log_path", lambda: home / "install.log")
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda *a, **k: "0.27.1")
+    monkeypatch.setattr(venv_mod, "install_log_path", lambda *a, **k: home / "install.log")
     with pytest.raises(RuntimeError, match="still 0.27.1"):
         engine.apply_vllm_update()
 
@@ -965,7 +965,7 @@ def test_apply_vllm_update_records_matching_pypi_tag(tmp_path, monkeypatch):
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
     monkeypatch.setattr(venv_mod, "latest_vllm_pypi_version", lambda: "0.28.0")
     monkeypatch.setattr(venv_mod, "ensure_vllm_venv", lambda *a, **k: Path("/tmp/vllm"))
-    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda: "0.28.0")
+    monkeypatch.setattr(venv_mod, "installed_vllm_version", lambda *a, **k: "0.28.0")
     engine.apply_vllm_update()
     remembered = venv_mod.read_version_check()
     assert remembered["installed"] == "0.28.0"
@@ -1107,7 +1107,7 @@ def _alive_supervisor(tmp_path, monkeypatch, port=19980):
     from hermes_cli.vllm_runtime.supervisor import VllmSupervisor
 
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: port)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: port)
     sup = VllmSupervisor(
         {"model": "acme/wait-awq", "port": port},
         executable=tmp_path / "vllm",
@@ -1226,7 +1226,7 @@ def test_wait_ready_fails_immediately_when_proc_exits(tmp_path, monkeypatch):
     from hermes_cli.vllm_runtime.supervisor import VllmSupervisor
 
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0: 19982)
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port", lambda preferred=0, **k: 19982)
     sup = VllmSupervisor(
         {"model": "acme/dead-awq", "port": 19982},
         executable=tmp_path / "vllm",

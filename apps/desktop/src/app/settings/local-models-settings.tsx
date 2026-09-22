@@ -84,8 +84,21 @@ function gbLabel(bytes: number | null | undefined): string {
   return `${(bytes / (1 << 30)).toFixed(1)} GB`
 }
 
+export function isVllmEngine(engine: LocalEngine | string | undefined): engine is 'vllm' | 'vllm-cpu' {
+  return engine === 'vllm' || engine === 'vllm-cpu'
+}
+
 function engineOf(status: LocalModelsStatus | null): LocalEngine {
-  return status?.engine === 'vllm' ? 'vllm' : 'llamacpp'
+  const engine = status?.engine
+  if (engine === 'vllm-cpu') {
+    return 'vllm-cpu'
+  }
+
+  return engine === 'vllm' ? 'vllm' : 'llamacpp'
+}
+
+function vllmEngineLabel(engine: LocalEngine, copy: { engineVllm: string; engineVllmCpu: string }): string {
+  return engine === 'vllm-cpu' ? copy.engineVllmCpu : copy.engineVllm
 }
 
 function vllmLibraryEmpty(status: LocalModelsStatus): boolean {
@@ -133,6 +146,7 @@ function EngineSelect({
         <SelectContent>
           <SelectItem value="llamacpp">{copy.engineLlama}</SelectItem>
           <SelectItem value="vllm">{copy.engineVllm}</SelectItem>
+          <SelectItem value="vllm-cpu">{copy.engineVllmCpu}</SelectItem>
         </SelectContent>
       </Select>
     </label>
@@ -178,7 +192,7 @@ export function LocalModelsSettings() {
       .then(next => {
         setStatus(next)
 
-        if (engineOf(next) === 'vllm') {
+        if (isVllmEngine(engineOf(next))) {
           void getVllmModels()
             .then(data => setVllmModels(data.models))
             .catch(() => setVllmModels([]))
@@ -237,7 +251,7 @@ export function LocalModelsSettings() {
   const hadVllmLibrary = useRef(false)
 
   useEffect(() => {
-    if (selectedEngine !== 'vllm' || !status) {
+    if (!isVllmEngine(selectedEngine) || !status) {
       return
     }
 
@@ -251,7 +265,7 @@ export function LocalModelsSettings() {
   }, [selectedEngine, status])
 
   useEffect(() => {
-    if (selectedEngine !== 'vllm') {
+    if (!isVllmEngine(selectedEngine)) {
       setRecommend(null)
 
       return
@@ -504,12 +518,12 @@ export function LocalModelsSettings() {
   // re-runs this same one-click path without hiding the library first.
   const qJob = runningQuickstart ?? null
 
-  const libraryEmpty = engine === 'vllm' ? vllmLibraryEmpty(status) : status.models.length === 0
+  const libraryEmpty = isVllmEngine(engine) ? vllmLibraryEmpty(status) : status.models.length === 0
   const needsSetup = !status.runtime_installed || libraryEmpty
   const heroModel = catalog?.find(c => c.recommended && c.fits) ?? catalog?.find(c => c.fits) ?? null
 
-  if (engine === 'vllm' && (vllmSetupJob || (needsSetup && !configure))) {
-    const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || copy.engineVllm
+  if (isVllmEngine(engine) && (vllmSetupJob || (needsSetup && !configure))) {
+    const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || vllmEngineLabel(engine, copy)
     const vllmPhase = vllmSetupJob?.phase ?? ''
     const vllmStageIndex = ['starting-server', 'setting-default'].includes(vllmPhase)
       ? 2
@@ -710,9 +724,9 @@ export function LocalModelsSettings() {
   // Up to date = the authority (status) says the configured tag is what's
   // serving. Shown whenever true — not only right after an update.
   const updateApplied = status.runtime_installed && !status.update_available && status.tag === status.configured_tag
-  const vllmVersion = (status.vllm_version || (engine === 'vllm' ? status.tag : '') || '').trim()
+  const vllmVersion = (status.vllm_version || (isVllmEngine(engine) ? status.tag : '') || '').trim()
   const vllmChip =
-    engine === 'vllm'
+    isVllmEngine(engine)
       ? vllmEngineChip({ copy, jobs, serverBusy, status })
       : status.runtime_installed
         ? {
@@ -720,7 +734,7 @@ export function LocalModelsSettings() {
             tone: 'primary' as const
           }
         : null
-  const vllmPower = engine === 'vllm' ? vllmEnginePower({ copy, jobs, serverBusy, status }) : null
+  const vllmPower = isVllmEngine(engine) ? vllmEnginePower({ copy, jobs, serverBusy, status }) : null
 
   return (
     <SettingsContent>
@@ -728,14 +742,14 @@ export function LocalModelsSettings() {
       <SettingsSection
         aside={vllmChip ? <Pill tone={vllmChip.tone}>{vllmChip.label}</Pill> : undefined}
         icon={Zap}
-        meta={engine === 'vllm' ? (vllmVersion ? `${copy.engineVllm} ${vllmVersion}` : copy.engineVllm) : status.tag}
+        meta={isVllmEngine(engine) ? (vllmVersion ? `${vllmEngineLabel(engine, copy)} ${vllmVersion}` : vllmEngineLabel(engine, copy)) : status.tag}
         title={copy.runtimeTitle}
       >
         <div className="mb-3">
           <EngineSelect disabled={engineBusy} engine={engine} onChange={next => void handleEngineChange(next)} />
         </div>
 
-        {engine === 'vllm' ? (
+        {isVllmEngine(engine) ? (
           <>
             {status.runtime_installed && status.tag && (
               <ListRow
@@ -1233,7 +1247,7 @@ export function LocalModelsSettings() {
       )}
 
       {engine === 'llamacpp' && <BrowseSection onChanged={refresh} />}
-      {engine === 'vllm' && (
+      {isVllmEngine(engine) && (
         <VllmModelsPane
           {...vllmServedIdentity(status)}
           models={vllmModels ?? []}

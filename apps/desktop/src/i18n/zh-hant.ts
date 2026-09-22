@@ -1059,6 +1059,7 @@ export const zhHant = defineLocale({
       storageUsed: (used, free) => `占用 ${used} · 剩餘 ${free}`,
       runtimePath: '執行環境',
       engineStat: '引擎',
+      cpuCores: n => `${n} 核`,
       servingStat: '正在服務',
       servingReady: '就緒',
       servingStarting: '啟動中',
@@ -1161,7 +1162,8 @@ export const zhHant = defineLocale({
       deleteFailed: '刪除失敗',
       engineLabel: '本機後端',
       engineLlama: 'llama.cpp',
-      engineVllm: 'vLLM',
+      engineVllm: 'vLLM (GPU)',
+      engineVllmCpu: 'vLLM (CPU)',
       vllmInstallTitle: '安裝 vLLM 執行環境',
       vllmInstallDetail:
         '下載 vLLM 推論引擎。你下載的模型完全在本機執行——無需帳號，資料不會離開這台電腦。伺服器由 Hermes 啟動並管理。',

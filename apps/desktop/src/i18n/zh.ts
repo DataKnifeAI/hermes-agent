@@ -1395,6 +1395,7 @@ export const zh: Translations = {
       storageUsed: (used, free) => `占用 ${used} · 剩余 ${free}`,
       runtimePath: '运行时',
       engineStat: '引擎',
+      cpuCores: n => `${n} 核`,
       servingStat: '正在服务',
       servingReady: '就绪',
       servingStarting: '启动中',
@@ -1494,7 +1495,8 @@ export const zh: Translations = {
       deleteFailed: '删除失败',
       engineLabel: '本地后端',
       engineLlama: 'llama.cpp',
-      engineVllm: 'vLLM',
+      engineVllm: 'vLLM (GPU)',
+      engineVllmCpu: 'vLLM (CPU)',
       vllmInstallTitle: '安装 vLLM 运行时',
       vllmInstallDetail:
         '下载 vLLM 推理引擎。你下载的模型完全在本机运行——无需账号，数据不会离开这台电脑。服务器由 Hermes 启动并管理。',

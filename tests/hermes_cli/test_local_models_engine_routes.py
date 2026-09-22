@@ -37,6 +37,9 @@ def _client(tmp_path, monkeypatch):
     # Nemotron on the developer's 18435.
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    from hermes_cli.web_routers import local_models as lm
+    if lm._QUICKSTART_LOCK.locked():
+        lm._QUICKSTART_LOCK.release()
     from hermes_cli import web_server
 
     test_client = TestClient(web_server.app)
@@ -76,9 +79,9 @@ def test_status_vllm_version_from_isolated_venv(tmp_path, monkeypatch):
     _write_engine(home, "vllm")
     reported = "9.9.9"
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: reported)
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda *a, **k: reported)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: None)
@@ -99,9 +102,9 @@ def test_status_vllm_version_null_when_venv_missing(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: False)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: False)
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: "")
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda *a, **k: "")
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: None)
@@ -122,7 +125,7 @@ def test_hardware_vllm_version_from_isolated_venv(tmp_path, monkeypatch):
     _write_engine(home, "vllm")
     reported = "9.9.9"
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: reported)
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda *a, **k: reported)
 
     data = client.get("/api/local-models/hardware").json()
     assert data["engine"] == "vllm"
@@ -133,7 +136,7 @@ def test_hardware_vllm_version_null_when_not_installed(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda: "")
+        "hermes_cli.vllm_runtime.venv.installed_vllm_version", lambda *a, **k: "")
 
     data = client.get("/api/local-models/hardware").json()
     assert data["engine"] == "vllm"
@@ -144,7 +147,7 @@ def test_status_reports_vllm_not_llama_gguf(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 1})
@@ -497,7 +500,7 @@ def test_switch_engine_then_status_still_shows_running_vllm(tmp_path, monkeypatc
         "served_model_name": "hermes3:8b",
     }})
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: {"base_url": "http://127.0.0.1:18435/v1", "pid": 7})
@@ -531,7 +534,7 @@ def test_vllm_status_served_name_is_running_server_not_config(tmp_path, monkeypa
         "served_model_name": "nemotron",
     }})
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
@@ -569,7 +572,7 @@ def test_vllm_status_active_empty_until_models_200(tmp_path, monkeypatch):
         "served_model_name": "Hermes-3-Llama-3.1-8B",
     }})
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
@@ -581,7 +584,7 @@ def test_vllm_status_active_empty_until_models_200(tmp_path, monkeypatch):
         lambda: "")
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.supervisor.state_served_model_name",
-        lambda: "Hermes-3-Llama-3.1-8B")
+        lambda *a, **k: "Hermes-3-Llama-3.1-8B")
 
     data = client.get("/api/local-models/status").json()
     assert data["server_running"] is False
@@ -599,13 +602,13 @@ def test_vllm_engine_state_ready_iff_healthy_endpoint(tmp_path, monkeypatch):
         "served_model_name": "qwen3:14b",
     }})
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine._vllm_last_error",
-        lambda: None)
+        lambda *a, **k: None)
 
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
@@ -649,7 +652,7 @@ def test_vllm_engine_state_spawned_not_healthy_is_starting(tmp_path, monkeypatch
         "served_model_name": "qwen3:14b",
     }})
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
@@ -673,7 +676,7 @@ def test_vllm_engine_state_spawned_not_healthy_is_starting(tmp_path, monkeypatch
         "hermes_cli.vllm_runtime.bootstrap.get_supervisor", lambda: _Sup())
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine._vllm_last_error",
-        lambda: "stale leftover")
+        lambda *a, **k: "stale leftover")
 
     status = client.get("/api/local-models/status").json()
     assert status["engine_state"] == "starting"
@@ -945,7 +948,7 @@ def test_vllm_quickstart_installs_downloads_starts_activates(tmp_path, monkeypat
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     calls: list[str] = []
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: False)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: False)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv",
         lambda *a, **k: calls.append("install"))
@@ -983,7 +986,7 @@ def test_vllm_quickstart_skips_satisfied_legs(tmp_path, monkeypatch):
     (cached / "weights.bin").write_bytes(b"w" * 32)
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     calls: list[str] = []
-    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv",
         lambda *a, **k: calls.append("install"))
@@ -1017,7 +1020,7 @@ def test_vllm_quickstart_no_probe_uses_16gb_default(tmp_path, monkeypatch):
     none = recommend_vllm(total_bytes=0)
     rec = VllmRecommendation(NvidiaProbe(0, 0, "none", error="no_nvidia"), None, False, "no_nvidia")
     monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
-    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr("hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.inventory.download_hf_repo", lambda *a, **k: None)
@@ -1030,6 +1033,8 @@ def test_vllm_quickstart_no_probe_uses_16gb_default(tmp_path, monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["model_id"] == none.model
     assert "/" in r.json()["model_id"]
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
 
 
 def test_vllm_quickstart_refuses_when_gpu_infeasible(tmp_path, monkeypatch):
@@ -1053,7 +1058,7 @@ def test_vllm_quickstart_ignores_leftover_gated_search_hit(tmp_path, monkeypatch
     hub.mkdir()
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     pulled: list[str] = []
-    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -1128,7 +1133,7 @@ def test_vllm_quickstart_empty_body_ignores_leftover_nemotron(tmp_path, monkeypa
     hub.mkdir()
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     pulled: list[str] = []
-    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -1206,7 +1211,7 @@ def test_vllm_quickstart_stops_leftover_running_id_starts_official(tmp_path, mon
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
         lambda cfg=None: "http://127.0.0.1:9/v1")
-    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -1262,7 +1267,7 @@ def test_vllm_quickstart_surfaces_last_error_when_serve_dies(tmp_path, monkeypat
     monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_engine", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
-    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -1350,7 +1355,7 @@ def test_vllm_quickstart_falls_back_when_official_id_401s(tmp_path, monkeypatch)
     hub.mkdir()
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     pulled: list[str] = []
-    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.venv.ensure_vllm_venv", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -1776,13 +1781,13 @@ def test_vllm_switch_in_flight_reports_starting(tmp_path, monkeypatch):
     client, home = _client(tmp_path, monkeypatch)
     _write_engine(home, "vllm")
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine.occupancy_payload",
         lambda: {"occupancy": [], "occupancy_message": None})
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models_engine._vllm_last_error",
-        lambda: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: None)
@@ -2029,7 +2034,7 @@ def test_vllm_log_phase_sniffs_warmup_and_cuda_graphs(tmp_path, monkeypatch):
     log.parent.mkdir(parents=True)
     log.write_text("Loading weights took 12s\nWarming up Mamba kernels\n", encoding="utf-8")
     monkeypatch.setattr(
-        "hermes_cli.vllm_runtime.venv.venv_ready", lambda: True)
+        "hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
         lambda *a, **k: None)

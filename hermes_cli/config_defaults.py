@@ -2330,7 +2330,7 @@ DEFAULT_CONFIG = {
     "local_runtime": {
         # Off = detection-only (Hermes still finds an external llama-server you run).
         "enabled": False,
-        # llamacpp | vllm. Additive; missing key deep-merges to llamacpp.
+        # llamacpp | vllm | vllm-cpu. Additive; missing key deep-merges to llamacpp.
         "engine": "llamacpp",
         # Pinned llama.cpp release tag; bumped by Hermes releases after validation.
         "tag": "b10679",

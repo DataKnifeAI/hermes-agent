@@ -44,7 +44,7 @@ export function localSetupEligible(
   }
 
   // vLLM uses HF weights, not the GGUF catalog — this tip is the llama.cpp offer.
-  if (status.engine === 'vllm') {
+  if (status.engine === 'vllm' || status.engine === 'vllm-cpu') {
     return false
   }
 

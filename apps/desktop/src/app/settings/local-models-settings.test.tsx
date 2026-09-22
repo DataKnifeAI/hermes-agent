@@ -730,12 +730,24 @@ describe('vLLM engine', () => {
     renderPane()
     const picker = await screen.findByLabelText(/local backend/i)
     fireEvent.click(picker)
-    fireEvent.click(await screen.findByRole('option', { name: 'vLLM' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'vLLM (GPU)' }))
 
     await waitFor(() => {
       expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm')
     })
     expect(mocked.setLocalServer).not.toHaveBeenCalled()
+  })
+
+  it('lists llama.cpp, vLLM (GPU), and vLLM (CPU) as distinct engines', async () => {
+    renderPane()
+    fireEvent.click(await screen.findByLabelText(/local backend/i))
+    expect(await screen.findByRole('option', { name: 'llama.cpp' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'vLLM (GPU)' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'vLLM (CPU)' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('option', { name: 'vLLM (CPU)' }))
+    await waitFor(() => {
+      expect(mocked.setLocalEngine).toHaveBeenCalledWith('vllm-cpu')
+    })
   })
 
   it('falls back to first-time setup when the vLLM inventory is empty', async () => {
@@ -1225,7 +1237,7 @@ describe('vLLM engine', () => {
       expect.arrayContaining(['flex', 'items-center', 'justify-end', 'gap-2'])
     )
     expect(screen.getAllByRole('button', { name: /turn on/i })).toHaveLength(1)
-    expect(screen.getByText('vLLM 0.28.0')).toBeTruthy()
+    expect(screen.getByText('vLLM (GPU) 0.28.0')).toBeTruthy()
     expect(screen.queryByText('vLLM runtime installed')).toBeNull()
     expect(screen.queryByText(/the latest release on PyPI/i)).toBeNull()
     expect(screen.queryByText(/installed at/i)).toBeNull()

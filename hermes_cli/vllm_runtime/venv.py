@@ -17,73 +17,77 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hermes_cli.vllm_runtime.device import (
+    CPU, install_log_name, normalize_device, runtime_leaf, server_log_name,
+)
+
 logger = logging.getLogger(__name__)
 
 
-def runtimes_root() -> Path:
-    """``<default hermes root>/runtimes/vllm`` — not profile-scoped."""
+def runtimes_root(device: str = "gpu") -> Path:
+    """``<default hermes root>/runtimes/vllm`` or ``…/vllm-cpu`` — not profile-scoped."""
     from hermes_constants import get_default_hermes_root
 
-    return get_default_hermes_root() / "runtimes" / "vllm"
+    return get_default_hermes_root() / "runtimes" / runtime_leaf(device)
 
 
-def venv_dir() -> Path:
-    return runtimes_root() / ".venv"
+def venv_dir(device: str = "gpu") -> Path:
+    return runtimes_root(device) / ".venv"
 
 
-def venv_python() -> Path:
+def venv_python(device: str = "gpu") -> Path:
     if os.name == "nt":
-        return venv_dir() / "Scripts" / "python.exe"
-    return venv_dir() / "bin" / "python"
+        return venv_dir(device) / "Scripts" / "python.exe"
+    return venv_dir(device) / "bin" / "python"
 
 
-def vllm_executable() -> Path:
+def vllm_executable(device: str = "gpu") -> Path:
     """``vllm`` console script inside the isolated venv (missing until install)."""
     if os.name == "nt":
-        return venv_dir() / "Scripts" / "vllm.exe"
-    return venv_dir() / "bin" / "vllm"
+        return venv_dir(device) / "Scripts" / "vllm.exe"
+    return venv_dir(device) / "bin" / "vllm"
 
 
-def venv_ready() -> bool:
-    return vllm_executable().is_file()
+def venv_ready(device: str = "gpu") -> bool:
+    return vllm_executable(device).is_file()
 
 
 def hermes_logs_dir() -> Path:
     """Same directory ``hermes logs`` lists and llama-server.log uses.
 
-    Wheels stay under ``runtimes/vllm/``. Only the log files join the
-    central log dir (profile-aware via ``get_hermes_home()``).
+    Wheels stay under ``runtimes/vllm/`` or ``runtimes/vllm-cpu/``. Only the
+    log files join the central log dir (profile-aware via ``get_hermes_home()``).
     """
     from hermes_constants import get_hermes_home
 
     return get_hermes_home() / "logs"
 
 
-def server_log_path() -> Path:
-    return hermes_logs_dir() / "vllm-server.log"
+def server_log_path(device: str = "gpu") -> Path:
+    return hermes_logs_dir() / server_log_name(device)
 
 
-def install_log_path() -> Path:
-    return hermes_logs_dir() / "vllm-install.log"
+def install_log_path(device: str = "gpu") -> Path:
+    return hermes_logs_dir() / install_log_name(device)
 
 
-def server_log_read_paths() -> tuple[Path, ...]:
+def server_log_read_paths(device: str = "gpu") -> tuple[Path, ...]:
     """Write target first; leftover runtime-dir files from older builds last."""
-    return (server_log_path(), runtimes_root() / "vllm-server.log")
+    return (server_log_path(device), runtimes_root(device) / server_log_name(device))
 
 
-def install_log_read_paths() -> tuple[Path, ...]:
-    return (install_log_path(), runtimes_root() / "install.log")
+def install_log_read_paths(device: str = "gpu") -> tuple[Path, ...]:
+    return (install_log_path(device), runtimes_root(device) / "install.log")
 
 
-def server_log_hint() -> str:
+def server_log_hint(device: str = "gpu") -> str:
     from hermes_constants import display_hermes_home
 
-    return f"{display_hermes_home()}/logs/vllm-server.log"
+    return f"{display_hermes_home()}/logs/{server_log_name(device)}"
 
 
-def manifest_path() -> Path:
-    return runtimes_root() / "manifest.json"
+def manifest_path(device: str = "gpu") -> Path:
+    return runtimes_root(device) / "manifest.json"
 
 
 def resolve_venv_python(pin: str | None = "") -> str:
@@ -140,7 +144,7 @@ def _assert_isolated(target: Path) -> None:
         return
     raise RuntimeError(
         f"refusing to install vLLM into the Hermes venv ({hermes}); "
-        "the managed engine uses an isolated runtimes/vllm/.venv"
+        "the managed engine uses an isolated runtimes/vllm/.venv or runtimes/vllm-cpu/.venv"
     )
 
 
@@ -170,7 +174,7 @@ def _stream(cmd: list[str], log_path: Path, *, cwd: Path | None = None,
         )
 
 
-def _write_manifest(python_exe: Path) -> None:
+def _write_manifest(python_exe: Path, device: str = "gpu") -> None:
     payload = {
         "python": str(python_exe),
         "python_version": subprocess.check_output(
@@ -178,9 +182,11 @@ def _write_manifest(python_exe: Path) -> None:
              "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
             text=True,
         ).strip(),
+        "device": normalize_device(device),
     }
-    manifest_path().parent.mkdir(parents=True, exist_ok=True)
-    manifest_path().write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    dest = manifest_path(device)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def _venv_python_version(exe: Path) -> str:
@@ -194,8 +200,8 @@ def _venv_python_version(exe: Path) -> str:
         return ""
 
 
-def _needs_recreate(creator: str) -> bool:
-    py = venv_python()
+def _needs_recreate(creator: str, device: str = "gpu") -> bool:
+    py = venv_python(device)
     if not py.is_file():
         return True
     have = _venv_python_version(py)
@@ -223,7 +229,7 @@ def _create_venv(creator: str, dest: Path, log: Path) -> None:
     _stream([creator, "-m", "venv", str(dest)], log)
 
 
-def _assert_cuda(py: Path) -> None:
+def _assert_cuda(py: Path, device: str = "gpu") -> None:
     probe = subprocess.run(
         [str(py), "-c", "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)"],
         capture_output=True, text=True, timeout=120,
@@ -231,64 +237,115 @@ def _assert_cuda(py: Path) -> None:
     if probe.returncode != 0:
         raise RuntimeError(
             "vLLM venv PyTorch has no CUDA — GPU inference would run on CPU. "
-            f"See {install_log_path()}"
+            f"See {install_log_path(device)}"
         )
 
 
-def _ninja_executable() -> Path:
+def _assert_cpu(py: Path, device: str = "cpu") -> None:
+    """CPU venv: torch must import; CUDA is not required and must not be the wheel."""
+    probe = subprocess.run(
+        [str(py), "-c",
+         "import torch; raise SystemExit(0 if not torch.cuda.is_available() else 1)"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "vLLM CPU venv PyTorch has CUDA — expected the official CPU build "
+            f"(VLLM_TARGET_DEVICE=cpu / CPU wheels). See {install_log_path(device)}"
+        )
+
+
+def _ninja_executable(device: str = "gpu") -> Path:
     if os.name == "nt":
-        return venv_dir() / "Scripts" / "ninja.exe"
-    return venv_dir() / "bin" / "ninja"
+        return venv_dir(device) / "Scripts" / "ninja.exe"
+    return venv_dir(device) / "bin" / "ninja"
+
+
+def _install_env(device: str) -> dict[str, str]:
+    env = _uv_install_env()
+    if normalize_device(device) == CPU:
+        env["VLLM_TARGET_DEVICE"] = "cpu"
+    return env
+
+
+def _install_packages(py: Path, dest: Path, log: Path, packages: list[str],
+                      *, device: str, uv: str | None) -> None:
+    env = _install_env(device)
+    cpu = normalize_device(device) == CPU
+    if uv:
+        cmd = [uv, "--no-config", "pip", "install", "--python", str(py),
+               "--upgrade", *packages]
+        cmd.append("--torch-backend=cpu" if cpu else "--torch-backend=auto")
+        _stream(cmd, log, cwd=dest.parent, env=env)
+        return
+    _stream([str(py), "-m", "pip", "install", "--upgrade", "pip"], log, env=env)
+    if cpu:
+        _stream(
+            [str(py), "-m", "pip", "install", "--upgrade", "torch",
+             "--index-url", "https://download.pytorch.org/whl/cpu"],
+            log, env=env,
+        )
+    _stream([str(py), "-m", "pip", "install", "--upgrade", *packages], log, env=env)
 
 
 def ensure_vllm_venv(python_pin: str | None = "", *, upgrade: bool = False,
-                     version: str | None = None) -> Path:
+                     version: str | None = None, device: str = "gpu") -> Path:
     """Create the isolated venv if needed and pip-install ``vllm``. Returns the ``vllm`` exe.
 
-    Uses ``uv`` when it is already on PATH (CUDA torch via ``--torch-backend=auto``).
-    Otherwise stdlib ``venv`` + ``python -m pip``. Never installs into ``sys.prefix``.
-    ``version`` pins ``vllm==…`` (updates); empty means "latest the resolver can see".
+    GPU uses CUDA torch (``--torch-backend=auto``) and ``_assert_cuda``.
+    CPU uses the official CPU extra/build (``VLLM_TARGET_DEVICE=cpu`` /
+    ``--torch-backend=cpu``) and ``_assert_cpu`` — never ``--device cpu``
+    on a CUDA wheel. Never installs into ``sys.prefix``.
     """
+    device = normalize_device(device)
     creator = resolve_venv_python(python_pin)
-    dest = venv_dir()
+    dest = venv_dir(device)
     _assert_isolated(dest)
-    log = install_log_path()
+    log = install_log_path(device)
     uv = shutil.which("uv")
 
-    if _needs_recreate(creator) and dest.exists():
-        logger.info("recreating vLLM venv (Python pin changed)")
+    if _needs_recreate(creator, device) and dest.exists():
+        logger.info("recreating vLLM %s venv (Python pin changed)", device)
         shutil.rmtree(dest)
 
-    if not venv_python().is_file():
+    if not venv_python(device).is_file():
         _create_venv(creator, dest, log)
 
-    py = venv_python()
+    py = venv_python(device)
     _assert_isolated(py)
-    need_wheels = not venv_ready() or upgrade or not _ninja_executable().is_file()
+    need_wheels = not venv_ready(device) or upgrade or not _ninja_executable(device).is_file()
     if need_wheels:
         spec = f"vllm=={version}" if (version or "").strip() else "vllm"
         packages = [spec, "ninja"]
-        if uv:
-            # --no-config + UV_NO_CONFIG + cwd outside the Hermes tree: see _uv_install_env.
-            _stream(
-                [uv, "--no-config", "pip", "install", "--python", str(py),
-                 "--upgrade", *packages, "--torch-backend=auto"],
-                log, cwd=dest.parent, env=_uv_install_env(),
-            )
+        _install_packages(py, dest, log, packages, device=device, uv=uv)
+        if device == CPU:
+            _assert_cpu(py, device)
         else:
-            _stream([str(py), "-m", "pip", "install", "--upgrade", "pip"], log)
-            _stream([str(py), "-m", "pip", "install", "--upgrade", *packages], log)
-        _assert_cuda(py)
-    exe = vllm_executable()
+            _assert_cuda(py, device)
+    exe = vllm_executable(device)
     if not exe.is_file():
         raise RuntimeError(f"vLLM install finished but {exe} is missing")
-    _write_manifest(py)
+    _write_manifest(py, device)
     return exe
 
 
-def installed_vllm_version() -> str:
+def ensure_both_vllm_venvs(python_pin: str | None = "", *, upgrade: bool = False,
+                           version: str | None = None) -> dict[str, Path | Exception]:
+    """Install GPU and CPU isolated venvs. One failure does not skip the other."""
+    out: dict[str, Path | Exception] = {}
+    for device in ("gpu", "cpu"):
+        try:
+            out[device] = ensure_vllm_venv(
+                python_pin, upgrade=upgrade, version=version, device=device)
+        except Exception as exc:  # noqa: BLE001 — install both, report each
+            logger.warning("vLLM %s venv install failed: %s", device, exc)
+            out[device] = exc
+    return out
+
+
+def installed_vllm_version(device: str = "gpu") -> str:
     """Version of the ``vllm`` package inside the isolated venv — never Hermes ``sys.prefix``."""
-    py = venv_python()
+    py = venv_python(device)
     if not py.is_file():
         return ""
     _assert_isolated(py)
@@ -334,12 +391,12 @@ def latest_vllm_pypi_version(*, timeout_s: float = 8) -> str:
     return str(info.get("version") or "").strip()
 
 
-def version_check_path() -> Path:
-    return runtimes_root() / "version-check.json"
+def version_check_path(device: str = "gpu") -> Path:
+    return runtimes_root(device) / "version-check.json"
 
 
-def read_version_check() -> dict:
-    path = version_check_path()
+def read_version_check(device: str = "gpu") -> dict:
+    path = version_check_path(device)
     if not path.is_file():
         return {}
     try:
@@ -349,7 +406,7 @@ def read_version_check() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def write_version_check(installed: str, latest: str) -> dict:
+def write_version_check(installed: str, latest: str, device: str = "gpu") -> dict:
     payload = {
         "installed": installed,
         "latest": latest,
@@ -357,20 +414,24 @@ def write_version_check(installed: str, latest: str) -> dict:
             installed and latest and _parse_pep440_head(latest) > _parse_pep440_head(installed)
         ),
     }
-    path = version_check_path()
+    path = version_check_path(device)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
 
 
-def vllm_version_fields(*, check: bool = False) -> dict:
+def vllm_version_fields(*, check: bool = False, device: str = "gpu") -> dict:
     """Status extras: installed tag, last (or fresh) PyPI check, update flag."""
-    installed = installed_vllm_version()
+    installed = installed_vllm_version(device)
     if check:
         latest = latest_vllm_pypi_version()
         if latest:
-            return {"tag": installed, "configured_tag": latest, **write_version_check(installed, latest)}
-        remembered = read_version_check()
+            return {
+                "tag": installed,
+                "configured_tag": latest,
+                **write_version_check(installed, latest, device),
+            }
+        remembered = read_version_check(device)
         return {
             "tag": installed,
             "configured_tag": str(remembered.get("latest") or installed),
@@ -378,7 +439,7 @@ def vllm_version_fields(*, check: bool = False) -> dict:
             "installed": installed,
             "latest": "",
         }
-    remembered = read_version_check()
+    remembered = read_version_check(device)
     latest = str(remembered.get("latest") or "")
     update = bool(remembered.get("update_available"))
     if installed and latest:

@@ -17,7 +17,10 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from hermes_cli.local_engines import engine_from_config
+from hermes_cli.local_engines import engine_from_config, vllm_device_from_config
+from hermes_cli.vllm_runtime.device import (
+    ALL_ENGINES, CPU, ENGINE_GPU, engine_to_device, is_vllm_engine,
+)
 from hermes_cli.vllm_runtime.supervisor import READY_TIMEOUT_S
 
 _STORAGE_TTL_S = 30.0
@@ -27,7 +30,7 @@ _LLAMA_ONLY_DETAIL = (
     "This action is for llama.cpp GGUF models. "
     "Switch the local engine to llama.cpp first."
 )
-_ENGINE_NAMES = frozenset({"llamacpp", "vllm"})
+_ENGINE_NAMES = ALL_ENGINES
 # POST /use, /quickstart (starting-server), /server start all wait on
 # supervisor._wait_ready. Must be >= READY_TIMEOUT_S so the job does not
 # fail while CUDA graphs are still capturing.
@@ -172,9 +175,9 @@ def cache_and_runtime_fields(engine: str) -> dict[str, Any]:
     from hermes_cli.vllm_runtime.inventory import hf_hub_dir
     from hermes_cli.vllm_runtime.venv import runtimes_root as vllm_runtimes_root
 
-    if engine == "vllm":
+    if is_vllm_engine(engine):
         cache = hf_hub_dir()
-        runtime = vllm_runtimes_root()
+        runtime = vllm_runtimes_root(engine_to_device(engine))
     else:
         cache = bootstrap.models_dir()
         runtime = binaries.runtimes_root()
@@ -193,14 +196,14 @@ def cache_and_runtime_fields(engine: str) -> dict[str, Any]:
 
 def refuse_llama_only() -> None:
     """400 + plain language when the active engine is vLLM — no GGUF I/O."""
-    if configured_engine() == "vllm":
+    if is_vllm_engine(configured_engine()):
         raise HTTPException(status_code=400, detail=_LLAMA_ONLY_DETAIL)
 
 
-def _vllm_last_error() -> str | None:
+def _vllm_last_error(device: str = "gpu") -> str | None:
     from hermes_cli.vllm_runtime.supervisor import read_last_error
 
-    return read_last_error()
+    return read_last_error(device)
 
 
 def classify_vllm_engine_state(
@@ -264,7 +267,7 @@ def vllm_serve_starting() -> bool:
 
 def refuse_duplicate_vllm_start() -> None:
     """Turn on must not start a second serve while Use / warmup is live."""
-    if configured_engine() == "vllm" and vllm_serve_starting():
+    if is_vllm_engine(configured_engine()) and vllm_serve_starting():
         raise HTTPException(status_code=409, detail=_ALREADY_STARTING)
 
 
@@ -279,15 +282,16 @@ def vllm_engine_snapshot(
     from hermes_cli.vllm_runtime.venv import venv_ready
 
     cfg = config or {}
+    device = vllm_device_from_config(cfg)
     settings = vllm_settings(cfg)
-    running = resolve_vllm_endpoint(wait_for_boot_s=0)
+    running = resolve_vllm_endpoint(cfg, wait_for_boot_s=0)
     served = running_served_model_name() or None
     ready = bool(served)
     occ = occupancy_payload() if with_occupancy else {
         "occupancy": [], "occupancy_message": None,
     }
-    last_error = occ["occupancy_message"] or _vllm_last_error()
-    installed = venv_ready()
+    last_error = occ["occupancy_message"] or _vllm_last_error(device)
+    installed = venv_ready(device)
     sup = get_supervisor()
     proc = getattr(sup, "proc", None) if sup is not None else None
     proc_live = proc is not None and getattr(proc, "poll", lambda: 0)() is None
@@ -310,7 +314,7 @@ def vllm_engine_snapshot(
         "running": running,
         "served": served,
         "settings": settings,
-        "start_phase": None if ready else _vllm_log_phase(),
+        "start_phase": None if ready else _vllm_log_phase(device),
         "server_base_url": (running or {}).get("base_url") or (
             openai_base_url(settings) if installed else None),
     }
@@ -330,10 +334,10 @@ def occupancy_payload() -> dict[str, Any]:
     }
 
 
-def _vllm_log_phase() -> str | None:
+def _vllm_log_phase(device: str = "gpu") -> str | None:
     from hermes_cli.vllm_runtime.venv import install_log_read_paths, server_log_read_paths
 
-    for path in (*server_log_read_paths(), *install_log_read_paths()):
+    for path in (*server_log_read_paths(device), *install_log_read_paths(device)):
         if not path.exists():
             continue
         try:
@@ -353,20 +357,23 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
 
     cfg = config or {}
     section = cfg.get("local_runtime") or {}
+    device = vllm_device_from_config(cfg)
+    engine = engine_from_config(cfg)
     snap = vllm_engine_snapshot(cfg)
     installed = snap["installed"]
     ready = snap["ready"]
     served = snap["served"]
     occ = snap["occupancy"]
-    versions = vllm_version_fields()
+    versions = vllm_version_fields(device=device)
     inventory = catalog_models(cfg)
     return {
-        "engine": "vllm",
+        "engine": engine if is_vllm_engine(engine) else ENGINE_GPU,
+        "vllm_device": device,
         "enabled": bool(section.get("enabled")),
         "venv_ready": installed,
         "runtime_installed": installed,
-        "runtime_backend": "vllm" if installed else None,
-        "venv_path": str(venv_dir()) if installed else "",
+        "runtime_backend": engine if installed else None,
+        "venv_path": str(venv_dir(device)) if installed else "",
         "engine_state": snap["engine_state"],
         "pid": snap["pid"],
         "server_running": ready,
@@ -390,7 +397,7 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
              "size_label": m.get("size_label") or "—"}
             for m in inventory if m.get("cached") or m.get("active")
         ],
-        **{k: v for k, v in cache_and_runtime_fields("vllm").items()
+        **{k: v for k, v in cache_and_runtime_fields(engine if is_vllm_engine(engine) else ENGINE_GPU).items()
            if k in ("models_dir", "models_dir_display", "runtime_dir", "runtime_dir_display")},
     }
 
@@ -422,9 +429,12 @@ def set_engine(name: str) -> dict[str, Any]:
     """
     from cli import save_config_value
 
-    engine = str(name or "").strip().lower()
+    engine = str(name or "").strip().lower().replace("_", "-")
     if engine not in _ENGINE_NAMES:
-        raise HTTPException(status_code=400, detail="engine must be 'llamacpp' or 'vllm'")
+        raise HTTPException(
+            status_code=400,
+            detail="engine must be 'llamacpp', 'vllm', or 'vllm-cpu'",
+        )
     save_config_value("local_runtime.engine", engine)
     return {"ok": True, "engine": engine}
 
@@ -508,37 +518,39 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
         configured_unservable_reason, disable_auto_start, read_last_error,
         state_served_model_name, write_last_error)
 
+    device = vllm_device_from_config(cfg)
     stop_llama_engine()
     blocked = configured_unservable_reason(settings)
     if blocked:
-        write_last_error(blocked)
+        write_last_error(blocked, device)
         disable_auto_start()
         raise HTTPException(status_code=400, detail=blocked)
     if configured_cache_missing(settings):
-        write_last_error(MODEL_REMOVED_MSG)
+        write_last_error(MODEL_REMOVED_MSG, device)
         disable_auto_start()
         raise RuntimeError(MODEL_REMOVED_MSG)
     wanted = str(settings.get("served_model_name") or "").strip()
-    got = state_served_model_name()
+    got = state_served_model_name(device)
     if wanted and got and wanted != got:
         stop_vllm_engine()
-    require_gpu_free()
+    if device != CPU:
+        require_gpu_free()
     from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
 
     sup = ensure_vllm_runtime(cfg, force=True, timeout_s=VLLM_START_TIMEOUT_S)
     if sup is None:
         from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
 
-        running = resolve_vllm_endpoint(wait_for_boot_s=0)
-        still = state_served_model_name()
+        running = resolve_vllm_endpoint(cfg, wait_for_boot_s=0)
+        still = state_served_model_name(device)
         leftover = bool(wanted and still and wanted != still)
         if running is None or leftover:
             from hermes_cli.vllm_runtime.venv import server_log_hint
 
             disable_auto_start()
             raise RuntimeError(
-                read_last_error()
-                or f"managed vLLM did not start — see {server_log_hint()}")
+                read_last_error(device)
+                or f"managed vLLM did not start — see {server_log_hint(device)}")
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
 
@@ -558,7 +570,7 @@ def start_active_engine(*, recover: bool = True) -> None:
     from hermes_cli.web_routers import local_models as lm
 
     cfg = lm._set_runtime_enabled(True)
-    if configured_engine(cfg) == "vllm":
+    if is_vllm_engine(configured_engine(cfg)):
         settings = vllm_settings(cfg)
         failed_id = configured_model_id(settings)
         try:
@@ -594,7 +606,12 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
 
     _ = model_id  # ignored — leftover Gemma / search hits must not win
     hid, notice, rec, overlay = _official_setup()
-    if rec.feasible and hid:
+    from hermes_cli.config import load_config
+
+    device = vllm_device_from_config(load_config())
+    if device == CPU:
+        pass
+    elif rec.feasible and hid:
         pass
     elif rec.reason == "no_nvidia" and hid:
         # No probe: ship the 16 GB balanced id, not a 14B or stale Hermes-8B.
@@ -610,7 +627,7 @@ def vllm_quickstart_plan(model_id: str | None = None) -> dict[str, Any]:
     return {
         "model": hid,
         "display_name": overlay["served_model_name"] or hid.rsplit("/", 1)[-1],
-        "needs_runtime": not venv_ready(),
+        "needs_runtime": not (venv_ready("gpu") and venv_ready("cpu")),
         "needs_download": not repo_is_cached(hid),
         "apply_recommend": True,
         "notice": notice,
@@ -631,7 +648,7 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
     from hermes_cli.vllm_runtime.supervisor import (
         clear_last_error, disable_auto_start, read_last_error, vllm_settings)
-    from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
+    from hermes_cli.vllm_runtime.venv import ensure_both_vllm_venvs
 
     from hermes_cli.web_routers import local_models as lm
 
@@ -639,18 +656,23 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     hid, notice, _rec, overlay = _official_setup()
     if notice:
         job["detail"] = notice
+    cfg = load_config()
+    device = vllm_device_from_config(cfg)
     # Foreign Ollama/etc. first so we do not kill our leftover then fail.
-    require_gpu_free()
+    # CPU vLLM does not take the GPU — skip occupancy.
+    if device != CPU:
+        require_gpu_free()
     # Stop leftover BEFORE overlay/enable. Writing Qwen while Nemotron is up
     # lets desktop boot + kick spawn a second serve (SIGKILL / rc=-9).
     stop_vllm_engine()
     disable_auto_start()
-    clear_last_error()
+    clear_last_error(device)
     for key, value in overlay.items():
         save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
-    lm._step(job, "installing-runtime", "Installing vLLM")
-    ensure_vllm_venv(str(settings.get("python") or ""))
+    lm._step(job, "installing-runtime", "Installing vLLM GPU and CPU")
+    _raise_if_both_venvs_failed(
+        ensure_both_vllm_venvs(str(settings.get("python") or "")))
     if not repo_is_cached(hid):
         job["done_bytes"] = 0
         lm._step(job, "downloading", f"Downloading {hid}")
@@ -669,18 +691,28 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     lm._finish(job, done)
 
 
+def _raise_if_both_venvs_failed(results: dict) -> dict:
+    """Setup installs both engines. Fail only when neither venv landed."""
+    ok = {k: v for k, v in results.items() if not isinstance(v, Exception)}
+    if ok:
+        return results
+    errors = "; ".join(f"{k}: {v}" for k, v in results.items())
+    raise RuntimeError(f"vLLM GPU and CPU installs failed ({errors})")
+
+
 def apply_recommend_and_install(job: dict | None = None) -> None:
     from cli import save_config_value
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
-    from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
+    from hermes_cli.vllm_runtime.venv import ensure_both_vllm_venvs
 
     hid, notice, _rec, overlay = _official_setup()
     for key, value in overlay.items():
         save_config_value(f"local_runtime.vllm.{key}", value)
     settings = vllm_settings(load_config())
-    ensure_vllm_venv(str(settings.get("python") or ""))
+    _raise_if_both_venvs_failed(
+        ensure_both_vllm_venvs(str(settings.get("python") or "")))
     if hid:
         if job is not None:
             job["phase"] = "downloading"
@@ -704,11 +736,21 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
     from hermes_cli.vllm_runtime.inventory import TOO_BIG_USE_MSG, cached_repo_fit
     from hermes_cli.vllm_runtime.recommend import recommend_vllm
 
+    from hermes_cli.config import load_config as _load_for_device
+
+    device = vllm_device_from_config(_load_for_device())
     rec = recommend_vllm()
-    tags = cached_repo_fit(hid, total_vram=rec.probe.total_bytes or 0)
+    if device == CPU:
+        from hermes_cli.local_runtime import hardware as hw
+
+        _total, _used, ram_avail = hw._ram_stats()
+        tags = cached_repo_fit(
+            hid, total_vram=0, total_ram=ram_avail or _total, device=CPU)
+    else:
+        tags = cached_repo_fit(hid, total_vram=rec.probe.total_bytes or 0)
     if tags.get("fit") == "too-big":
         detail = str(tags.get("fit_detail") or TOO_BIG_USE_MSG)
-        write_last_error(detail)
+        write_last_error(detail, device)
         disable_auto_start()
         raise HTTPException(status_code=400, detail=detail)
     if not repo_is_cached(hid):
@@ -860,9 +902,10 @@ def search_vllm_models(q: str, limit: int = 20) -> dict[str, Any]:
 
 
 def check_vllm_update() -> dict[str, Any]:
+    from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.venv import vllm_version_fields
 
-    return vllm_version_fields(check=True)
+    return vllm_version_fields(check=True, device=vllm_device_from_config(load_config()))
 
 
 def apply_vllm_update() -> None:
@@ -876,15 +919,20 @@ def apply_vllm_update() -> None:
         write_version_check,
     )
 
-    settings = vllm_settings(load_config())
+    cfg = load_config()
+    settings = vllm_settings(cfg)
+    device = vllm_device_from_config(cfg)
     latest = latest_vllm_pypi_version()
-    ensure_vllm_venv(str(settings.get("python") or ""), upgrade=True, version=latest or None)
-    installed = installed_vllm_version()
+    ensure_vllm_venv(
+        str(settings.get("python") or ""),
+        upgrade=True, version=latest or None, device=device)
+    installed = installed_vllm_version(device)
     if not installed:
-        raise RuntimeError(f"vLLM update finished but no version is installed. See {install_log_path()}")
-    remembered = write_version_check(installed, latest or installed)
+        raise RuntimeError(
+            f"vLLM update finished but no version is installed. See {install_log_path(device)}")
+    remembered = write_version_check(installed, latest or installed, device)
     if latest and remembered.get("update_available"):
         raise RuntimeError(
             f"vLLM is still {installed} after update (PyPI has {latest}). "
-            f"See {install_log_path()}"
+            f"See {install_log_path(device)}"
         )

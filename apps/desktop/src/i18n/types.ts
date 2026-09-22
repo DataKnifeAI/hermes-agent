@@ -1038,6 +1038,7 @@ export interface Translations {
       storageUsed: (used: string, free: string) => string
       runtimePath: string
       engineStat: string
+      cpuCores: (n: number) => string
       servingStat: string
       servingReady: string
       servingStarting: string
@@ -1144,6 +1145,7 @@ export interface Translations {
       engineLabel: string
       engineLlama: string
       engineVllm: string
+      engineVllmCpu: string
       vllmInstallTitle: string
       vllmInstallDetail: string
       vllmNotFeasible: (reason: string) => string

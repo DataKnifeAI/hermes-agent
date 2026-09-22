@@ -8,6 +8,10 @@ import type { LocalEngine, LocalHardware, LocalModelsStatus } from '@/types/herm
 import { Pill } from './primitives'
 import { vllmEngineState } from './vllm-engine-chip'
 
+function isVllmEngine(engine: LocalEngine | string | undefined): boolean {
+  return engine === 'vllm' || engine === 'vllm-cpu'
+}
+
 function gbLabel(bytes: number | null | undefined): string {
   if (bytes == null || bytes < 0) {
     return '—'
@@ -25,7 +29,7 @@ function vllmVersionOf(
   hardware: LocalHardware,
   status: LocalModelsStatus | null
 ): string {
-  if (engine !== 'vllm') {
+  if (!isVllmEngine(engine)) {
     return ''
   }
 
@@ -68,7 +72,7 @@ export function LocalModelsMachineStats({
   const cachePath = hardware.models_dir_display || hardware.models_dir
   const runtimePath = hardware.runtime_dir_display || hardware.runtime_dir || status?.venv_path
   const engineState =
-    engine === 'vllm' && status
+    isVllmEngine(engine) && status
       ? vllmEngineState({
           ...status,
           engine_state: status.engine_state ?? hardware.engine_state,
@@ -92,11 +96,18 @@ export function LocalModelsMachineStats({
   const used = hardware.vram_used_bytes
   const total = hardware.vram_total_bytes
   const vllmVersion = vllmVersionOf(engine, hardware, status)
-  const engineValue = engine === 'vllm'
+  const vllmLabel = engine === 'vllm-cpu' ? copy.engineVllmCpu : copy.engineVllm
+  const engineValue = isVllmEngine(engine)
     ? vllmVersion
-      ? `${copy.engineVllm} ${vllmVersion}`
-      : copy.engineVllm
+      ? `${vllmLabel} ${vllmVersion}`
+      : vllmLabel
     : copy.engineLlama
+  const cpuLabel = [
+    hardware.cpu_name,
+    hardware.cpu_cores != null ? copy.cpuCores(hardware.cpu_cores) : null
+  ]
+    .filter(Boolean)
+    .join(' · ')
   const ramUsed =
     hardware.ram_used_bytes ??
     (hardware.ram_total_bytes != null && hardware.ram_available_bytes != null
@@ -109,6 +120,14 @@ export function LocalModelsMachineStats({
 
   return (
     <div className="grid gap-0.5 py-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height)">
+      {cpuLabel && (
+        <StatLine
+          icon={<Cpu className="size-3.5" />}
+          label="CPU"
+          value={cpuLabel}
+        />
+      )}
+
       {hardware.gpu_name && (
         <StatLine
           icon={<Zap className="size-3.5" />}
@@ -183,7 +202,7 @@ export function LocalModelsMachineStats({
             />
           )}
 
-          {engine === 'vllm' && runtimePath && (
+          {isVllmEngine(engine) && runtimePath && (
             <StatLine
               icon={<FolderOpen className="size-3.5" />}
               label={copy.runtimePath}

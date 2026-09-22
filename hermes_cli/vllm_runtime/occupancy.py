@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Well-known *other* servers, plus Hermes preferred ports when a leftover is
 # not our state pid. Never treat 8000/8080 as ours.
-FOREIGN_HTTP_PORTS = (8000, 8080, 11434, 1234, 18434, 18435)
+FOREIGN_HTTP_PORTS = (8000, 8080, 11434, 1234, 18434, 18435, 18436)
 
 _LLM_NAME_NEEDLES = (
     "vllm", "llama-server", "ollama", "enginecore",
@@ -171,9 +171,10 @@ def _our_managed() -> tuple[set[int], set[int]]:
     with suppress(Exception):
         from hermes_cli.vllm_runtime.supervisor import state_path as vllm_state
 
-        vp, vo = _collect_managed_state(vllm_state())
-        pids |= vp
-        ports |= vo
+        for device in ("gpu", "cpu"):
+            vp, vo = _collect_managed_state(vllm_state(device))
+            pids |= vp
+            ports |= vo
     with suppress(Exception):
         from hermes_cli.local_runtime.supervisor import state_path as llama_state
 

@@ -45,6 +45,8 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
     global _SUPERVISOR
     from pathlib import Path
 
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import CPU
     from hermes_cli.vllm_runtime.endpoint import _state_endpoint
     from hermes_cli.vllm_runtime.occupancy import OccupyingLlmError, require_gpu_free
     from hermes_cli.vllm_runtime.supervisor import (
@@ -53,17 +55,19 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
         state_served_model_name, vllm_settings, write_last_error)
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
+    device = vllm_device_from_config(config)
     settings = vllm_settings(config)
     wanted = str(settings.get("served_model_name") or "").strip()
     if _SUPERVISOR is not None:
+        same_device = getattr(_SUPERVISOR, "device", "gpu") == device
         got = str(_SUPERVISOR.settings.get("served_model_name") or "").strip()
-        if not wanted or not got or wanted == got:
+        if same_device and (not wanted or not got or wanted == got):
             return _SUPERVISOR
         _SUPERVISOR.stop()
         _SUPERVISOR = None
-    state = _state_endpoint()
+    state = _state_endpoint(device)
     if state is not None:
-        got = state_served_model_name()
+        got = state_served_model_name(device)
         if not wanted or not got or wanted == got:
             logger.info("managed vLLM already running (another process)")
             return None
@@ -72,21 +76,22 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
         from hermes_cli.local_engines import stop_state_pid
         from hermes_cli.vllm_runtime.supervisor import state_path
 
-        stop_state_pid(state_path())
+        stop_state_pid(state_path(device))
 
-    require_gpu_free()
+    if device != CPU:
+        require_gpu_free()
 
     if not configured_model_id(settings):
         logger.warning("managed vLLM has no configured model — not starting")
         return None
     blocked = configured_unservable_reason(settings)
     if blocked:
-        write_last_error(blocked)
+        write_last_error(blocked, device)
         disable_auto_start()
         logger.warning("%s", blocked)
         return None
     if configured_cache_missing(settings):
-        write_last_error(MODEL_REMOVED_MSG)
+        write_last_error(MODEL_REMOVED_MSG, device)
         disable_auto_start()
         logger.warning("%s", MODEL_REMOVED_MSG)
         return None
@@ -94,7 +99,7 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
         exe_path = Path(executable)
     else:
         try:
-            exe_path = ensure_vllm_venv(str(settings.get("python") or ""))
+            exe_path = ensure_vllm_venv(str(settings.get("python") or ""), device=device)
         except OccupyingLlmError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -106,7 +111,7 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
 
     sup = None
     try:
-        sup = VllmSupervisor(settings, executable=exe_path)
+        sup = VllmSupervisor(settings, executable=exe_path, device=device)
         # Visible to stop_vllm_engine before wait_ready returns, so Restore
         # can abort an in-flight desktop boot instead of SIGKILL via state pid.
         _SUPERVISOR = sup

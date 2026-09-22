@@ -1099,6 +1099,7 @@ export const ja = defineLocale({
       storageUsed: (used, free) => `ディスク ${used} · 空き ${free}`,
       runtimePath: 'ランタイム',
       engineStat: 'エンジン',
+      cpuCores: n => `${n} コア`,
       servingStat: '配信中',
       servingReady: '準備完了',
       servingStarting: '起動中',
@@ -1207,7 +1208,8 @@ export const ja = defineLocale({
       deleteFailed: '削除に失敗しました',
       engineLabel: 'ローカルバックエンド',
       engineLlama: 'llama.cpp',
-      engineVllm: 'vLLM',
+      engineVllm: 'vLLM (GPU)',
+      engineVllmCpu: 'vLLM (CPU)',
       vllmInstallTitle: 'vLLM ランタイムをインストール',
       vllmInstallDetail:
         'vLLM 推論エンジンをダウンロードします。ダウンロードしたモデルはこのマシンだけで動きます——アカウント不要、データは外に出ません。サーバーは Hermes が起動・管理します。',

@@ -2,12 +2,14 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
-import type { LocalHardware, LocalModelsStatus } from '@/types/hermes'
+import type { LocalEngine, LocalHardware, LocalModelsStatus } from '@/types/hermes'
 
 import { LocalModelsMachineStats } from './local-models-machine-stats'
 
 const HARDWARE: LocalHardware = {
   uma: false,
+  cpu_name: 'AMD Ryzen 9 7950X',
+  cpu_cores: 32,
   vram_total_bytes: 32 * 2 ** 30,
   vram_usable_bytes: 26 * 2 ** 30,
   ram_total_bytes: 256 * 2 ** 30,
@@ -51,11 +53,17 @@ const STATUS: LocalModelsStatus = {
   served_model_name: 'hermes3:8b'
 }
 
-function renderStats(overrides: { hardware?: Partial<LocalHardware>; status?: Partial<LocalModelsStatus> | null } = {}) {
+function renderStats(
+  overrides: {
+    engine?: LocalEngine
+    hardware?: Partial<LocalHardware>
+    status?: Partial<LocalModelsStatus> | null
+  } = {}
+) {
   render(
     <I18nProvider>
       <LocalModelsMachineStats
-        engine="vllm"
+        engine={overrides.engine ?? 'vllm'}
         hardware={{ ...HARDWARE, ...overrides.hardware }}
         status={overrides.status === null ? null : { ...STATUS, ...overrides.status }}
       />
@@ -64,9 +72,11 @@ function renderStats(overrides: { hardware?: Partial<LocalHardware>; status?: Pa
 }
 
 describe('LocalModelsMachineStats', () => {
-  it('always shows GPU, VRAM, and RAM; hides the rest until Show more', () => {
+  it('always shows CPU, GPU, VRAM, and RAM; hides the rest until Show more', () => {
     renderStats()
 
+    expect(screen.getByText(/AMD Ryzen 9 7950X/)).toBeTruthy()
+    expect(screen.getByText(/32 cores/)).toBeTruthy()
     expect(screen.getByText('NVIDIA GeForce RTX 5090')).toBeTruthy()
     expect(screen.getByText(/6\.0 GB \/ 32\.0 GB used/)).toBeTruthy()
     expect(screen.getByText(/56\.0 GB \/ 256\.0 GB used/)).toBeTruthy()
@@ -83,25 +93,26 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.getByText(/driver 560/)).toBeTruthy()
     expect(screen.getByText(/this engine 5\.0 GB/)).toBeTruthy()
     expect(screen.getByText(/~\/\.hermes\/models/)).toBeTruthy()
-    expect(screen.getByText(/vLLM 0\.14\.1/)).toBeTruthy()
+    expect(screen.getByText(/vLLM \(GPU\) 0\.14\.1/)).toBeTruthy()
     expect(screen.getByText('hermes3:8b')).toBeTruthy()
     expect(screen.getByText(/64k context fits this GPU/)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /^show less$/i }))
-    expect(screen.queryByText(/vLLM 0\.14\.1/)).toBeNull()
+    expect(screen.queryByText(/vLLM \(GPU\) 0\.14\.1/)).toBeNull()
     expect(screen.getByText('NVIDIA GeForce RTX 5090')).toBeTruthy()
+    expect(screen.getByText(/AMD Ryzen 9 7950X/)).toBeTruthy()
   })
 
   it('uses hardware.vllm_version on the Engine line before status.tag', () => {
     renderStats({ hardware: { vllm_version: '1.2.3' }, status: { tag: '', vllm_version: null } })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM 1\.2\.3/)).toBeTruthy()
+    expect(screen.getByText(/vLLM \(GPU\) 1\.2\.3/)).toBeTruthy()
   })
 
   it('falls back to status.tag when vllm_version is absent', () => {
     renderStats({ status: { tag: '0.9.0', vllm_version: null } })
     fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
-    expect(screen.getByText(/vLLM 0\.9\.0/)).toBeTruthy()
+    expect(screen.getByText(/vLLM \(GPU\) 0\.9\.0/)).toBeTruthy()
   })
 
   it('Show more Serving uses starting/ready — not a leftover configured model', () => {
@@ -136,6 +147,16 @@ describe('LocalModelsMachineStats', () => {
     expect(screen.queryByText('ready')).toBeNull()
     expect(screen.queryByText('starting')).toBeNull()
     expect(screen.queryByText('Qwen/Qwen3-14B')).toBeNull()
+  })
+
+  it('labels the CPU vLLM engine as vLLM (CPU)', () => {
+    renderStats({
+      engine: 'vllm-cpu',
+      hardware: { engine: 'vllm-cpu' },
+      status: { engine: 'vllm-cpu', vllm_version: '0.14.1' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^show more$/i }))
+    expect(screen.getByText(/vLLM \(CPU\) 0\.14.1/)).toBeTruthy()
   })
 
   it('prefers ram_used_bytes over total minus available', () => {

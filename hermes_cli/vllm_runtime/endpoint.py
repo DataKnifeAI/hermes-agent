@@ -45,10 +45,11 @@ def is_loopback_url(url: str) -> bool:
     return host.startswith("127.")
 
 
-def _state_endpoint() -> dict | None:
+def _state_endpoint(device: str | None = None, config: dict | None = None) -> dict | None:
+    from hermes_cli.local_engines import vllm_device_from_config
     from hermes_cli.vllm_runtime.supervisor import state_path
 
-    path = state_path()
+    path = state_path(device if device is not None else vllm_device_from_config(config))
     if not path.exists():
         return None
     try:
@@ -76,19 +77,25 @@ def resolve_vllm_endpoint(config: dict | None = None,
     gateway resolution use the default wait and kick an on-demand boot when the
     engine is enabled and the isolated venv is installed.
     """
-    managed = _state_endpoint()
+    from hermes_cli.local_engines import vllm_device_from_config
+
+    device = vllm_device_from_config(config)
+    managed = _state_endpoint(device, config)
     if managed:
         return managed
 
     if wait_for_boot_s > 0 and _boot_in_flight(config):
+        from hermes_cli.local_engines import vllm_device_from_config
+        from hermes_cli.vllm_runtime.device import CPU
         from hermes_cli.vllm_runtime.occupancy import require_gpu_free
 
-        require_gpu_free()
+        if vllm_device_from_config(config) != CPU:
+            require_gpu_free()
         _kick_managed_boot(config)
         deadline = time.monotonic() + wait_for_boot_s
         while time.monotonic() < deadline:
             time.sleep(0.25)
-            managed = _state_endpoint()
+            managed = _state_endpoint(device, config)
             if managed:
                 return managed
     return None
@@ -117,7 +124,9 @@ def _engine_is_vllm(config: dict | None = None) -> bool:
         config = _load_config_if_none(config)
         from hermes_cli.local_engines import engine_from_config
 
-        return engine_from_config(config) == "vllm"
+        from hermes_cli.vllm_runtime.device import is_vllm_engine
+
+        return is_vllm_engine(engine_from_config(config))
     return False
 
 
@@ -145,9 +154,9 @@ def follow_live_managed_vllm(
     port = _url_port(pinned)
     if port in _FOREIGN_LOOPBACK_PORTS:
         return None
-    from hermes_cli.vllm_runtime.supervisor import DEFAULT_LISTEN_PORT
+    from hermes_cli.vllm_runtime.device import CPU_LISTEN_PORT, GPU_LISTEN_PORT
 
-    if port != DEFAULT_LISTEN_PORT and not _engine_is_vllm(config):
+    if port not in (GPU_LISTEN_PORT, CPU_LISTEN_PORT) and not _engine_is_vllm(config):
         return None
     served = str(live.get("served_model_name") or "").strip()
     if not served:
@@ -200,8 +209,11 @@ def _boot_in_flight(config: dict | None) -> bool:
             return False
         from hermes_cli.local_engines import engine_from_config
 
-        if engine_from_config(config) != "vllm":
+        from hermes_cli.vllm_runtime.device import is_vllm_engine
+
+        if not is_vllm_engine(engine_from_config(config)):
             return False
+        from hermes_cli.local_engines import vllm_device_from_config
         from hermes_cli.vllm_runtime.supervisor import (
             configured_cache_missing, configured_model_id, vllm_settings)
         from hermes_cli.vllm_runtime.venv import venv_ready
@@ -209,5 +221,5 @@ def _boot_in_flight(config: dict | None) -> bool:
         settings = vllm_settings(config)
         if not configured_model_id(settings) or configured_cache_missing(settings):
             return False
-        return venv_ready()
+        return venv_ready(vllm_device_from_config(config))
     return False

@@ -651,6 +651,14 @@ def _fit_on_probe(min_vram: int, total_vram: int) -> str:
     return "fits-gpu" if min_vram <= total_vram else "too-big"
 
 
+def _fit_on_ram(min_bytes: int, total_ram: int, *, headroom_frac: float = 0.20) -> str:
+    """CPU vLLM: weights + 64k KV vs usable RAM. Never the GPU VRAM estimator."""
+    if total_ram <= 0 or min_bytes <= 0:
+        return "unknown"
+    usable = int(total_ram * (1.0 - headroom_frac))
+    return "needs-ram" if min_bytes <= usable else "too-big"
+
+
 def _format_param_label(params: float | None) -> str | None:
     if params is None:
         return None
@@ -1122,6 +1130,8 @@ def classify_vllm_repo(
     weight_bytes: int = 0,
     used_storage: int = 0,
     pipeline_tag: str = "",
+    device: str = "gpu",
+    total_ram: int = 0,
 ) -> dict[str, Any]:
     """Fit / capability tags for a catalog row or HF search hit.
 
@@ -1167,15 +1177,18 @@ def classify_vllm_repo(
             return f"Needs ~{_human_gb(min_vram)} GPU memory ({why})"
         return ""
 
+    cpu = device == "cpu"
     if blocked and matched is None:
         detail = blocked
     elif actual >= _MIN_WEIGHT_BYTES:
         min_vram = _vram_from_weight_bytes(actual, config=kv_config)
-        if total_vram > 0:
+        if cpu:
+            fit = _fit_on_ram(min_vram, total_ram)
+        elif total_vram > 0:
             fit = _fit_on_probe(min_vram, total_vram)
         fullprec = not quant or quant in {"bf16", "fp16"}
         detail = _detail(priced_quant=quant or ("bf16" if fullprec else None),
-                         fullprec_too_big=fit == "too-big" and fullprec)
+                         fullprec_too_big=(not cpu) and fit == "too-big" and fullprec)
         if (
             fit == "too-big"
             and disk >= _MIN_WEIGHT_BYTES
@@ -1193,30 +1206,32 @@ def classify_vllm_repo(
         # become too-big + NEEDS_AWQ so Use is a 400, not a 502 wrapping HF.
         id_quant = parse_quantization(hid, None)
         tag_quant = parse_quantization("", tag_list)
-        if params is not None and id_quant in _QUANT_BYTES and total_vram > 0:
+        budget = total_ram if cpu else total_vram
+        if params is not None and id_quant in _QUANT_BYTES and budget > 0:
             min_vram = estimate_min_vram_bytes(params, id_quant, config=kv_config)
-            fit = _fit_on_probe(min_vram, total_vram)
+            fit = _fit_on_ram(min_vram, total_ram) if cpu else _fit_on_probe(min_vram, total_vram)
             detail = _detail(
                 priced_quant=id_quant,
-                fullprec_too_big=fit == "too-big" and id_quant in {"bf16", "fp16"},
+                fullprec_too_big=(not cpu) and fit == "too-big" and id_quant in {"bf16", "fp16"},
             )
         elif (
             params is not None
-            and total_vram > 0
+            and budget > 0
             and not id_quant
             and not tag_quant
         ):
             min_vram = estimate_min_vram_bytes(params, "bf16", config=kv_config)
-            fit = _fit_on_probe(min_vram, total_vram)
-            if fit == "too-big":
+            fit = _fit_on_ram(min_vram, total_ram) if cpu else _fit_on_probe(min_vram, total_vram)
+            if (not cpu) and fit == "too-big":
                 detail = _detail(priced_quant="bf16", fullprec_too_big=True)
     capabilities = _capability_tags(
         hid=hid, tag_list=tag_list, quant=quant, matched=matched,
         config=config, pipeline_tag=pipeline_tag or "",
     )
+    fits_ok = fit in {"fits-gpu", "needs-ram"}
     return {
         "fit": fit,
-        "fits": None if fit == "unknown" else fit == "fits-gpu",
+        "fits": None if fit == "unknown" else fits_ok,
         "min_vram_bytes": min_vram,
         "quantization": quant or "",
         "capabilities": capabilities,
@@ -1226,7 +1241,9 @@ def classify_vllm_repo(
     }
 
 
-def cached_repo_fit(hf_id: str, *, total_vram: int = 0) -> dict[str, Any]:
+def cached_repo_fit(
+    hf_id: str, *, total_vram: int = 0, total_ram: int = 0, device: str = "gpu",
+) -> dict[str, Any]:
     """Fit for a hub-cached id using the same weights+64k formula as search."""
     hid = (hf_id or "").strip()
     disk = 0
@@ -1234,7 +1251,10 @@ def cached_repo_fit(hf_id: str, *, total_vram: int = 0) -> dict[str, Any]:
         if row["id"] == hid:
             disk = int(row.get("size_bytes") or 0)
             break
-    return classify_vllm_repo(hid, total_vram=total_vram, weight_bytes=disk)
+    return classify_vllm_repo(
+        hid, total_vram=total_vram, total_ram=total_ram, device=device,
+        weight_bytes=disk,
+    )
 
 
 def ensure_hf_weights(repo: str, job: dict | None = None) -> dict[str, Any]:
@@ -1606,7 +1626,18 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
     recommended_id = rec.tier.model if rec.feasible and rec.tier else ""
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import CPU
+
+    device = vllm_device_from_config(config)
     vram = rec.probe.total_bytes or 0
+    ram = 0
+    if device == CPU:
+        from hermes_cli.local_runtime.hardware import _ram_stats
+
+        total, _used, avail = _ram_stats()
+        ram = avail or total
+        recommended_id = ""
     official = [t.model for t in catalog_tiers() if t.model]
     listing = hf_listing_meta(official) if with_hf_meta else {}
 
@@ -1617,7 +1648,7 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
         used = int(meta.get("size_bytes") or 0)
         tags = classify_vllm_repo(
             hf_id, total_vram=vram, recommended_id=recommended_id,
-            weight_bytes=disk, used_storage=used,
+            weight_bytes=disk, used_storage=used, device=device, total_ram=ram,
         )
         size = disk or used or int(tags.get("size_bytes") or 0)
         advertised = served_name_for(hf_id)

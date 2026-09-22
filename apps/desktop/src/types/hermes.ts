@@ -1283,7 +1283,7 @@ export interface LocalModelLoadProgress {
   percent: number
 }
 
-export type LocalEngine = 'llamacpp' | 'vllm'
+export type LocalEngine = 'llamacpp' | 'vllm' | 'vllm-cpu'
 
 export interface LocalOccupancyHit {
   kind: string
@@ -1321,6 +1321,8 @@ export interface LocalModelsStatus {
   venv_path?: string
   /** Isolated-venv `vllm` package version. Null/absent when not installed. */
   vllm_version?: null | string
+  /** `gpu` or `cpu` for a vLLM engine. Missing on older backends. */
+  vllm_device?: 'cpu' | 'gpu' | null
   occupancy?: LocalOccupancyHit[]
   occupancy_message?: null | string
   served_model_name?: null | string
@@ -1341,6 +1343,10 @@ export interface LocalHardware {
   vllm_version?: null | string
   vram_label: string
   gpu_name: string | null
+  /** CPU model / brand. Always-visible This machine stat when present. */
+  cpu_name?: string | null
+  /** Logical CPU cores (cheap `os.cpu_count`). */
+  cpu_cores?: number | null
   gpu_util_percent: number | null
   vram_used_bytes: number | null
   /** Live free VRAM from nvidia-smi. Missing on older backends / non-NVIDIA. */

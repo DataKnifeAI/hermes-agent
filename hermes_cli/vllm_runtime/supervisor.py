@@ -20,6 +20,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from hermes_cli.vllm_runtime.device import (
+    CPU, CPU_LISTEN_PORT, GPU_LISTEN_PORT, LLAMA_CPP_PORT, RESERVED_PORTS,
+    USER_SERVER_PORTS, default_listen_port, normalize_device,
+)
 from hermes_cli.vllm_runtime.venv import runtimes_root, server_log_path, vllm_executable
 
 logger = logging.getLogger(__name__)
@@ -51,32 +55,28 @@ _FATAL_CRASH_NEEDLES = (
     "draft_model_config",
     "qwen3_dspark",
 )
-# llama.cpp's managed listen port — never share it. Sessions persist base_url per
-# engine; TIME_WAIT after a switch would also collide. Same reason llama.cpp
-# avoids 8000/8080.
-LLAMA_CPP_PORT = 18434
-# Preferred vLLM bind when ``local_runtime.vllm.port`` is 0 (pick at spawn).
-DEFAULT_LISTEN_PORT = 18435
+# Preferred GPU bind when ``local_runtime.vllm.port`` is 0 (pick at spawn).
+DEFAULT_LISTEN_PORT = GPU_LISTEN_PORT
 _LOOPBACK = "127.0.0.1"
 
 
-def state_path() -> Path:
-    return runtimes_root() / "server.json"
+def state_path(device: str = "gpu") -> Path:
+    return runtimes_root(device) / "server.json"
 
 
-def last_error_path() -> Path:
-    return runtimes_root() / "last_error.json"
+def last_error_path(device: str = "gpu") -> Path:
+    return runtimes_root(device) / "last_error.json"
 
 
-def write_last_error(message: str) -> None:
-    path = last_error_path()
+def write_last_error(message: str, device: str = "gpu") -> None:
+    path = last_error_path(device)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"error": message}, ensure_ascii=False), encoding="utf-8")
 
 
-def state_served_model_name() -> str:
+def state_served_model_name(device: str = "gpu") -> str:
     """Served id recorded by the last spawn. Empty when no state file / pid."""
-    path = state_path()
+    path = state_path(device)
     if not path.is_file():
         return ""
     try:
@@ -88,8 +88,8 @@ def state_served_model_name() -> str:
     return str(raw.get("served_model_name") or "").strip()
 
 
-def read_last_error() -> str | None:
-    path = last_error_path()
+def read_last_error(device: str = "gpu") -> str | None:
+    path = last_error_path(device)
     if not path.is_file():
         return None
     try:
@@ -102,8 +102,8 @@ def read_last_error() -> str | None:
     return None
 
 
-def clear_last_error() -> None:
-    last_error_path().unlink(missing_ok=True)
+def clear_last_error(device: str = "gpu") -> None:
+    last_error_path(device).unlink(missing_ok=True)
 
 
 def disable_auto_start() -> None:
@@ -188,14 +188,17 @@ def configured_cache_missing(settings: dict | None) -> bool:
     return not repo_is_cached(hid)
 
 
-def last_serve_error_line(log_path: Path | None = None) -> str | None:
-    """Last real error line from vllm-server.log — not a restart-loop breadcrumb."""
+def last_serve_error_line(log_path: Path | None = None, device: str = "gpu") -> str | None:
+    """Last real error line from the engine log — not a restart-loop breadcrumb."""
     if log_path:
         path = Path(log_path)
     else:
         from hermes_cli.vllm_runtime.venv import server_log_read_paths
 
-        path = next((p for p in server_log_read_paths() if p.is_file()), server_log_path())
+        path = next(
+            (p for p in server_log_read_paths(device) if p.is_file()),
+            server_log_path(device),
+        )
     if not path.is_file():
         return None
     try:
@@ -271,11 +274,12 @@ def probe_served_model_name(base_url: str, timeout_s: float = 1.5) -> str:
     return ""
 
 
-def openai_base_url(settings: dict, *, port: int | None = None) -> str:
+def openai_base_url(settings: dict, *, port: int | None = None,
+                    device: str = "gpu") -> str:
     if port is not None:
         p = int(port)
     else:
-        p = int(settings.get("port") or 0) or DEFAULT_LISTEN_PORT
+        p = int(settings.get("port") or 0) or default_listen_port(device)
     return f"http://{client_host(settings)}:{p}/v1"
 
 
@@ -330,22 +334,31 @@ def serve_environ(executable: str | Path, base: dict | None = None) -> dict[str,
     return env
 
 
-def serve_argv(executable: str | Path, settings: dict) -> list[str]:
-    """``vllm serve`` argv. Bind host comes from settings; 1-click default is loopback."""
+def serve_argv(executable: str | Path, settings: dict, *, device: str = "gpu") -> list[str]:
+    """``vllm serve`` argv. Bind host comes from settings; 1-click default is loopback.
+
+    CPU uses the official CPU-built ``vllm`` — never ``--device cpu`` (that is
+    the CUDA-wheel trap). GPU-only flags stay off the CPU argv.
+    """
     model = str(settings.get("model") or "").strip()
     if not model:
         raise ValueError("local_runtime.vllm.model is required")
-    port = int(settings.get("port") or 0) or DEFAULT_LISTEN_PORT
+    device = normalize_device(device)
+    port = int(settings.get("port") or 0) or default_listen_port(device)
     max_len, rope = serve_len_and_rope(settings)
     argv = [
         str(executable), "serve", model,
         "--host", bind_host(settings),
         "--port", str(port),
         "--max-model-len", str(max_len),
-        "--gpu-memory-utilization", str(settings.get("gpu_memory_utilization") or 0.75),
         "--enable-auto-tool-choice",
         "--tool-call-parser", str(settings.get("tool_call_parser") or "hermes"),
     ]
+    if device != CPU:
+        argv.extend([
+            "--gpu-memory-utilization",
+            str(settings.get("gpu_memory_utilization") or 0.75),
+        ])
     if rope:
         argv.extend(["--rope-scaling", json.dumps(rope, separators=(",", ":"))])
     quant = serve_quantization(settings)
@@ -355,10 +368,10 @@ def serve_argv(executable: str | Path, settings: dict) -> list[str]:
 
     kv = str(settings.get("kv_cache_dtype") or "").strip()
     # 30B-A3B-2507 BF16 KV is ~26 GiB with weights — leftover empty/bf16
-    # must not drop --kv-cache-dtype on a 24 GB card.
-    if is_qwen3_30b_a3b_2507(model):
+    # must not drop --kv-cache-dtype on a 24 GB card. CPU has no GPU KV pool.
+    if device != CPU and is_qwen3_30b_a3b_2507(model):
         kv = "fp8"
-    if kv:
+    if device != CPU and kv:
         argv.extend(["--kv-cache-dtype", kv])
     served = str(settings.get("served_model_name") or "").strip()
     if served:
@@ -377,14 +390,19 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def pick_listen_port(preferred: int = 0) -> int:
+def pick_listen_port(preferred: int = 0, *, device: str = "gpu") -> int:
     """Like llama.cpp: try the engine's stable default, else an ephemeral port.
 
-    ``preferred`` 0 means DEFAULT_LISTEN_PORT. Never bind llama.cpp's 18434.
+    GPU prefers 18435, CPU 18436. Never 18434 / 8000 / 8080, and never the
+    sibling vLLM default (GPU must not steal 18436; CPU must not steal 18435).
     """
-    candidate = preferred if preferred > 0 else DEFAULT_LISTEN_PORT
-    if candidate == LLAMA_CPP_PORT:
-        candidate = DEFAULT_LISTEN_PORT
+    device = normalize_device(device)
+    sibling = CPU_LISTEN_PORT if device != CPU else GPU_LISTEN_PORT
+    candidate = preferred if preferred > 0 else default_listen_port(device)
+    if candidate in RESERVED_PORTS and candidate != default_listen_port(device):
+        candidate = default_listen_port(device)
+    if candidate == sibling:
+        candidate = default_listen_port(device)
     try:
         with socket.socket() as s:
             s.bind((_LOOPBACK, candidate))
@@ -394,7 +412,7 @@ def pick_listen_port(preferred: int = 0) -> int:
             "port %d busy; managed vLLM falling back to an ephemeral "
             "port — existing sessions may need a model re-pick", candidate)
         port = _free_port()
-        if port == LLAMA_CPP_PORT:
+        while port in RESERVED_PORTS or port in USER_SERVER_PORTS:
             port = _free_port()
         return port
 
@@ -403,13 +421,14 @@ class VllmSupervisor:
     """Own one ``vllm serve`` process for the life of a Hermes session."""
 
     def __init__(self, settings: dict, *, executable: Path | None = None,
-                 log_path: Path | None = None):
+                 log_path: Path | None = None, device: str = "gpu"):
+        self.device = normalize_device(device)
         self.settings = dict(settings)
         preferred = int(self.settings.get("port") or 0)
-        self.port = pick_listen_port(preferred)
+        self.port = pick_listen_port(preferred, device=self.device)
         self.settings["port"] = self.port
-        self.executable = Path(executable) if executable else vllm_executable()
-        self.log_path = log_path or server_log_path()
+        self.executable = Path(executable) if executable else vllm_executable(self.device)
+        self.log_path = log_path or server_log_path(self.device)
         self.proc: subprocess.Popen | None = None
         self._restarts = 0
         self._stopping = False
@@ -418,7 +437,7 @@ class VllmSupervisor:
 
     @property
     def base_url(self) -> str:
-        return openai_base_url(self.settings, port=self.port)
+        return openai_base_url(self.settings, port=self.port, device=self.device)
 
     def _health_url(self) -> str:
         return f"http://{_LOOPBACK}:{self.port}/v1/models"
@@ -426,7 +445,7 @@ class VllmSupervisor:
     def _spawn(self) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_handle = open(self.log_path, "ab")  # noqa: SIM115
-        cmd = serve_argv(self.executable, self.settings)
+        cmd = serve_argv(self.executable, self.settings, device=self.device)
         env = serve_environ(self.executable)
         self.proc = subprocess.Popen(
             cmd, stdout=self._log_handle, stderr=subprocess.STDOUT, env=env)
@@ -439,14 +458,14 @@ class VllmSupervisor:
         hid = configured_model_id(self.settings)
         blocked = configured_unservable_reason(self.settings)
         if blocked:
-            write_last_error(blocked)
+            write_last_error(blocked, self.device)
             disable_auto_start()
             raise RuntimeError(blocked)
         if configured_cache_missing(self.settings):
-            write_last_error(MODEL_REMOVED_MSG)
+            write_last_error(MODEL_REMOVED_MSG, self.device)
             disable_auto_start()
             raise RuntimeError(MODEL_REMOVED_MSG)
-        clear_last_error()
+        clear_last_error(self.device)
         try:
             self._spawn()
             self._wait_ready(timeout_s)
@@ -455,14 +474,15 @@ class VllmSupervisor:
             # flip enabled=false while the replacement serve is starting.
             if self._stopping:
                 raise
-            crash = last_serve_error_line(self.log_path)
+            crash = last_serve_error_line(self.log_path, device=self.device)
             if configured_cache_missing(self.settings):
-                write_last_error(MODEL_REMOVED_MSG)
+                write_last_error(MODEL_REMOVED_MSG, self.device)
             else:
                 write_last_error(
                     humanize_serve_error(crash or str(exc), model=hid)
                     or str(exc).strip()
-                    or "vllm serve failed"
+                    or "vllm serve failed",
+                    self.device,
                 )
             disable_auto_start()
             raise
@@ -472,13 +492,14 @@ class VllmSupervisor:
         self._watchdog.start()
 
     def _write_state(self) -> None:
-        path = state_path()
+        path = state_path(self.device)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
             "base_url": self.base_url,
             "pid": self.proc.pid if self.proc else None,
             "port": self.port,
             "bind": bind_host(self.settings),
+            "device": self.device,
             "served_model_name": self.settings.get("served_model_name"),
         }), encoding="utf-8")
 
@@ -522,21 +543,21 @@ class VllmSupervisor:
                 return
             hid = configured_model_id(self.settings)
             if configured_cache_missing(self.settings):
-                write_last_error(MODEL_REMOVED_MSG)
+                write_last_error(MODEL_REMOVED_MSG, self.device)
                 logger.error("%s", MODEL_REMOVED_MSG)
                 disable_auto_start()
                 self.stop()
                 return
             blocked = configured_unservable_reason(self.settings)
-            crash = last_serve_error_line(self.log_path)
+            crash = last_serve_error_line(self.log_path, device=self.device)
             if blocked:
-                write_last_error(blocked)
+                write_last_error(blocked, self.device)
                 logger.error("%s", blocked)
                 disable_auto_start()
                 self.stop()
                 return
             if crash:
-                write_last_error(humanize_serve_error(crash, model=hid) or crash)
+                write_last_error(humanize_serve_error(crash, model=hid) or crash, self.device)
             if is_fatal_serve_crash(crash, model=hid):
                 logger.error("vllm serve fatal; not restarting: %s", crash)
                 disable_auto_start()
@@ -545,7 +566,8 @@ class VllmSupervisor:
             if self._restarts >= _MAX_CRASH_RESTARTS:
                 write_last_error(
                     humanize_serve_error(crash, model=hid)
-                    or f"vllm serve crashed {self._restarts} times — Stop, then Use another model"
+                    or f"vllm serve crashed {self._restarts} times — Stop, then Use another model",
+                    self.device,
                 )
                 logger.error("vllm serve restart budget exhausted")
                 disable_auto_start()
@@ -558,7 +580,7 @@ class VllmSupervisor:
             if self._stopping:
                 return
             if configured_cache_missing(self.settings):
-                write_last_error(MODEL_REMOVED_MSG)
+                write_last_error(MODEL_REMOVED_MSG, self.device)
                 logger.error("%s", MODEL_REMOVED_MSG)
                 disable_auto_start()
                 self.stop()
@@ -567,20 +589,20 @@ class VllmSupervisor:
             try:
                 self._spawn()
                 self._wait_ready(READY_TIMEOUT_S)
-                clear_last_error()
+                clear_last_error(self.device)
             except Exception as exc:  # noqa: BLE001
                 logger.error("vllm serve restart failed: %s", exc)
-                write_last_error(humanize_serve_error(str(exc), model=hid) or str(exc))
+                write_last_error(humanize_serve_error(str(exc), model=hid) or str(exc), self.device)
                 if configured_cache_missing(self.settings) or is_fatal_serve_crash(str(exc), model=hid):
                     if configured_cache_missing(self.settings):
-                        write_last_error(MODEL_REMOVED_MSG)
+                        write_last_error(MODEL_REMOVED_MSG, self.device)
                     disable_auto_start()
                     self.stop()
                     return
 
     def stop(self) -> None:
         self._stopping = True
-        state_path().unlink(missing_ok=True)
+        state_path(self.device).unlink(missing_ok=True)
         if self.proc and self.proc.poll() is None:
             self._terminate_tree(self.proc)
         if self._log_handle:

@@ -88,7 +88,7 @@ class SideloadBody(BaseModel):
 
 
 class EngineBody(BaseModel):
-    engine: str                 # "llamacpp" | "vllm"
+    engine: str                 # "llamacpp" | "vllm" | "vllm-cpu"
 
 
 class VllmModelBody(BaseModel):
@@ -485,7 +485,7 @@ def local_models_status():
     """Cheap, immediate: config state + the *selected* engine's server (GPU facts live
     in /hardware). Sync def on purpose: blocking urlopen/scans run in the threadpool."""
     config = _load_config()
-    if engine_mod.configured_engine(config) == "vllm":
+    if engine_mod.is_vllm_engine(engine_mod.configured_engine(config)):
         return engine_mod.vllm_status_fields(config)
     section = _runtime_section()
     configured_tag = section.get("tag") or binaries.default_tag()
@@ -603,6 +603,7 @@ def local_models_hardware():
         "vram_free_bytes": None, "vram_engine_bytes": None, "vram_other_bytes": None,
         "gpu_driver_version": None, "cuda_compute_capability": None,
         "occupancy_foreign": False, "ctx_64k_feasible": None, "vllm_version": None,
+        "cpu_name": None, "cpu_cores": None,
     }
     smi = _quiet(_nvidia_smi_facts, {})
     smi_total = smi.pop("vram_total_bytes", None)
@@ -619,10 +620,13 @@ def local_models_hardware():
     out.update(_quiet(gpu_vram_attribution, {
         "vram_engine_bytes": None, "vram_other_bytes": None, "occupancy_foreign": False,
     }))
-    if engine == "vllm":
+    out.update(_quiet(hardware.probe_cpu, {"cpu_name": None, "cpu_cores": None}))
+    if engine_mod.is_vllm_engine(engine):
         from hermes_cli.vllm_runtime.venv import installed_vllm_version
 
-        out["vllm_version"] = (installed_vllm_version() or "").strip() or None
+        device = engine_mod.engine_to_device(engine)
+        out["vllm_version"] = (installed_vllm_version(device) or "").strip() or None
+        out["vllm_device"] = device
         # Same starting/ready/stopped rule as /status — VRAM stays live smi.
         snap = engine_mod.vllm_engine_snapshot(_load_config(), with_occupancy=False)
         out["engine_state"] = snap["engine_state"]
@@ -858,7 +862,7 @@ async def local_models_quickstart(body: QuickstartBody):
     Dispatches on ``local_runtime.engine``: vLLM is recommend → isolated venv →
     HF weights → supervisor → provider, not the GGUF llama path.
     """
-    if engine_mod.configured_engine() == "vllm":
+    if engine_mod.is_vllm_engine(engine_mod.configured_engine()):
         plan = engine_mod.vllm_quickstart_plan(body.model_id)
         if not _QUICKSTART_LOCK.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="Setup is already running")

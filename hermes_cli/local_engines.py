@@ -1,10 +1,10 @@
 """Cross-engine policy for managed local inference.
 
-llama.cpp (``hermes_cli.local_runtime``) and vLLM (``hermes_cli.vllm_runtime``)
-each own one supervised server. This module is the only place that knows both:
-starting an engine stops the other first. Persisting ``local_runtime.engine``
-(the settings dropdown) does not stop a running supervisor. One GPU, one
-resident weights file.
+llama.cpp (``hermes_cli.local_runtime``), GPU vLLM, and CPU vLLM each own one
+supervised server. This module is the only place that knows all three:
+starting an engine stops the others first. Persisting ``local_runtime.engine``
+(the settings dropdown) does not stop a running supervisor. One Hermes-managed
+serve at a time.
 
 CLI, Desktop, and ``hermes serve`` all call these helpers — Desktop is not a
 special case.
@@ -17,6 +17,10 @@ import json
 import logging
 from pathlib import Path
 
+from hermes_cli.vllm_runtime.device import (
+    VLLM_ENGINES, engine_to_device, is_vllm_engine,
+)
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ENGINE = "llamacpp"
@@ -24,8 +28,18 @@ _DEFAULT_ENGINE = "llamacpp"
 
 def engine_from_config(config: dict | None) -> str:
     raw = ((config or {}).get("local_runtime") or {}).get("engine") or _DEFAULT_ENGINE
-    name = str(raw).strip().lower()
-    return "vllm" if name == "vllm" else _DEFAULT_ENGINE
+    name = str(raw).strip().lower().replace("_", "-")
+    if name in VLLM_ENGINES:
+        return name
+    return _DEFAULT_ENGINE
+
+
+def vllm_device_from_config(config: dict | None) -> str:
+    if config is None:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    return engine_to_device(engine_from_config(config))
 
 
 def stop_state_pid(path: Path) -> int | None:
@@ -81,18 +95,19 @@ def stop_llama_engine() -> None:
 
 
 def stop_vllm_engine() -> None:
-    """Stop in-process vLLM, then a leftover from another Hermes process."""
+    """Stop in-process vLLM (GPU and CPU), then leftovers from another Hermes process."""
     from hermes_cli.vllm_runtime.bootstrap import shutdown_vllm_runtime
     from hermes_cli.vllm_runtime.supervisor import state_path
 
     shutdown_vllm_runtime()
-    stop_state_pid(state_path())
+    stop_state_pid(state_path("gpu"))
+    stop_state_pid(state_path("cpu"))
 
 
 def stop_configured_engine(config: dict | None = None) -> str:
     """Stop the configured engine only. Does not disable auto-start or touch the other engine."""
     name = engine_from_config(config)
-    if name == "vllm":
+    if is_vllm_engine(name):
         stop_vllm_engine()
     else:
         stop_llama_engine()
@@ -100,8 +115,9 @@ def stop_configured_engine(config: dict | None = None) -> str:
 
 
 def ensure_managed_engine(config: dict | None = None, force: bool = False):
-    """Boot the configured engine; stop the other first. Returns that supervisor or None."""
-    if engine_from_config(config) == "vllm":
+    """Boot the configured engine; stop the others first. Returns that supervisor or None."""
+    name = engine_from_config(config)
+    if is_vllm_engine(name):
         from hermes_cli.vllm_runtime.bootstrap import ensure_vllm_runtime
 
         stop_llama_engine()
@@ -113,6 +129,6 @@ def ensure_managed_engine(config: dict | None = None, force: bool = False):
 
 
 def shutdown_managed_engine() -> None:
-    """Stop both managed servers (teardown). Order does not matter; both must free VRAM."""
+    """Stop every managed server (teardown). Order does not matter."""
     stop_llama_engine()
     stop_vllm_engine()

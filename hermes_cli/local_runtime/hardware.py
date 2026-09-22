@@ -106,6 +106,36 @@ def _ram_from_meminfo(fields: dict[str, int]) -> tuple[int, int, int] | None:
     return total, used, avail
 
 
+def parse_cpuinfo_model(text: str) -> str | None:
+    """First ``model name`` / ``Hardware`` / ``cpu model`` line from /proc/cpuinfo."""
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        key, _, rest = line.partition(":")
+        key = key.strip().lower()
+        if key in {"model name", "hardware", "cpu model", "processor"}:
+            name = rest.strip()
+            if name and not name.isdigit():
+                return name
+    return None
+
+
+def probe_cpu() -> dict[str, str | int | None]:
+    """Cheap CPU identity: model name + logical cores. Host-native reads only."""
+    name = None
+    if sys.platform.startswith("linux"):
+        with suppress(OSError):
+            name = parse_cpuinfo_model(Path("/proc/cpuinfo").read_text())
+    elif sys.platform == "darwin":
+        with suppress(OSError, ValueError):
+            name = _stdout("/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string").strip() or None
+    cores = os.cpu_count()
+    return {
+        "cpu_name": name or None,
+        "cpu_cores": int(cores) if cores else None,
+    }
+
+
 def _linux_ram_stats() -> tuple[int, int, int] | None:
     with suppress(OSError):
         return _ram_from_meminfo(_parse_proc_meminfo(Path("/proc/meminfo").read_text()))
