@@ -22,7 +22,7 @@ from pathlib import Path
 
 from hermes_cli.vllm_runtime.device import (
     CPU, CPU_LISTEN_PORT, GPU_LISTEN_PORT, LLAMA_CPP_PORT, RESERVED_PORTS,
-    USER_SERVER_PORTS, default_listen_port, normalize_device,
+    USER_SERVER_PORTS, default_listen_port, engine_to_device, normalize_device,
 )
 from hermes_cli.vllm_runtime.venv import runtimes_root, server_log_path, vllm_executable
 
@@ -224,13 +224,26 @@ def last_serve_error_line(log_path: Path | None = None, device: str = "gpu") -> 
 
 
 def vllm_settings(config: dict | None) -> dict:
-    """``local_runtime.vllm`` merged over DEFAULT_CONFIG so a partial section still serves."""
+    """``local_runtime.vllm`` merged over DEFAULT_CONFIG so a partial section still serves.
+
+    On ``vllm-cpu``, an empty model or the GPU shipped AWQ id is the CPU BF16
+    default. Any other id is an explicit choice and is left alone.
+    """
     from hermes_cli.config_defaults import DEFAULT_CONFIG
 
     defaults = dict(DEFAULT_CONFIG["local_runtime"]["vllm"])
-    override = ((config or {}).get("local_runtime") or {}).get("vllm") or {}
+    local = (config or {}).get("local_runtime") or {}
+    override = local.get("vllm") or {}
     if isinstance(override, dict):
         defaults.update(override)
+    if engine_to_device(str(local.get("engine") or "")) == CPU:
+        from hermes_cli.vllm_runtime.recommend import (
+            as_vllm_config, gpu_shipped_model, recommend_vllm_cpu,
+        )
+
+        model = str(defaults.get("model") or "").strip()
+        if not model or model == gpu_shipped_model():
+            defaults.update(as_vllm_config(recommend_vllm_cpu()))
     return defaults
 
 

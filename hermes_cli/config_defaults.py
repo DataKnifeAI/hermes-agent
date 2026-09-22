@@ -2347,6 +2347,9 @@ DEFAULT_CONFIG = {
         "vllm": {
             "port": 0,
             "host": "127.0.0.1",
+            # GPU shipped id (16 GB AWQ). vllm-cpu does not start this —
+            # empty / this id on the CPU engine becomes recommend_vllm_cpu()
+            # (Qwen/Qwen3-4B-Instruct-2507 BF16). AWQ/FP8 cannot load there.
             "model": "Qwen/Qwen3-8B-AWQ",
             "served_model_name": "qwen3:8b",
             "max_model_len": 65536,

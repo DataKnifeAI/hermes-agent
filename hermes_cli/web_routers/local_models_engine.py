@@ -403,9 +403,13 @@ def vllm_status_fields(config: dict | None = None) -> dict[str, Any]:
 
 
 def recommend_payload() -> dict[str, Any]:
-    from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.recommend import (
+        as_vllm_config, recommend_vllm, recommend_vllm_cpu,
+    )
 
-    rec = recommend_vllm()
+    device = vllm_device_from_config(load_config())
+    rec = recommend_vllm_cpu() if device == CPU else recommend_vllm()
     return {
         "feasible": rec.feasible,
         "reason": rec.reason,
@@ -588,10 +592,15 @@ def start_active_engine(*, recover: bool = True) -> None:
 
 
 def _official_setup(rec=None):
-    """VRAM-fit public catalog row. Never leftover ``local_runtime.vllm.model``."""
+    """VRAM-fit public catalog row. Never leftover ``local_runtime.vllm.model``.
+
+    CPU engine plans ``recommend_vllm_cpu`` — not the GPU AWQ catalog.
+    """
+    from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.recommend import overlay_for_setup, resolve_public_setup
 
-    hid, notice, picked = resolve_public_setup(rec)
+    device = vllm_device_from_config(load_config())
+    hid, notice, picked = resolve_public_setup(rec, device=device)
     return hid, notice, picked, overlay_for_setup(hid, picked)
 
 

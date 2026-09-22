@@ -7,10 +7,14 @@ need a live GPU mark the test ``linux_only``.
 
 Recommend is llama.cpp Local Models' idea, retuned for vLLM: a short
 official list (not six VRAM-bucket defaults), one hardware-fit
-recommended row, everything else via HF search. Official ids are modern
-instruct checkpoints vLLM actually serves — AWQ/FP8, a real tool parser,
-64k floor. 8–12 GB cards stay ``feasible: false`` at that floor — never
-a silent ctx shrink — and do not add a sixth official download. No GGUF.
+recommended row, everything else via HF search. GPU official ids are
+modern instruct checkpoints vLLM actually serves — AWQ/FP8, a real tool
+parser, 64k floor. 8–12 GB cards stay ``feasible: false`` at that floor —
+never a silent ctx shrink — and do not add a sixth official download.
+No GGUF.
+
+CPU vLLM (``vllm-cpu``) does not use this list. CUDA AWQ/FP8 cannot load
+on the CPU wheel. ``recommend_vllm_cpu`` is a separate BF16 checkpoint.
 """
 
 from __future__ import annotations
@@ -107,6 +111,20 @@ TIERS: tuple[VllmTier, ...] = (
     ),
 )
 
+# Not a VRAM tier and not in TIERS — _pick_tier must not select it for a GPU.
+# Smallest official instruct safetensors the CPU wheel can load: BF16 (no
+# quantization_config), hermes ``<tool_call>`` XML, native 262144.
+# Qwen3-4B/8B/14B originals are 40960. Qwen3-14B BF16 is the wrong size for
+# CPU RAM. Empty quant / KV: no --quantization awq, no --kv-cache-dtype fp8.
+# Serve MIN_CONTEXT, not the 262k native.
+_CPU_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+_CPU_SERVED = "qwen3:4b"
+_CPU_TIER = VllmTier(
+    "cpu", 0, 0.75, True, "", "",
+    _CPU_MODEL, _CPU_SERVED, _DEFAULT_PARSER, MIN_CONTEXT,
+    catalog=False,
+)
+
 
 @dataclass(frozen=True)
 class NvidiaProbe:
@@ -172,8 +190,27 @@ def probe_nvidia_vram() -> NvidiaProbe:
 
 
 def catalog_tiers() -> tuple[VllmTier, ...]:
-    """Official Local Models rows — the short list, not the 64k-floor marker."""
+    """Official GPU Local Models rows — the short list, not the 64k-floor marker.
+
+    The CPU default is not in this tuple. AWQ/FP8 rows stay the GPU catalog.
+    """
     return tuple(t for t in TIERS if t.catalog)
+
+
+def gpu_shipped_model() -> str:
+    """``DEFAULT_CONFIG`` vLLM id. CPU serve must not treat this as its default."""
+    return _DEFAULT_MODEL
+
+
+def cpu_tier() -> VllmTier:
+    """BF16 instruct checkpoint the CPU wheel can load. Not a GPU catalog row."""
+    return _CPU_TIER
+
+
+def recommend_vllm_cpu() -> VllmRecommendation:
+    """CPU default. No VRAM probe — GPU AWQ/FP8 tiers cannot load on this wheel."""
+    probe = NvidiaProbe(0, 0, "cpu")
+    return VllmRecommendation(probe, _CPU_TIER, True, "cpu")
 
 
 def tier_for_model(hf_id: str) -> VllmTier | None:
@@ -181,9 +218,12 @@ def tier_for_model(hf_id: str) -> VllmTier | None:
     hid = (hf_id or "").strip()
     if not hid:
         return None
-    return next((t for t in TIERS if t.catalog and t.model == hid), None) or next(
-        (t for t in TIERS if t.model == hid), None
-    )
+    catalog_hit = next((t for t in TIERS if t.catalog and t.model == hid), None)
+    if catalog_hit is not None:
+        return catalog_hit
+    if hid == _CPU_TIER.model:
+        return _CPU_TIER
+    return next((t for t in TIERS if t.model == hid), None)
 
 
 # nvidia-smi reports a 4090 as 24564 MiB — 12 MiB under 24 GiB. Treat
@@ -276,13 +316,21 @@ def overlay_for_setup(hid: str, rec: VllmRecommendation) -> dict:
     return overlay
 
 
-def resolve_public_setup(rec: VllmRecommendation | None = None) -> tuple[str, str | None, VllmRecommendation]:
+def resolve_public_setup(
+    rec: VllmRecommendation | None = None, *, device: str = "gpu",
+) -> tuple[str, str | None, VllmRecommendation]:
     """VRAM-fit official id, or a known-public fallback if Hub rejects that row.
 
     Leftover ``local_runtime.vllm.model`` is never consulted. Offline / probe
     failure keeps the official id (fail open) so tests and air-gapped boxes
     still plan Qwen3-8B-AWQ.
+
+    ``device="cpu"`` never walks the AWQ catalog or the AWQ public fallback.
+    The CPU wheel cannot load those checkpoints.
     """
+    if str(device or "").strip().lower() == "cpu":
+        picked = recommend_vllm_cpu()
+        return picked.model, None, picked
     picked = rec or recommend_vllm()
     wanted = (picked.model or "").strip() or _DEFAULT_MODEL
     from hermes_cli.vllm_runtime.inventory import hf_repo_access_issue

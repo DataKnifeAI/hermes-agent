@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hermes_cli.local_engines import engine_from_config
@@ -187,6 +188,129 @@ def test_cpu_catalog_keeps_official_qwen_when_gpu_is_24gb(monkeypatch):
     assert forty["fit"] != "fits-gpu"
     assert forty["hide_by_default"] is False
     assert hide_catalog_row_by_default(forty) is False
+
+
+def test_cpu_default_is_bf16_qwen3_4b_not_gpu_awq(tmp_path, monkeypatch):
+    """CPU recommend / start / catalog use a small BF16 checkpoint.
+
+    Qwen3-4B-Instruct-2507 is BF16, hermes ``<tool_call>`` XML, native 262144.
+    The GPU shipped id stays Qwen3-8B-AWQ. CUDA AWQ/FP8 is not the CPU default.
+    """
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    from hermes_cli.vllm_runtime.inventory import catalog_models
+    from hermes_cli.vllm_runtime.recommend import (
+        MIN_CONTEXT, as_vllm_config, gpu_shipped_model, recommend_vllm,
+        recommend_vllm_cpu,
+    )
+    from hermes_cli.vllm_runtime.supervisor import serve_argv, vllm_settings
+    from hermes_cli.web_routers.local_models_engine import recommend_payload
+
+    cpu = recommend_vllm_cpu()
+    overlay = as_vllm_config(cpu)
+    gpu_shipped = gpu_shipped_model()
+    assert overlay["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert overlay["model"] != gpu_shipped
+    assert "awq" not in overlay["model"].lower()
+    assert "fp8" not in overlay["model"].lower()
+    assert "gguf" not in overlay["model"].lower()
+    assert overlay["quantization"] == ""
+    assert overlay["kv_cache_dtype"] == ""
+    assert overlay["tool_call_parser"] == "hermes"
+    assert overlay["max_model_len"] >= MIN_CONTEXT
+    assert cpu.feasible is True
+
+    assert DEFAULT_CONFIG["local_runtime"]["vllm"]["model"] == gpu_shipped
+    assert recommend_vllm(total_bytes=0).model == gpu_shipped
+    gpu_settings = vllm_settings({"local_runtime": {"engine": "vllm"}})
+    assert gpu_settings["model"] == gpu_shipped
+    assert gpu_settings["quantization"] == "awq"
+
+    fresh = vllm_settings({"local_runtime": {"engine": "vllm-cpu"}})
+    assert fresh["model"] == overlay["model"]
+    assert fresh["quantization"] == ""
+    assert fresh["kv_cache_dtype"] == ""
+    assert fresh["tool_call_parser"] == "hermes"
+    shipped_slot = vllm_settings({
+        "local_runtime": {
+            "engine": "vllm-cpu",
+            "vllm": {"model": gpu_shipped, "quantization": "awq", "kv_cache_dtype": "fp8"},
+        },
+    })
+    assert shipped_slot["model"] == overlay["model"]
+    assert shipped_slot["quantization"] == ""
+    explicit = vllm_settings({
+        "local_runtime": {
+            "engine": "vllm-cpu",
+            "vllm": {"model": "org/custom-bf16"},
+        },
+    })
+    assert explicit["model"] == "org/custom-bf16"
+
+    hid = overlay["model"]
+    hub = tmp_path / "hf-hub"
+    root = hub / ("models--" + hid.replace("/", "--"))
+    snap = root / "snapshots" / "main"
+    snap.mkdir(parents=True)
+    (root / "refs").mkdir()
+    (root / "refs" / "main").write_text("main", encoding="utf-8")
+    (snap / "config.json").write_text(json.dumps({
+        "max_position_embeddings": 262144,
+        "torch_dtype": "bfloat16",
+        "rope_scaling": None,
+    }), encoding="utf-8")
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    argv = serve_argv("/opt/cpu-venv/bin/vllm", fresh, device="cpu")
+    assert hid in argv
+    assert "--quantization" not in argv
+    assert "--kv-cache-dtype" not in argv
+    assert "--gpu-memory-utilization" not in argv
+    assert argv[argv.index("--tool-call-parser") + 1] == "hermes"
+    served_len = int(argv[argv.index("--max-model-len") + 1])
+    assert served_len >= MIN_CONTEXT
+    assert served_len == MIN_CONTEXT
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"local_runtime": {"engine": "vllm-cpu"}},
+    )
+    body = recommend_payload()
+    assert body["model"] == hid
+    assert body["quantization"] == ""
+    assert body["kv_cache_dtype"] == ""
+    assert body["tool_call_parser"] == "hermes"
+    assert body["feasible"] is True
+    assert body["max_model_len"] >= MIN_CONTEXT
+
+    _GIB = 1 << 30
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: cpu)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.list_cached_repos", lambda: [])
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.running_served_model_name", lambda: "")
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.hardware._ram_stats",
+        lambda: (128 * _GIB, 16 * _GIB, 96 * _GIB),
+    )
+    rows = catalog_models({"local_runtime": {"engine": "vllm-cpu"}})
+    recommended = [r for r in rows if r.get("recommended")]
+    assert [r["id"] for r in recommended] == [hid]
+    assert recommended[0]["hide_by_default"] is False
+    assert "awq" not in recommended[0]["quantization"]
+    assert "fp8" not in recommended[0]["quantization"]
+
+
+def test_cpu_setup_plans_bf16_not_gpu_awq(monkeypatch):
+    """Set up for me on vllm-cpu downloads the CPU default, not Qwen3-8B-AWQ."""
+    from hermes_cli.web_routers.local_models_engine import vllm_quickstart_plan
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"local_runtime": {"engine": "vllm-cpu"}},
+    )
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: False)
+    plan = vllm_quickstart_plan()
+    assert plan["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert "awq" not in plan["model"].lower()
+    assert "fp8" not in plan["model"].lower()
+    assert plan["apply_recommend"] is True
 
 
 def test_ensure_both_venvs_calls_gpu_and_cpu(monkeypatch):

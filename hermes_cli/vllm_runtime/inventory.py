@@ -1612,9 +1612,10 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
     """Official short list + extra cached / configured HF ids. Not six defaults.
 
     ``with_hf_meta`` pulls HF ``createdAt`` (first publish) for official rows —
-    status polls skip this; the models list does not.
+    status polls skip this; the models list does not. CPU prepends the BF16
+    default and recommends that row; GPU AWQ rows stay on the list.
     """
-    from hermes_cli.vllm_runtime.recommend import catalog_tiers, recommend_vllm
+    from hermes_cli.vllm_runtime.recommend import catalog_tiers, cpu_tier, recommend_vllm
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
     rec = recommend_vllm()
@@ -1632,13 +1633,16 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
     device = vllm_device_from_config(config)
     vram = rec.probe.total_bytes or 0
     ram = 0
+    tiers = list(catalog_tiers())
     if device == CPU:
         from hermes_cli.local_runtime.hardware import _ram_stats
 
         total, _used, avail = _ram_stats()
         ram = avail or total
-        recommended_id = ""
-    official = [t.model for t in catalog_tiers() if t.model]
+        lead = cpu_tier()
+        tiers = [lead, *tiers]
+        recommended_id = lead.model
+    official = [t.model for t in tiers if t.model]
     listing = hf_listing_meta(official) if with_hf_meta else {}
 
     def _row(hf_id: str, *, display: str, recommended: bool, extra: dict | None = None) -> dict[str, Any]:
@@ -1679,7 +1683,7 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
         out["hide_by_default"] = hide_catalog_row_by_default(out)
         return out
 
-    for tier in catalog_tiers():
+    for tier in tiers:
         if not tier.model or tier.model in seen:
             continue
         seen.add(tier.model)
