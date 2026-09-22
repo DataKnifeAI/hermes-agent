@@ -602,7 +602,7 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
     from hermes_cli.local_engines import stop_llama_engine, stop_vllm_device
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
     from hermes_cli.vllm_runtime.supervisor import (
-        MODEL_REMOVED_MSG, configured_cache_missing,
+        MODEL_REMOVED_MSG, configured_cache_missing, configured_model_id,
         configured_unservable_reason, disable_auto_start, read_last_error,
         state_served_model_name, write_last_error)
 
@@ -611,6 +611,13 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
     if device != CPU:
         stop_llama_engine()
     blocked = configured_unservable_reason(settings)
+    if not blocked:
+        from hermes_cli.vllm_runtime.inventory import cached_model_config
+        from hermes_cli.vllm_runtime.serve_compat import incompatible_with_device
+
+        blocked = incompatible_with_device(
+            configured_model_id(settings), device,
+            config=cached_model_config(configured_model_id(settings)))
     if blocked:
         write_last_error(blocked, device)
         disable_auto_start()
@@ -823,22 +830,25 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
     hid = (hf_id or "").strip()
     if not hid or "/" not in hid:
         raise HTTPException(status_code=400, detail="model must be an org/name Hugging Face id")
-    from hermes_cli.vllm_runtime.inventory import gated_repo_reason, unservable_reason
+    from hermes_cli.config import load_config as _load_for_device
+    from hermes_cli.vllm_runtime.inventory import (
+        cached_model_config, gated_repo_reason,
+    )
+    from hermes_cli.vllm_runtime.serve_compat import incompatible_with_device
     from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
 
-    blocked = unservable_reason(hid) or gated_repo_reason(hid)
+    device = vllm_device_from_config(_load_for_device())
+    blocked = incompatible_with_device(
+        hid, device, config=cached_model_config(hid),
+    ) or gated_repo_reason(hid)
     if blocked:
-        write_last_error(blocked)
+        write_last_error(blocked, device)
         disable_auto_start()
         raise HTTPException(status_code=400, detail=blocked)
     from hermes_cli.vllm_runtime.inventory import (
         TOO_BIG_USE_MSG, cached_repo_fit, cpu_fit_ram_bytes,
     )
     from hermes_cli.vllm_runtime.recommend import recommend_vllm
-
-    from hermes_cli.config import load_config as _load_for_device
-
-    device = vllm_device_from_config(_load_for_device())
     rec = recommend_vllm()
     if device == CPU:
         from hermes_cli.local_runtime import hardware as hw

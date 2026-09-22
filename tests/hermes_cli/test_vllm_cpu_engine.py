@@ -185,7 +185,7 @@ def test_cpu_start_skips_gpu_occupancy(tmp_path, monkeypatch):
         "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
         lambda cfg=None: "http://127.0.0.1:18436/v1")
 
-    cfg = {"local_runtime": {"engine": "vllm-cpu", "vllm": {"model": "Qwen/Qwen3-8B-AWQ"}}}
+    cfg = {"local_runtime": {"engine": "vllm-cpu", "vllm": {"model": "Qwen/Qwen3-4B-Instruct-2507"}}}
     engine._start_configured_vllm(cfg, cfg["local_runtime"]["vllm"])
     assert "occupancy" not in order
     assert "stop_llama" not in order
@@ -268,14 +268,24 @@ def test_set_engine_accepts_vllm_cpu(tmp_path, monkeypatch):
     assert load_config()["local_runtime"]["engine"] == "vllm"
 
 
-def test_cpu_catalog_keeps_official_qwen_when_gpu_is_24gb(monkeypatch):
-    """CPU fit is RAM, not the 24 GB VRAM hide that drops official 32B Qwen."""
-    from hermes_cli.vllm_runtime.inventory import catalog_models, hide_catalog_row_by_default
+def test_cpu_and_gpu_catalogs_list_different_checkpoints(monkeypatch):
+    """CPU omits CUDA quants; GPU still lists official AWQ that fits.
+
+    Show (``visible_catalog_models(..., show_unfitting=True)``) reveals a
+    too-big compatible row. It does not reveal an AWQ id the CPU wheel
+    cannot start. CPU fit for the BF16 default is RAM (``needs-ram``),
+    not the GPU ``fits-gpu`` badge.
+    """
+    from hermes_cli.vllm_runtime.inventory import catalog_models, visible_catalog_models
     from hermes_cli.vllm_runtime.recommend import (
         NvidiaProbe, VllmRecommendation, catalog_tiers,
     )
 
     _GIB = 1 << 30
+    bf16 = "Qwen/Qwen3-4B-Instruct-2507"
+    awq = "Qwen/Qwen3-8B-AWQ"
+    wide_awq = "Qwen/Qwen3-32B-AWQ"
+    fp8 = "Qwen/Qwen3.8-27B-FP8"
     pick = next(t for t in catalog_tiers() if t.id == "24gb")
     rec = VllmRecommendation(NvidiaProbe(24 * _GIB, 24 * _GIB, "data"), pick, True, "ok")
     monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
@@ -286,12 +296,26 @@ def test_cpu_catalog_keeps_official_qwen_when_gpu_is_24gb(monkeypatch):
         "hermes_cli.local_runtime.hardware._ram_stats",
         lambda: (128 * _GIB, 32 * _GIB, 96 * _GIB),
     )
-    rows = catalog_models({"local_runtime": {"engine": "vllm-cpu"}})
-    by_id = {r["id"]: r for r in rows}
-    forty = by_id["Qwen/Qwen3-32B-AWQ"]
-    assert forty["fit"] != "fits-gpu"
-    assert forty["hide_by_default"] is False
-    assert hide_catalog_row_by_default(forty) is False
+    cpu_rows = catalog_models({"local_runtime": {"engine": "vllm-cpu"}})
+    cpu_ids = {r["id"] for r in cpu_rows}
+    assert bf16 in cpu_ids
+    assert awq not in cpu_ids
+    assert wide_awq not in cpu_ids
+    assert fp8 not in cpu_ids
+    four = next(r for r in cpu_rows if r["id"] == bf16)
+    assert four["fit"] == "needs-ram"
+    assert four["fit"] != "fits-gpu"
+    assert four["hide_by_default"] is False
+    shown = visible_catalog_models(cpu_rows, show_unfitting=True)
+    assert awq not in {r["id"] for r in shown}
+
+    gpu_rows = catalog_models({
+        "local_runtime": {"engine": "vllm", "vllm": {"device": "gpu"}},
+    })
+    gpu_by_id = {r["id"]: r for r in gpu_rows}
+    assert gpu_by_id[awq]["fit"] == "fits-gpu"
+    assert gpu_by_id[awq]["hide_by_default"] is False
+    assert bf16 not in gpu_by_id
 
 
 def test_cpu_in_use_stays_visible_when_own_serve_holds_ram(monkeypatch):
@@ -361,9 +385,16 @@ def test_cpu_in_use_stays_visible_when_own_serve_holds_ram(monkeypatch):
     assert hide_catalog_row_by_default(running[hid]) is False
     visible = {r["id"] for r in visible_catalog_models(list(running.values()))}
     assert hid in visible
-    assert running[bigger]["fit"] == "too-big"
-    assert running[bigger]["hide_by_default"] is True
-    assert bigger not in visible
+    # CUDA quant is absent, not parked behind Show. The served AWQ stays.
+    assert bigger not in running
+    assert bigger not in {
+        r["id"] for r in visible_catalog_models(list(running.values()), show_unfitting=True)
+    }
+    served["name"] = "qwen3:8b"
+    live_awq = {r["id"]: r for r in catalog_models(cfg)}
+    assert live_awq["Qwen/Qwen3-8B-AWQ"]["active"] is True
+    assert "Qwen/Qwen3-14B-AWQ" not in live_awq
+    assert hid in live_awq
     assert hide_catalog_row_by_default(
         {"active": True, "added_by_you": False, "fit": "too-big", "fits": False}
     ) is False
@@ -804,3 +835,110 @@ def test_assert_cpu_probe_requires_cpu_build(monkeypatch):
     assert "+cpu" in script
     assert 'os.environ["VLLM_TARGET_DEVICE"] = "cpu"' in script
     assert "is_cpu" in script
+
+
+def test_cuda_quants_are_cpu_incompatible_and_gpu_servable():
+    """AWQ, compressed-tensors AWQ-4bit, FP8/MXFP4, and FP8 KV fail on the CPU wheel.
+
+    GPU still accepts official AWQ. DSpark is refused on both, same as serve.
+    """
+    from hermes_cli.vllm_runtime.serve_compat import incompatible_with_device
+
+    awq = "Qwen/Qwen3-8B-AWQ"
+    bf16 = "Qwen/Qwen3-4B-Instruct-2507"
+    assert incompatible_with_device(awq, "cpu")
+    assert incompatible_with_device(awq, "gpu") is None
+    assert incompatible_with_device(bf16, "cpu") is None
+    assert incompatible_with_device(bf16, "gpu") is None
+    packed = {
+        "quantization_config": {
+            "quant_method": "compressed-tensors",
+            "config_groups": {"group_0": {"weights": {"num_bits": 4}}},
+        },
+    }
+    assert incompatible_with_device("org/hermes-awq-4bit", "cpu", config=packed)
+    assert incompatible_with_device("org/hermes-awq-4bit", "gpu", config=packed) is None
+    fp8 = {"quantization_config": {"quant_method": "fp8"}}
+    assert incompatible_with_device("org/weights-fp8", "cpu", config=fp8)
+    assert incompatible_with_device("org/weights-fp8", "gpu", config=fp8) is None
+    assert incompatible_with_device("openai/gpt-oss-20b", "cpu")
+    assert incompatible_with_device("openai/gpt-oss-20b", "gpu") is None
+    assert incompatible_with_device(bf16, "cpu", config={"kv_cache_dtype": "fp8"})
+    assert incompatible_with_device(bf16, "gpu", config={"kv_cache_dtype": "fp8"}) is None
+    draft = "nvidia/NVIDIA-Nemotron-3-Nano-DSpark"
+    cpu_draft = incompatible_with_device(draft, "cpu") or ""
+    gpu_draft = incompatible_with_device(draft, "gpu") or ""
+    assert "draft" in cpu_draft.lower()
+    assert cpu_draft == gpu_draft
+
+
+def test_cpu_search_drops_awq_gpu_search_keeps_it(monkeypatch):
+    from hermes_cli.vllm_runtime.inventory import search_hf_models
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, VllmRecommendation, catalog_tiers
+
+    _gib = 1 << 30
+    pick = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(NvidiaProbe(24 * _gib, 24 * _gib, "data"), pick, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.hardware._ram_stats",
+        lambda: (128 * _gib, 16 * _gib, 96 * _gib),
+    )
+    chosen = {"device": "cpu"}
+    monkeypatch.setattr(
+        "hermes_cli.local_engines.vllm_device_from_config",
+        lambda config=None: chosen["device"],
+    )
+
+    def _fake(_url, timeout=15):
+        return [
+            {"id": "Qwen/Qwen3-8B-AWQ", "downloads": 9, "likes": 1,
+             "lastModified": "", "gated": False, "tags": ["awq", "instruct"]},
+            {"id": "Qwen/Qwen3-4B-Instruct-2507", "downloads": 4, "likes": 1,
+             "lastModified": "", "gated": False, "tags": ["instruct"]},
+            {"id": "nvidia/NVIDIA-Nemotron-3-Nano-DSpark", "downloads": 1, "likes": 0,
+             "lastModified": "", "gated": False, "tags": ["dspark"]},
+        ]
+
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory._hf_json", _fake)
+    cpu_repos = {hit["repo"] for hit in search_hf_models("qwen")}
+    assert "Qwen/Qwen3-4B-Instruct-2507" in cpu_repos
+    assert "Qwen/Qwen3-8B-AWQ" not in cpu_repos
+    assert not any("dspark" in repo.lower() for repo in cpu_repos)
+    four = next(hit for hit in search_hf_models("qwen") if hit["repo"].endswith("2507"))
+    assert four["fit"] == "needs-ram"
+
+    chosen["device"] = "gpu"
+    gpu_repos = {hit["repo"] for hit in search_hf_models("qwen")}
+    assert "Qwen/Qwen3-8B-AWQ" in gpu_repos
+    assert not any("dspark" in repo.lower() for repo in gpu_repos)
+
+
+def test_cpu_supervisor_refuses_awq_before_spawn(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_constants
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+    from hermes_cli.vllm_runtime.supervisor import VllmSupervisor
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.pick_listen_port",
+        lambda preferred=0, **k: 19991,
+    )
+    fake = tmp_path / "vllm"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    spawned: list[str] = []
+    sup = VllmSupervisor(
+        {"model": "Qwen/Qwen3-8B-AWQ", "port": 19991},
+        executable=fake,
+        device="cpu",
+        log_path=home / "vllm-server.log",
+    )
+    monkeypatch.setattr(sup, "_spawn", lambda: spawned.append("spawn"))
+    with pytest.raises(RuntimeError, match="CPU vLLM wheel"):
+        sup.start(timeout_s=1)
+    assert spawned == []

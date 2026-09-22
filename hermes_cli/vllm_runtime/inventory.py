@@ -1615,7 +1615,8 @@ def hide_catalog_row_by_default(row: dict[str, Any]) -> bool:
     User-added / cached extras stay visible even when Too big — the user
     already knows they are there. The model currently served stays visible:
     free-RAM fit must not hide it after our own engine reserved that RAM.
-    Search hits are not catalog rows.
+    Search hits are not catalog rows. A checkpoint the active wheel cannot
+    load is omitted in ``catalog_models`` — Show is not a way to start it.
     """
     if row.get("added_by_you") or row.get("active"):
         return False
@@ -1636,7 +1637,9 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
 
     ``with_hf_meta`` pulls HF ``createdAt`` (first publish) for official rows —
     status polls skip this; the models list does not. CPU prepends the BF16
-    default and recommends that row; GPU AWQ rows stay on the list.
+    default and drops CUDA quants (AWQ, FP8, MXFP4, NVFP4, FP8 KV). GPU keeps
+    those rows and the VRAM fit/Show behavior. The id currently served on
+    this device stays even when the filter would drop it.
     """
     from hermes_cli.vllm_runtime.recommend import catalog_tiers, cpu_tier, recommend_vllm
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
@@ -1668,14 +1671,16 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
     official = [t.model for t in tiers if t.model]
     listing = hf_listing_meta(official) if with_hf_meta else {}
 
-    def _row(hf_id: str, *, display: str, recommended: bool, extra: dict | None = None) -> dict[str, Any]:
+    def _row(hf_id: str, *, display: str, recommended: bool, extra: dict | None = None) -> dict[str, Any] | None:
         hit = cached.get(hf_id) or {}
         disk = int(hit.get("size_bytes") or 0)
         meta = listing.get(hf_id) or {}
         used = int(meta.get("size_bytes") or 0)
+        cfg_json = cached_model_config(hf_id) if hf_id in cached else None
         tags = classify_vllm_repo(
             hf_id, total_vram=vram, recommended_id=recommended_id,
             weight_bytes=disk, used_storage=used, device=device, total_ram=ram,
+            config=cfg_json,
         )
         size = disk or used or int(tags.get("size_bytes") or 0)
         advertised = served_name_for(hf_id)
@@ -1704,18 +1709,26 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
         if extra:
             out.update(extra)
         out["hide_by_default"] = hide_catalog_row_by_default(out)
+        if out["active"]:
+            return out
+        from hermes_cli.vllm_runtime.serve_compat import incompatible_with_device
+
+        if incompatible_with_device(hf_id, device, config=cfg_json):
+            return None
         return out
 
     for tier in tiers:
         if not tier.model or tier.model in seen:
             continue
         seen.add(tier.model)
-        rows.append(_row(
+        row = _row(
             tier.model,
             display=tier.served_model_name or tier.model.rsplit("/", 1)[-1],
             recommended=bool(recommended_id and tier.model == recommended_id),
             extra={"added_by_you": False},
-        ))
+        )
+        if row is not None:
+            rows.append(row)
 
     extras = list(cached)
     # Uncached search hits left in config (gated Gemma, 401 leftovers) are
@@ -1728,7 +1741,9 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
             continue
         seen.add(hf_id)
         label = served if hf_id == configured and served else hf_id.rsplit("/", 1)[-1]
-        rows.append(_row(hf_id, display=label, recommended=False, extra={"added_by_you": True}))
+        row = _row(hf_id, display=label, recommended=False, extra={"added_by_you": True})
+        if row is not None:
+            rows.append(row)
     return rows
 
 
@@ -1881,6 +1896,17 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
     rec = recommend_vllm()
     recommended_id = rec.tier.model if rec.feasible and rec.tier else ""
     vram = rec.probe.total_bytes or 0
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import CPU
+    from hermes_cli.vllm_runtime.serve_compat import incompatible_with_device
+
+    device = vllm_device_from_config(None)
+    ram = 0
+    if device == CPU:
+        from hermes_cli.local_runtime.hardware import _ram_stats
+
+        total, _used, avail = _ram_stats()
+        ram = cpu_fit_ram_bytes(total, avail)
     hits: list[dict[str, Any]] = []
     for m in raw:
         if not isinstance(m, dict):
@@ -1896,12 +1922,17 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
             continue
         safetensors = m.get("safetensors") if isinstance(m.get("safetensors"), dict) else None
         config = m.get("config") if isinstance(m.get("config"), dict) else None
+        if incompatible_with_device(
+            repo, device, tags=tags, config=config, safetensors=safetensors,
+        ):
+            continue
         disk = int((cached_rows.get(repo) or {}).get("size_bytes") or 0)
         used = int(m.get("usedStorage") or 0)
         classified = classify_vllm_repo(
             repo,
             tags=tags,
-            total_vram=vram,
+            total_vram=0 if device == CPU else vram,
+            total_ram=ram,
             recommended_id=recommended_id,
             safetensors=safetensors,
             card_data=card,
@@ -1909,6 +1940,7 @@ def search_hf_models(query: str, limit: int = 20) -> list[dict[str, Any]]:
             weight_bytes=disk,
             used_storage=used,
             pipeline_tag=str(m.get("pipeline_tag") or ""),
+            device=device,
         )
         size = disk or used or int(classified.get("size_bytes") or 0)
         hit = {

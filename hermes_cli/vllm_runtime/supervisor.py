@@ -653,6 +653,12 @@ class VllmSupervisor:
             raise RuntimeError("vllm serve stopped during startup")
         hid = configured_model_id(self.settings)
         blocked = configured_unservable_reason(self.settings)
+        if not blocked:
+            from hermes_cli.vllm_runtime.inventory import cached_model_config
+            from hermes_cli.vllm_runtime.serve_compat import incompatible_with_device
+
+            blocked = incompatible_with_device(
+                hid, self.device, config=cached_model_config(hid))
         if blocked:
             write_last_error(blocked, self.device)
             disable_auto_start()

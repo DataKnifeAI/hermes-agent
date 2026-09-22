@@ -2084,3 +2084,51 @@ def test_vllm_log_phase_sniffs_warmup_and_cuda_graphs(tmp_path, monkeypatch):
         "Warming up Mamba kernels\nCapturing CUDA graphs (decode, 32)\n", encoding="utf-8")
     data = client.get("/api/local-models/status").json()
     assert data["start_phase"] == "Capturing CUDA graphs"
+
+
+def test_cpu_list_omits_awq_and_use_rejects_before_spawn(tmp_path, monkeypatch):
+    """CPU model list is not the GPU list. Use of AWQ is a 400 and does not spawn."""
+    from hermes_cli.vllm_runtime.recommend import NvidiaProbe, VllmRecommendation, catalog_tiers
+
+    client, home = _client(tmp_path, monkeypatch)
+    awq = "Qwen/Qwen3-14B-AWQ"
+    _write_engine(home, "vllm-cpu", extra={"vllm": {
+        "model": awq, "quantization": "awq", "kv_cache_dtype": "fp8",
+    }})
+    _gib = 1 << 30
+    pick = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(NvidiaProbe(24 * _gib, 24 * _gib, "data"), pick, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.running_served_model_name", lambda: "")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory._hf_json", lambda url, timeout=15: {})
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.hardware._ram_stats",
+        lambda: (128 * _gib, 16 * _gib, 96 * _gib),
+    )
+    started: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime",
+        lambda *a, **k: started.append("start"))
+
+    listed = client.get("/api/local-models/vllm/models")
+    assert listed.status_code == 200, listed.text
+    ids = {row["id"] for row in listed.json()["models"]}
+    assert "Qwen/Qwen3-4B-Instruct-2507" in ids
+    assert "Qwen/Qwen3-8B-AWQ" not in ids
+    assert awq not in ids
+
+    used = client.post("/api/local-models/vllm/use", json={"model": "Qwen/Qwen3-8B-AWQ"})
+    assert used.status_code == 400, used.text
+    detail = used.json()["detail"].lower()
+    assert "cpu" in detail and "cuda" in detail
+    assert started == []
+    from hermes_cli.config import load_config
+
+    assert load_config()["local_runtime"]["vllm"]["model"] != "Qwen/Qwen3-8B-AWQ"
+
+    boot = client.post("/api/local-models/server", json={"action": "start"})
+    assert boot.status_code == 400, boot.text
+    assert "cpu" in boot.json()["detail"].lower()
+    assert started == []
