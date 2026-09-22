@@ -331,6 +331,122 @@ def test_cpu_setup_plans_bf16_not_gpu_awq(monkeypatch):
     assert "fp8" not in plan["model"].lower()
     assert plan["apply_recommend"] is True
 
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "local_runtime": {
+                "engine": "vllm",
+                "vllm": {
+                    "device": "cpu",
+                    "model": "Qwen/Qwen3-14B-AWQ",
+                    "quantization": "awq",
+                },
+            }
+        },
+    )
+    on_device = vllm_quickstart_plan()
+    assert on_device["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert on_device["display_name"] == "Qwen/Qwen3-4B-Instruct-2507"
+
+
+def test_cpu_device_quickstart_downloads_4b_not_gpu_awq(monkeypatch):
+    """Set up for me on device cpu downloads the BF16 default, not 14B AWQ."""
+    from hermes_cli.web_routers.local_models_engine import (
+        run_vllm_quickstart, vllm_quickstart_plan,
+    )
+
+    cfg = {
+        "local_runtime": {
+            "engine": "vllm",
+            "vllm": {
+                "device": "cpu",
+                "model": "Qwen/Qwen3-14B-AWQ",
+                "served_model_name": "qwen3:14b",
+                "quantization": "awq",
+                "python": "",
+            },
+        }
+    }
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+
+    def _save(key, value):
+        node = cfg
+        parts = key.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+
+    monkeypatch.setattr("cli.save_config_value", _save)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.venv.ensure_both_vllm_venvs",
+        lambda *a, **k: {"gpu": Path("/tmp/vllm-gpu"), "cpu": Path("/tmp/vllm-cpu")},
+    )
+    downloaded: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.ensure_hf_weights",
+        lambda hid, job=None: downloaded.append(hid),
+    )
+    monkeypatch.setattr("hermes_cli.vllm_runtime.inventory.repo_is_cached", lambda hid: False)
+    occupied: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.occupancy.require_gpu_free",
+        lambda: occupied.append("gpu"),
+    )
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_device", lambda device: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.supervisor.disable_auto_start", lambda: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.supervisor.clear_last_error", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.supervisor.read_last_error", lambda *a, **k: "")
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.start_active_engine",
+        lambda **k: None,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models_engine.activate_vllm",
+        lambda: {"ok": True},
+    )
+
+    plan = vllm_quickstart_plan()
+    job: dict = {}
+    run_vllm_quickstart(job, plan)
+    assert plan["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert downloaded == ["Qwen/Qwen3-4B-Instruct-2507"]
+    assert occupied == []
+    assert cfg["local_runtime"]["vllm"]["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert "AWQ" not in job["detail"]
+    assert "14B" not in job["detail"]
+    assert "CUDA" not in job["detail"]
+    assert "Qwen/Qwen3-4B-Instruct-2507" in job["detail"]
+
+
+def test_gpu_setup_stays_official_awq(monkeypatch):
+    """GPU Set up for me stays on the VRAM-fit Qwen AWQ, not the CPU BF16."""
+    from hermes_cli.vllm_runtime.recommend import (
+        NvidiaProbe, VllmRecommendation, catalog_tiers,
+    )
+    from hermes_cli.web_routers.local_models_engine import vllm_quickstart_plan
+
+    tier = next(t for t in catalog_tiers() if t.id == "24gb")
+    rec = VllmRecommendation(
+        NvidiaProbe(24 * (1 << 30), 24 * (1 << 30), "data"), tier, True, "ok")
+    monkeypatch.setattr("hermes_cli.vllm_runtime.recommend.recommend_vllm", lambda **k: rec)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.hf_repo_access_issue", lambda hid: None)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "local_runtime": {
+                "engine": "vllm",
+                "vllm": {"device": "gpu", "model": "Qwen/Qwen3-4B-Instruct-2507"},
+            }
+        },
+    )
+    plan = vllm_quickstart_plan()
+    assert plan["model"] == "Qwen/Qwen3-14B-AWQ"
+    assert plan["display_name"] == "Qwen/Qwen3-14B-AWQ"
+    assert plan["model"] != "Qwen/Qwen3-4B-Instruct-2507"
+
 
 def test_ensure_both_venvs_calls_gpu_and_cpu(monkeypatch):
     from hermes_cli.vllm_runtime import venv as venv_mod

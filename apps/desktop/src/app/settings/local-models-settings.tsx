@@ -105,6 +105,21 @@ function vllmEngineLabel(copy: { engineVllm: string }): string {
   return copy.engineVllm
 }
 
+/** CPU Set up for me until recommend_vllm_cpu() returns. */
+const CPU_VLLM_SETUP_MODEL = 'Qwen/Qwen3-4B-Instruct-2507'
+
+function vllmSetupModel(device: 'cpu' | 'gpu', recommend: VllmRecommend | null): string {
+  if (device === 'cpu') {
+    return recommend?.reason === 'cpu' && recommend.model ? recommend.model : CPU_VLLM_SETUP_MODEL
+  }
+
+  if (recommend && recommend.reason !== 'cpu' && recommend.model) {
+    return recommend.model
+  }
+
+  return ''
+}
+
 function vllmLibraryEmpty(status: LocalModelsStatus): boolean {
   // Cached HF weights (or a sized active row). A configured id with no
   // cache is not a library — deleting every hub dir should look like a
@@ -300,6 +315,7 @@ export function LocalModelsSettings() {
   }, [refresh])
 
   const selectedEngine = engineOf(status)
+  const selectedDevice = isVllmEngine(selectedEngine) && status ? vllmDeviceOf(status) : null
   const hadVllmLibrary = useRef(false)
 
   useEffect(() => {
@@ -323,10 +339,24 @@ export function LocalModelsSettings() {
       return
     }
 
+    let cancelled = false
+
     void getVllmRecommend()
-      .then(setRecommend)
-      .catch(() => setRecommend(null))
-  }, [selectedEngine])
+      .then(next => {
+        if (!cancelled) {
+          setRecommend(next)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRecommend(null)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDevice, selectedEngine])
 
   // The pane is LIVE while visible: residency changes without user action
   // (boot warm finishing, idle sweep unloading, another surface ejecting),
@@ -592,7 +622,9 @@ export function LocalModelsSettings() {
   const heroModel = catalog?.find(c => c.recommended && c.fits) ?? catalog?.find(c => c.fits) ?? null
 
   if (isVllmEngine(engine) && (vllmSetupJob || (needsSetup && !configure))) {
-    const recModel = vllmSetupJob?.target || recommend?.served_model_name || recommend?.model || vllmEngineLabel(copy)
+    const device = vllmDeviceOf(status)
+    const setupModel = vllmSetupModel(device, recommend)
+    const recModel = vllmSetupJob?.target || setupModel || vllmEngineLabel(copy)
     const vllmPhase = vllmSetupJob?.phase ?? ''
     const vllmStageIndex = ['starting-server', 'setting-default'].includes(vllmPhase)
       ? 2
@@ -600,13 +632,19 @@ export function LocalModelsSettings() {
         ? 1
         : 0
     const stages = [copy.quickstartStageEngine, copy.quickstartStageModel, copy.quickstartStageFinish]
+    const idlePitch =
+      device === 'cpu'
+        ? copy.vllmQuickstartCpu(setupModel)
+        : recommend && recommend.reason !== 'cpu' && !recommend.feasible
+          ? copy.vllmNotFeasible(recommend.reason)
+          : copy.vllmQuickstartGpu(setupModel || 'Qwen AWQ')
     const liveDetail =
       vllmSetupJob?.detail ||
       (vllmSetupJob?.total_bytes
         ? copy.downloadProgress(gbLabel(vllmSetupJob.done_bytes), gbLabel(vllmSetupJob.total_bytes))
         : null) ||
       status.start_phase ||
-      (recommend && !recommend.feasible ? copy.vllmNotFeasible(recommend.reason) : copy.vllmInstallDetail)
+      idlePitch
 
     return (
       <SettingsContent>

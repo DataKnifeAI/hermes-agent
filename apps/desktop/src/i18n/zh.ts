@@ -1503,6 +1503,10 @@ export const zh: Translations = {
       vllmInstallTitle: '安装 vLLM 运行时',
       vllmInstallDetail:
         '下载 vLLM 推理引擎。你下载的模型完全在本机运行——无需账号，数据不会离开这台电脑。服务器由 Hermes 启动并管理。',
+      vllmQuickstartGpu: model =>
+        `一键在 GPU 上安装 vLLM，并下载 ${model}——适合这台机器的官方 Qwen AWQ。Hermes 会启动服务器。数据不会离开这台电脑。`,
+      vllmQuickstartCpu: model =>
+        `一键在 CPU 上安装 vLLM，并下载 ${model}。它在这台机器的 CPU 上运行。Hermes 会启动服务器。数据不会离开这台电脑。`,
       vllmNotFeasible: reason => `此 GPU 尚无法运行托管 vLLM（${reason}）。`,
       occupancyTitle: '另一个 LLM 正在占用 GPU',
       vllmCheckUpdate: '检查更新',

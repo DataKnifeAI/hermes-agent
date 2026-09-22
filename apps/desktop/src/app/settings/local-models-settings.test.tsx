@@ -884,23 +884,77 @@ describe('vLLM engine', () => {
     expect(mocked.installVllm).not.toHaveBeenCalled()
   })
 
+  it('CPU Set up for me names Qwen3-4B, not the GPU AWQ', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      vllm_device: 'cpu'
+    })
+    mocked.getVllmRecommend.mockResolvedValue({
+      config: {},
+      feasible: true,
+      gpu_memory_utilization: 0.75,
+      kv_cache_dtype: 'fp8',
+      max_model_len: 65536,
+      model: 'Qwen/Qwen3-14B-AWQ',
+      quantization: 'awq',
+      reason: 'ok',
+      served_model_name: 'qwen3:14b',
+      tier: '24gb'
+    })
+    renderPane()
+
+    expect(await screen.findByRole('heading', { name: 'Qwen/Qwen3-4B-Instruct-2507' })).toBeTruthy()
+    const pitch = screen.getByText(/installs vLLM on the CPU/i)
+
+    expect(pitch.textContent).toContain('Qwen/Qwen3-4B-Instruct-2507')
+    expect(pitch.textContent).toMatch(/CPU/)
+    expect(pitch.textContent).not.toMatch(/AWQ|14B|CUDA|GPU/)
+  })
+
+  it('GPU Set up for me keeps the official Qwen AWQ', async () => {
+    mocked.getLocalModelsStatus.mockResolvedValue({
+      ...VLLM_STATUS,
+      vllm_device: 'gpu'
+    })
+    mocked.getVllmRecommend.mockResolvedValue({
+      config: {},
+      feasible: true,
+      gpu_memory_utilization: 0.75,
+      kv_cache_dtype: 'fp8',
+      max_model_len: 65536,
+      model: 'Qwen/Qwen3-14B-AWQ',
+      quantization: 'awq',
+      reason: 'ok',
+      served_model_name: 'qwen3:14b',
+      tier: '24gb'
+    })
+    renderPane()
+
+    expect(await screen.findByRole('heading', { name: 'Qwen/Qwen3-14B-AWQ' })).toBeTruthy()
+    const pitch = screen.getByText(/official Qwen AWQ/i)
+
+    expect(pitch.textContent).toContain('Qwen/Qwen3-14B-AWQ')
+    expect(pitch.textContent).toMatch(/GPU/)
+    expect(pitch.textContent).not.toContain('Qwen/Qwen3-4B-Instruct-2507')
+  })
+
   it('pins vLLM quickstart progress while the job runs', async () => {
+    const job = {
+      job_id: 'vq1',
+      kind: 'quickstart' as const,
+      target: 'hermes3:8b',
+      model_id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      status: 'running' as const,
+      phase: 'downloading',
+      detail: 'Downloading solidrust/Hermes-3-Llama-3.1-8B-AWQ',
+      total_bytes: 100,
+      done_bytes: 40,
+      percent: 40,
+      error: null
+    }
     mocked.getLocalModelsStatus.mockResolvedValue(VLLM_STATUS)
-    $localRuntimeJobs.set([
-      {
-        job_id: 'vq1',
-        kind: 'quickstart',
-        target: 'hermes3:8b',
-        model_id: 'solidrust/Hermes-3-Llama-3.1-8B-AWQ',
-        status: 'running',
-        phase: 'downloading',
-        detail: 'Downloading solidrust/Hermes-3-Llama-3.1-8B-AWQ',
-        total_bytes: 100,
-        done_bytes: 40,
-        percent: 40,
-        error: null
-      }
-    ])
+    mocked.getLocalModelsJobs.mockResolvedValue({ jobs: [job] })
+    $localRuntimeJobs.set([job])
     renderPane()
 
     expect(await screen.findByText(/Downloading solidrust/)).toBeTruthy()

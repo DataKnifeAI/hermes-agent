@@ -1324,6 +1324,10 @@ export const en: Translations = {
       vllmInstallTitle: 'Install the vLLM runtime',
       vllmInstallDetail:
         'Downloads the vLLM inference engine. Models you download run entirely on this machine — no account, nothing leaves your computer. Hermes starts and manages the server for you.',
+      vllmQuickstartGpu: model =>
+        `One click installs vLLM on the GPU and downloads ${model} — the official Qwen AWQ for this machine. Hermes starts the server. Nothing leaves this computer.`,
+      vllmQuickstartCpu: model =>
+        `One click installs vLLM on the CPU and downloads ${model}. It runs on this machine's CPU. Hermes starts the server. Nothing leaves this computer.`,
       vllmNotFeasible: reason => `This GPU cannot run managed vLLM yet (${reason}).`,
       occupancyTitle: 'Another LLM is using the GPU',
       vllmCheckUpdate: 'Check for update',

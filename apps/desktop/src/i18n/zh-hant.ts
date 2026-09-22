@@ -1170,6 +1170,10 @@ export const zhHant = defineLocale({
       vllmInstallTitle: '安裝 vLLM 執行環境',
       vllmInstallDetail:
         '下載 vLLM 推論引擎。你下載的模型完全在本機執行——無需帳號，資料不會離開這台電腦。伺服器由 Hermes 啟動並管理。',
+      vllmQuickstartGpu: model =>
+        `一鍵在 GPU 上安裝 vLLM，並下載 ${model}——適合這台機器的官方 Qwen AWQ。Hermes 會啟動伺服器。資料不會離開這台電腦。`,
+      vllmQuickstartCpu: model =>
+        `一鍵在 CPU 上安裝 vLLM，並下載 ${model}。它在這台機器的 CPU 上執行。Hermes 會啟動伺服器。資料不會離開這台電腦。`,
       vllmNotFeasible: reason => `此 GPU 尚無法執行託管 vLLM（${reason}）。`,
       occupancyTitle: '另一個 LLM 正在使用 GPU',
       vllmCheckUpdate: '檢查更新',

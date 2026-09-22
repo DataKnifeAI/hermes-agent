@@ -1151,6 +1151,8 @@ export interface Translations {
       deviceCpu: string
       vllmInstallTitle: string
       vllmInstallDetail: string
+      vllmQuickstartGpu: (model: string) => string
+      vllmQuickstartCpu: (model: string) => string
       vllmNotFeasible: (reason: string) => string
       occupancyTitle: string
       vllmCheckUpdate: string

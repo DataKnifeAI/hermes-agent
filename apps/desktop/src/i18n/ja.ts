@@ -1216,6 +1216,10 @@ export const ja = defineLocale({
       vllmInstallTitle: 'vLLM ランタイムをインストール',
       vllmInstallDetail:
         'vLLM 推論エンジンをダウンロードします。ダウンロードしたモデルはこのマシンだけで動きます——アカウント不要、データは外に出ません。サーバーは Hermes が起動・管理します。',
+      vllmQuickstartGpu: model =>
+        `ワンクリックで GPU に vLLM を入れ、${model}（このマシン向けの公式 Qwen AWQ）をダウンロードします。サーバーは Hermes が起動します。データはこのコンピュータの外に出ません。`,
+      vllmQuickstartCpu: model =>
+        `ワンクリックで CPU に vLLM を入れ、${model} をダウンロードします。このマシンの CPU で動きます。サーバーは Hermes が起動します。データはこのコンピュータの外に出ません。`,
       vllmNotFeasible: reason => `この GPU ではまだ管理 vLLM を実行できません（${reason}）。`,
       occupancyTitle: '別の LLM が GPU を使用中です',
       vllmCheckUpdate: '更新を確認',
