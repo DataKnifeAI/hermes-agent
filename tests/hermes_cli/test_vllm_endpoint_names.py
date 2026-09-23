@@ -105,7 +105,7 @@ def test_vllm_runtime_row_names_the_configured_device(monkeypatch):
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
     monkeypatch.setattr(
         "hermes_cli.vllm_runtime.supervisor.vllm_settings",
-        lambda _cfg=None: {"served_model_name": "qwen3:4b"},
+        lambda _cfg=None, device=None: {"served_model_name": "qwen3:4b"},
     )
 
     row = _vllm_runtime_row(ConfigContext(
@@ -466,7 +466,7 @@ def test_cpu_use_smol_does_not_write_gpu_endpoint(tmp_path, monkeypatch):
     assert after["model"]["default"] == "SmolLM3-3B"
     assert after["local_runtime"]["vllm"]["model"] == "Qwen/Qwen3-14B-AWQ"
     assert after["local_runtime"]["vllm"]["served_model_name"] == "qwen3:14b"
-    cpu_block = after["local_runtime"]["vllm"].get("cpu") or {}
+    cpu_block = ((after["local_runtime"]["vllm"].get("devices") or {}).get("cpu") or {})
     assert cpu_block.get("model") == "HuggingFaceTB/SmolLM3-3B"
 
     listed = {row["id"]: row for row in _custom_endpoint_response(after)["endpoints"]}

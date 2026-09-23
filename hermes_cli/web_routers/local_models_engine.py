@@ -304,7 +304,7 @@ def vllm_engine_snapshot(
     cfg = config or {}
     explicit = device is not None
     device = normalize_device(device) if explicit else vllm_device_from_config(cfg)
-    settings = vllm_settings(cfg)
+    settings = vllm_settings(cfg, device=device)
     if explicit:
         running = _state_endpoint(device)
         served = None
@@ -343,7 +343,7 @@ def vllm_engine_snapshot(
         "settings": settings,
         "start_phase": None if ready else _vllm_log_phase(device),
         "server_base_url": (running or {}).get("base_url") or (
-            openai_base_url(settings) if installed else None),
+            openai_base_url(settings, device=device) if installed else None),
     }
 
 
@@ -497,8 +497,10 @@ def set_engine(name: str) -> dict[str, Any]:
 
     engine = str(name or "").strip().lower().replace("_", "-")
     if engine == ENGINE_CPU:
+        from hermes_cli.vllm_runtime.settings import persist_selected
+
         save_config_value("local_runtime.engine", ENGINE_GPU)
-        save_config_value("local_runtime.vllm.device", CPU)
+        persist_selected(CPU)
         return {"ok": True, "engine": ENGINE_GPU, "vllm_device": CPU}
     if engine not in _ENGINE_NAMES:
         raise HTTPException(
@@ -519,7 +521,9 @@ def set_vllm_device(device: str) -> dict[str, Any]:
     if raw not in (GPU, CPU):
         raise HTTPException(status_code=400, detail="device must be 'gpu' or 'cpu'")
     chosen = normalize_device(raw)
-    save_config_value("local_runtime.vllm.device", chosen)
+    from hermes_cli.vllm_runtime.settings import persist_selected
+
+    persist_selected(chosen)
     section = (load_config().get("local_runtime") or {})
     stored = str(section.get("engine") or "").strip().lower().replace("_", "-")
     if stored == ENGINE_CPU:
@@ -540,11 +544,10 @@ def _vllm_overlay_from_settings(settings: dict) -> dict[str, Any]:
     return {key: settings.get(key) for key in _VLLM_RESTORE_KEYS}
 
 
-def _persist_vllm_overlay(overlay: dict[str, Any]) -> None:
-    from cli import save_config_value
+def _persist_vllm_overlay(overlay: dict[str, Any], device: str | None = None) -> None:
+    from hermes_cli.vllm_runtime.settings import persist_device_overlay
 
-    for key, value in overlay.items():
-        save_config_value(f"local_runtime.vllm.{key}", value)
+    persist_device_overlay(device or vllm_device_from_config(None), overlay)
 
 
 def recover_vllm_after_failed_start(
@@ -606,7 +609,13 @@ def _start_configured_vllm(cfg: dict, settings: dict) -> None:
         configured_unservable_reason, disable_auto_start, read_last_error,
         state_served_model_name, write_last_error)
 
+    from hermes_cli.vllm_runtime.settings import ensure_device_model
+
     device = vllm_device_from_config(cfg)
+    settings = ensure_device_model(cfg, device)
+    from hermes_cli.config import load_config as _reload_after_pick
+
+    cfg = _reload_after_pick()
     # GPU shares the card with llama.cpp. CPU vLLM does not stop either.
     if device != CPU:
         stop_llama_engine()
@@ -669,7 +678,7 @@ def start_active_engine(*, recover: bool = True) -> None:
 
     cfg = lm._set_runtime_enabled(True)
     if is_vllm_engine(configured_engine(cfg)):
-        settings = vllm_settings(cfg)
+        settings = vllm_settings(cfg, device=vllm_device_from_config(cfg))
         failed_id = configured_model_id(settings)
         try:
             _start_configured_vllm(cfg, settings)
@@ -744,11 +753,11 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     occupancy (foreign), stop managed leftover, official overlay (clean argv),
     download, then start and wait ``/v1/models``. Kick is off until start.
     """
-    from cli import save_config_value
     from hermes_cli.config import load_config
     from hermes_cli.local_engines import stop_vllm_device
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+    from hermes_cli.vllm_runtime.settings import persist_device_overlay
     from hermes_cli.vllm_runtime.supervisor import (
         clear_last_error, disable_auto_start, read_last_error, vllm_settings)
     from hermes_cli.vllm_runtime.venv import ensure_both_vllm_venvs
@@ -771,9 +780,8 @@ def run_vllm_quickstart(job: dict, plan: dict) -> None:
     stop_vllm_device(device)
     disable_auto_start()
     clear_last_error(device)
-    for key, value in overlay.items():
-        save_config_value(f"local_runtime.vllm.{key}", value)
-    settings = vllm_settings(load_config())
+    persist_device_overlay(device, overlay)
+    settings = vllm_settings(load_config(), device=device)
     installing = "Installing vLLM on the CPU" if device == CPU else "Installing vLLM on the GPU"
     lm._step(job, "installing-runtime", installing)
     _raise_if_both_venvs_failed(
@@ -806,16 +814,17 @@ def _raise_if_both_venvs_failed(results: dict) -> dict:
 
 
 def apply_recommend_and_install(job: dict | None = None) -> None:
-    from cli import save_config_value
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.inventory import ensure_hf_weights
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
     from hermes_cli.vllm_runtime.venv import ensure_both_vllm_venvs
 
     hid, notice, _rec, overlay = _official_setup()
-    for key, value in overlay.items():
-        save_config_value(f"local_runtime.vllm.{key}", value)
-    settings = vllm_settings(load_config())
+    from hermes_cli.vllm_runtime.settings import persist_device_overlay
+
+    device = vllm_device_from_config(load_config())
+    persist_device_overlay(device, overlay)
+    settings = vllm_settings(load_config(), device=device)
     _raise_if_both_venvs_failed(
         ensure_both_vllm_venvs(str(settings.get("python") or "")))
     if hid:
@@ -955,11 +964,11 @@ def download_vllm_weights(hf_id: str, job: dict | None = None) -> dict[str, Any]
 
 def _write_official_vllm_model() -> str:
     """Persist the VRAM-fit catalog row (or the shipped 16 GB id). Never a search hit."""
-    from cli import save_config_value
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.settings import persist_device_overlay
 
     hid, _notice, _rec, overlay = _official_setup()
-    for key, value in overlay.items():
-        save_config_value(f"local_runtime.vllm.{key}", value)
+    persist_device_overlay(vllm_device_from_config(load_config()), overlay)
     return hid
 
 
@@ -979,7 +988,9 @@ def delete_vllm_model(hf_id: str) -> dict[str, Any]:
         write_last_error)
 
     hid = (hf_id or "").strip()
-    settings = vllm_settings(load_config())
+    cfg = load_config()
+    device = vllm_device_from_config(cfg)
+    settings = vllm_settings(cfg, device=device)
     was_configured = configured_model_id(settings) == hid
     try:
         delete_cached_repo(hid)
@@ -998,8 +1009,14 @@ def delete_vllm_model(hf_id: str) -> dict[str, Any]:
         save_config_value("local_runtime.enabled", False)
         clear_last_error()
     elif was_configured:
-        save_config_value("local_runtime.vllm.model", "")
-        save_config_value("local_runtime.vllm.served_model_name", "")
+        from hermes_cli.vllm_runtime.settings import persist_device_overlay
+
+        persist_device_overlay(device, {"model": "", "served_model_name": ""})
+        shared = (cfg.get("local_runtime") or {}).get("vllm")
+        shared = shared if isinstance(shared, dict) else {}
+        if str(shared.get("model") or "").strip() == hid:
+            save_config_value("local_runtime.vllm.model", "")
+            save_config_value("local_runtime.vllm.served_model_name", "")
         write_last_error(MODEL_REMOVED_MSG)
     return {"ok": True}
 

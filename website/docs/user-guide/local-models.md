@@ -161,9 +161,16 @@ local_runtime:
   port: 0            # llama.cpp: 0 = try 18434, then an ephemeral port
   vllm:              # written by Desktop when engine is vllm
     port: 0          # 0 = try 18435, then an ephemeral port (never 18434)
-    model: Qwen/Qwen3-8B-AWQ
-    served_model_name: qwen3:8b
-    max_model_len: 65536
+    selected: gpu    # chat + Turn on follow this device id
+    devices:
+      gpu:
+        model: Qwen/Qwen3-8B-AWQ
+        served_model_name: qwen3:8b
+        max_model_len: 65536
+      cpu:
+        model: Qwen/Qwen3-4B-Instruct-2507
+        served_model_name: qwen3:4b
+        max_model_len: 65536
 ```
 
 Models and runtime builds live under the Hermes home directory

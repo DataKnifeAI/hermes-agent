@@ -1748,24 +1748,22 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
 
 
 def _vllm_apply_prefix() -> str:
-    """CPU Use writes ``local_runtime.vllm.cpu.*``. GPU Use keeps the top-level slot.
+    """Use writes ``local_runtime.vllm.devices.<id>.*`` for the current device.
 
-    A shared ``local_runtime.vllm.model`` write from the CPU page overwrites the
-    GPU checkpoint. ``vllm_settings`` already reads the nested CPU block.
+    CPU Use must not touch ``devices.gpu``. GPU Use must not touch
+    ``devices.cpu``. The old shared ``vllm.model`` slot is not written.
     """
     from hermes_cli.config import load_config
     from hermes_cli.local_engines import vllm_device_from_config
-    from hermes_cli.vllm_runtime.device import CPU
+    from hermes_cli.vllm_runtime.settings import device_config_prefix
 
-    if vllm_device_from_config(load_config()) == CPU:
-        return "local_runtime.vllm.cpu"
-    return "local_runtime.vllm"
+    return device_config_prefix(vllm_device_from_config(load_config()))
 
 
 def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     """Persist this device's model (+ served name). Does not start or stop a server.
 
-    CPU Use writes the nested ``vllm.cpu`` checkpoint so the GPU id stays put.
+    Writes ``devices.<id>`` only. Switching device does not copy models.
     """
     from cli import save_config_value
     from hermes_cli.vllm_runtime.recommend import (

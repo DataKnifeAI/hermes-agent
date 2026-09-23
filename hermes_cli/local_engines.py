@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 
 from hermes_cli.vllm_runtime.device import (
-    CPU, ENGINE_CPU, ENGINE_GPU, GPU, is_vllm_engine, normalize_device,
+    CPU, ENGINE_CPU, ENGINE_GPU, is_vllm_engine,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ def engine_from_config(config: dict | None) -> str:
     """Public engine page: ``llamacpp`` or ``vllm``.
 
     A legacy ``engine: vllm-cpu`` value is the vLLM page, not a third id.
-    The device lives in ``local_runtime.vllm.device``.
+    The device lives in ``local_runtime.vllm.selected`` (``device`` alias).
     """
     raw = ((config or {}).get("local_runtime") or {}).get("engine") or _DEFAULT_ENGINE
     name = str(raw).strip().lower().replace("_", "-")
@@ -44,19 +44,9 @@ def vllm_device_from_config(config: dict | None) -> str:
         from hermes_cli.config import load_config
 
         config = load_config()
-    section = (config or {}).get("local_runtime") or {}
-    if not isinstance(section, dict):
-        section = {}
-    vllm = section.get("vllm") if isinstance(section.get("vllm"), dict) else {}
-    raw = str(section.get("engine") or "").strip().lower().replace("_", "-")
-    # Legacy page id wins over a deep-merged default ``device: gpu`` until
-    # the engine id is rewritten to ``vllm``.
-    if raw == ENGINE_CPU:
-        return CPU
-    explicit = str(vllm.get("device") or "").strip().lower()
-    if explicit in (GPU, CPU):
-        return normalize_device(explicit)
-    return GPU
+    from hermes_cli.vllm_runtime.settings import selected_device
+
+    return selected_device(config)
 
 
 def stop_state_pid(path: Path) -> int | None:

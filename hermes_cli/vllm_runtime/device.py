@@ -1,8 +1,10 @@
 """GPU vs official-CPU managed vLLM — device, ports, runtime leaf names.
 
-One public engine id (``vllm``) with ``local_runtime.vllm.device`` ``gpu`` or
-``cpu``. CUDA wheels stay in ``runtimes/vllm/.venv``, CPU wheels in
-``runtimes/vllm-cpu/.venv``. Never ``--device cpu`` on the CUDA wheel.
+One public engine id (``vllm``). Chat / Turn on follow
+``local_runtime.vllm.selected`` (``device`` is a write alias). Serve args
+live under ``devices.<id>`` — later ``gpu:0`` / ``npu`` are more keys,
+not more engines. CUDA wheels stay in ``runtimes/vllm/.venv``, CPU wheels
+in ``runtimes/vllm-cpu/.venv``. Never ``--device cpu`` on the CUDA wheel.
 
 ``vllm-cpu`` is a legacy stored engine id. Readers fold it to engine ``vllm``
 plus device ``cpu``. It is not a third Local Models page.

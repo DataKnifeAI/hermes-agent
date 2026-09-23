@@ -47,6 +47,14 @@ def _client(tmp_path, monkeypatch):
     return test_client, home
 
 
+def _vllm_now(cfg=None):
+    """Configured serve for the selected device — not the leftover shared slot."""
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    return vllm_settings(cfg if cfg is not None else load_config())
+
+
 def _write_engine(home, engine: str, extra=None):
     section = {"enabled": True, "engine": engine}
     if extra:
@@ -393,7 +401,7 @@ def test_vllm_list_set_delete_and_search_contracts(tmp_path, monkeypatch):
     assert set_r.json()["model"] == "acme/sideload-awq"
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == "acme/sideload-awq"
+    assert _vllm_now()["model"] == "acme/sideload-awq"
 
     gone = client.delete("/api/local-models/vllm/models/acme/sideload-awq")
     assert gone.status_code == 200
@@ -491,8 +499,8 @@ def test_delete_configured_model_does_not_enqueue_download(tmp_path, monkeypatch
     from hermes_cli.vllm_runtime.recommend import catalog_tiers
 
     official = {t.model for t in catalog_tiers()}
-    assert cfg["local_runtime"]["vllm"]["model"] in official
-    assert cfg["local_runtime"]["vllm"]["model"] != hid
+    assert _vllm_now(cfg)["model"] in official
+    assert _vllm_now(cfg)["model"] != hid
     assert cfg["local_runtime"]["enabled"] is False
     assert not (read_last_error() or "")
 
@@ -855,7 +863,7 @@ def test_vllm_use_cached_sets_then_starts_without_download(tmp_path, monkeypatch
     assert started == ["start"]
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == "acme/sideload-awq"
+    assert _vllm_now()["model"] == "acme/sideload-awq"
 
 
 def test_vllm_download_job_and_cached_noop(tmp_path, monkeypatch):
@@ -1114,7 +1122,7 @@ def test_vllm_quickstart_ignores_leftover_gated_search_hit(tmp_path, monkeypatch
     assert pulled == [rec.model]
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+    assert _vllm_now()["model"] == rec.model
 
 
 def test_delete_last_cached_resets_leftover_gemma_config(tmp_path, monkeypatch):
@@ -1147,8 +1155,8 @@ def test_delete_last_cached_resets_leftover_gemma_config(tmp_path, monkeypatch):
     from hermes_cli.config import load_config
 
     cfg = load_config()
-    assert cfg["local_runtime"]["vllm"]["model"] == rec.model
-    assert leftover not in (cfg["local_runtime"]["vllm"].get("model") or "")
+    assert _vllm_now(cfg)["model"] == rec.model
+    assert leftover not in (_vllm_now(cfg).get("model") or "")
     assert cfg["local_runtime"]["enabled"] is False
     after = client.get("/api/local-models/vllm/models")
     after_ids = {m["id"] for m in after.json()["models"]}
@@ -1195,7 +1203,7 @@ def test_vllm_quickstart_empty_body_ignores_leftover_nemotron(tmp_path, monkeypa
     assert "llama.cpp" in llama.json()["detail"]
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+    assert _vllm_now()["model"] == rec.model
 
 
 def test_vllm_quickstart_stops_leftover_running_id_starts_official(tmp_path, monkeypatch):
@@ -1274,7 +1282,7 @@ def test_vllm_quickstart_stops_leftover_running_id_starts_official(tmp_path, mon
     assert starts[0][3] == rec.max_model_len
     from hermes_cli.config import load_config
 
-    vllm = load_config()["local_runtime"]["vllm"]
+    vllm = _vllm_now()
     assert vllm["model"] == rec.model
     assert vllm["quantization"] == rec.quantization
     assert int(vllm["max_model_len"]) == rec.max_model_len
@@ -1342,7 +1350,7 @@ def test_vllm_install_ignores_leftover_gated_id(tmp_path, monkeypatch):
     assert leftover not in pulled
     from hermes_cli.config import load_config as _load
 
-    assert _load()["local_runtime"]["vllm"]["model"] == rec.model
+    assert _vllm_now(_load())["model"] == rec.model
 
 
 def test_vllm_download_keeps_explicit_search_hit(tmp_path, monkeypatch):
@@ -1477,7 +1485,7 @@ def test_vllm_use_official_cached_after_leftover_search_hit(tmp_path, monkeypatc
     assert used.status_code == 200, used.text
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == catalog
+    assert _vllm_now()["model"] == catalog
 
 
 def test_vllm_use_gated_repo_is_plain_language_400(tmp_path, monkeypatch):
@@ -1590,7 +1598,7 @@ def test_vllm_use_nous_awq_cached_starts(tmp_path, monkeypatch):
     assert started == ["start"]
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == hid
+    assert _vllm_now()["model"] == hid
 
 
 def test_vllm_search_hf_400_is_not_502(tmp_path, monkeypatch):
@@ -1628,7 +1636,7 @@ def test_delete_uncached_configured_search_hit_is_not_404(tmp_path, monkeypatch)
     assert gone.status_code == 200, gone.text
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+    assert _vllm_now()["model"] == rec.model
     listed = client.get("/api/local-models/vllm/models")
     ids = {m["id"] for m in listed.json()["models"]}
     assert leftover not in ids
@@ -1673,7 +1681,7 @@ def test_vllm_use_reloads_when_switching_cached_models(tmp_path, monkeypatch):
     assert order.index("stop") < order.index("start")
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == "acme/sideload-awq"
+    assert _vllm_now()["model"] == "acme/sideload-awq"
 
 
 def test_vllm_use_failed_start_restores_previous(tmp_path, monkeypatch):
@@ -1706,7 +1714,7 @@ def test_vllm_use_failed_start_restores_previous(tmp_path, monkeypatch):
         from hermes_cli.config import load_config
         from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
 
-        model = load_config()["local_runtime"]["vllm"]["model"]
+        model = _vllm_now()["model"]
         starts.append(model)
         if model == doomed:
             write_last_error(f"vllm serve was killed (SIGKILL) starting {doomed}")
@@ -1729,8 +1737,8 @@ def test_vllm_use_failed_start_restores_previous(tmp_path, monkeypatch):
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.supervisor import read_last_error
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == previous
-    assert load_config()["local_runtime"]["vllm"]["served_model_name"] == "qwen3:8b"
+    assert _vllm_now()["model"] == previous
+    assert _vllm_now()["served_model_name"] == "qwen3:8b"
     assert starts[0] == doomed
     assert previous in starts
     assert "SIGKILL" in (read_last_error() or "")
@@ -1766,7 +1774,7 @@ def test_vllm_use_failed_restore_falls_back_to_recommend(tmp_path, monkeypatch):
         from hermes_cli.config import load_config
         from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
 
-        model = load_config()["local_runtime"]["vllm"]["model"]
+        model = _vllm_now()["model"]
         starts.append(model)
         if model in {doomed, previous}:
             write_last_error(f"vllm serve was killed (SIGKILL) starting {model}")
@@ -1788,7 +1796,7 @@ def test_vllm_use_failed_restore_falls_back_to_recommend(tmp_path, monkeypatch):
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.supervisor import read_last_error
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == rec.model
+    assert _vllm_now()["model"] == rec.model
     assert starts[0] == doomed
     assert previous in starts
     assert rec.model in starts
@@ -1947,8 +1955,8 @@ def test_failed_start_then_delete_and_use_catalog(tmp_path, monkeypatch):
     assert used.status_code == 200, used.text
     assert started == ["start"]
     cfg = load_config()
-    assert cfg["local_runtime"]["vllm"]["model"] == catalog
-    assert cfg["local_runtime"]["vllm"].get("quantization") == "awq"
+    assert _vllm_now(cfg)["model"] == catalog
+    assert _vllm_now(cfg).get("quantization") == "awq"
 
 
 def test_apply_search_hit_clears_leftover_awq(tmp_path, monkeypatch):
@@ -1963,7 +1971,7 @@ def test_apply_search_hit_clears_leftover_awq(tmp_path, monkeypatch):
     from hermes_cli.vllm_runtime.inventory import apply_vllm_model
 
     apply_vllm_model("dphn/dolphin-2.9.1-llama-3-8b")
-    vllm = load_config()["local_runtime"]["vllm"]
+    vllm = _vllm_now()
     assert vllm["model"] == "dphn/dolphin-2.9.1-llama-3-8b"
     assert not (vllm.get("quantization") or "").strip()
 
@@ -1993,7 +2001,7 @@ def test_apply_compressed_tensors_awq_id_clears_quantization(tmp_path, monkeypat
     from hermes_cli.vllm_runtime.inventory import apply_vllm_model
 
     apply_vllm_model(hid)
-    vllm = load_config()["local_runtime"]["vllm"]
+    vllm = _vllm_now()
     assert vllm["model"] == hid
     assert not (vllm.get("quantization") or "").strip()
     assert vllm.get("tool_call_parser") == "hermes"
@@ -2014,7 +2022,7 @@ def test_apply_qwen3_30b_a3b_2507_pins_64k_fp8(tmp_path, monkeypatch):
     from hermes_cli.vllm_runtime.recommend import MIN_CONTEXT
 
     apply_vllm_model(hid)
-    vllm = load_config()["local_runtime"]["vllm"]
+    vllm = _vllm_now()
     assert vllm["model"] == hid
     assert int(vllm["max_model_len"]) == MIN_CONTEXT
     assert vllm.get("kv_cache_dtype") == "fp8"
@@ -2047,7 +2055,7 @@ def test_apply_hermes4_overwrites_leftover_llama3_parser(tmp_path, monkeypatch):
     from hermes_cli.vllm_runtime.inventory import apply_vllm_model
 
     apply_vllm_model(hid)
-    vllm = load_config()["local_runtime"]["vllm"]
+    vllm = _vllm_now()
     assert vllm["model"] == hid
     assert vllm.get("tool_call_parser") == "hermes"
     assert not (vllm.get("quantization") or "").strip()
@@ -2090,7 +2098,7 @@ def test_apply_smolm3_writes_native_65536_not_leftover_128k(tmp_path, monkeypatc
 
     cfg = load_config()
     vllm = cfg["local_runtime"]["vllm"]
-    cpu = vllm.get("cpu") if isinstance(vllm.get("cpu"), dict) else {}
+    cpu = ((vllm.get("devices") or {}).get("cpu") or {})
     settings = vllm_settings(cfg)
     assert cpu.get("model") == hid
     assert cpu.get("served_model_name") == "SmolLM3-3B"
@@ -2098,9 +2106,11 @@ def test_apply_smolm3_writes_native_65536_not_leftover_128k(tmp_path, monkeypatc
     assert settings["served_model_name"] == "SmolLM3-3B"
     assert int(settings["max_model_len"]) == 65536
     assert int(settings["max_model_len"]) != 131072
-    # GPU checkpoint stays on the leftover 4B slot — CPU Use must not clobber it.
+    # Shared leftover is not rewritten; GPU slot is not the CPU pick.
     assert vllm["model"] == "Qwen/Qwen3-4B-Instruct-2507"
     assert vllm["served_model_name"] == "qwen3:4b"
+    gpu = ((vllm.get("devices") or {}).get("gpu") or {})
+    assert gpu.get("model") != hid
 
 
 def test_cpu_use_smol_writes_model_and_does_not_restore_qwen(tmp_path, monkeypatch):
@@ -2155,11 +2165,12 @@ def test_cpu_use_smol_writes_model_and_does_not_restore_qwen(tmp_path, monkeypat
 
     cfg = load_config()
     vllm = cfg["local_runtime"]["vllm"]
-    cpu = vllm.get("cpu") if isinstance(vllm.get("cpu"), dict) else {}
+    cpu = ((vllm.get("devices") or {}).get("cpu") or {})
     assert cpu.get("model") == hid
     assert vllm["model"] == previous
     assert vllm_settings(cfg)["model"] == hid
     assert vllm_settings(cfg)["model"] != previous
+    assert ((vllm.get("devices") or {}).get("gpu") or {}).get("model") != hid
     assert started == [hid]
 
 
@@ -2203,7 +2214,7 @@ def test_cpu_use_failed_start_surfaces_error_keeps_smol(tmp_path, monkeypatch):
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
     cfg = load_config()
-    cpu = (cfg["local_runtime"]["vllm"].get("cpu") or {})
+    cpu = ((cfg["local_runtime"]["vllm"].get("devices") or {}).get("cpu") or {})
     assert cpu.get("model") == hid
     assert cfg["local_runtime"]["vllm"]["model"] == previous
     assert vllm_settings(cfg)["model"] == hid
@@ -2284,7 +2295,7 @@ def test_cpu_list_omits_awq_and_use_rejects_before_spawn(tmp_path, monkeypatch):
     assert started == []
     from hermes_cli.config import load_config
 
-    assert load_config()["local_runtime"]["vllm"]["model"] != "Qwen/Qwen3-8B-AWQ"
+    assert _vllm_now()["model"] != "Qwen/Qwen3-8B-AWQ"
 
     boot = client.post("/api/local-models/server", json={"action": "start"})
     assert boot.status_code == 400, boot.text

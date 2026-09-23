@@ -622,7 +622,9 @@ def test_cpu_device_quickstart_downloads_4b_not_gpu_awq(monkeypatch):
     assert plan["model"] == "Qwen/Qwen3-4B-Instruct-2507"
     assert downloaded == ["Qwen/Qwen3-4B-Instruct-2507"]
     assert occupied == []
-    assert cfg["local_runtime"]["vllm"]["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    cpu = ((cfg["local_runtime"]["vllm"].get("devices") or {}).get("cpu") or {})
+    assert cpu.get("model") == "Qwen/Qwen3-4B-Instruct-2507"
+    assert cfg["local_runtime"]["vllm"]["model"] == "Qwen/Qwen3-14B-AWQ"
     assert "AWQ" not in job["detail"]
     assert "14B" not in job["detail"]
     assert "CUDA" not in job["detail"]

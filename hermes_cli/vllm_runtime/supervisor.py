@@ -226,44 +226,14 @@ def last_serve_error_line(log_path: Path | None = None, device: str = "gpu") -> 
     return None
 
 
-def vllm_settings(config: dict | None) -> dict:
-    """``local_runtime.vllm`` merged over DEFAULT_CONFIG so a partial section still serves.
+def vllm_settings(config: dict | None = None, device: str | None = None) -> dict:
+    """Serve args for one device. ``device`` overrides chat ``selected``.
 
-    Device ``cpu`` (or a legacy ``engine: vllm-cpu``) serves the BF16 default
-    when the model is empty or still the GPU shipped AWQ id. Any other
-    explicit id — ``engine: vllm`` + ``device: cpu`` or legacy ``vllm-cpu`` —
-    is kept. A nested ``vllm.cpu.model`` is the CPU checkpoint and does not
-    replace the GPU model.
+    See ``hermes_cli.vllm_runtime.settings.vllm_settings``.
     """
-    from hermes_cli.config_defaults import DEFAULT_CONFIG
-    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.settings import vllm_settings as _settings
 
-    defaults = dict(DEFAULT_CONFIG["local_runtime"]["vllm"])
-    local = (config or {}).get("local_runtime") or {}
-    if not isinstance(local, dict):
-        local = {}
-    override = local.get("vllm") or {}
-    cpu_block: dict = {}
-    if isinstance(override, dict):
-        if isinstance(override.get("cpu"), dict):
-            cpu_block = dict(override["cpu"])
-        defaults.update({k: v for k, v in override.items() if k not in ("cpu", "device")})
-    defaults.pop("cpu", None)
-    defaults.pop("device", None)
-    if vllm_device_from_config(config) != CPU:
-        return defaults
-    from hermes_cli.vllm_runtime.recommend import (
-        as_vllm_config, gpu_shipped_model, recommend_vllm_cpu,
-    )
-
-    if str(cpu_block.get("model") or "").strip():
-        defaults.update({k: v for k, v in cpu_block.items() if k != "device"})
-        return defaults
-    model = str(defaults.get("model") or "").strip()
-    if model and model != gpu_shipped_model():
-        return defaults
-    defaults.update(as_vllm_config(recommend_vllm_cpu()))
-    return defaults
+    return _settings(config, device=device)
 
 
 def bind_host(settings: dict) -> str:

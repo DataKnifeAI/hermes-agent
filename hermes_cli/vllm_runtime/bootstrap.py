@@ -60,7 +60,7 @@ def _ensure_vllm_runtime_locked(config: dict | None, *, force: bool,
     from hermes_cli.vllm_runtime.venv import ensure_vllm_venv
 
     device = normalize_device(vllm_device_from_config(config))
-    settings = vllm_settings(config)
+    settings = vllm_settings(config, device=device)
     wanted = str(settings.get("served_model_name") or "").strip()
     current = _SUPERVISORS.get(device)
     if current is not None:
@@ -349,7 +349,6 @@ def listed_model_for_managed_endpoint(
     from hermes_cli.vllm_runtime.device import (
         CPU, GPU, GPU_ENDPOINT_KEY, CPU_ENDPOINT_KEY,
         GPU_ENDPOINT_NAME, CPU_ENDPOINT_NAME, managed_endpoint_name_for_url,
-        normalize_device,
     )
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
@@ -363,21 +362,12 @@ def listed_model_for_managed_endpoint(
     else:
         return ""
     cfg = load_config()
-    local = cfg.get("local_runtime")
-    if not isinstance(local, dict):
-        local = {}
-    vllm = dict(local.get("vllm") or {}) if isinstance(local.get("vllm"), dict) else {}
-    probe = dict(cfg)
-    probe_local = dict(local)
-    probe_vllm = dict(vllm)
-    probe_vllm["device"] = normalize_device(device)
-    probe_local["vllm"] = probe_vllm
-    probe["local_runtime"] = probe_local
-    correct = _served_name_for_device(device, vllm_settings(probe))
+    correct = _served_name_for_device(device, vllm_settings(cfg, device=device))
     held = str(current or "").strip()
+    cpu_served = str(vllm_settings(cfg, device=CPU).get("served_model_name") or "").strip()
     if device == GPU:
         _cpu_url, cpu_live = _serve_from_state_file(CPU)
-        if held and cpu_live and held == cpu_live:
+        if held and (held == cpu_live or held == cpu_served):
             return correct
         if held:
             return held
@@ -422,63 +412,54 @@ def _served_name_for_device(device: str, settings: dict) -> str:
     return configured or _DEFAULT_SERVED
 
 
-def activate_vllm_provider(config: dict | None = None) -> str:
+def activate_vllm_provider(config: dict | None = None, device: str | None = None) -> str:
     """Point chat at the selected device and record that device's endpoint.
 
     GPU and CPU are separate ``providers`` records (``vllm-gpu``, ``vllm-cpu``).
-    Starting one updates its own name and URL only. Chat stays ``provider:
-    custom`` and ``model.base_url`` follows ``local_runtime.vllm.device`` when
-    the current URL is empty or loopback. A remote URL is left alone. Returns
-    the URL that applies to chat.
+    Starting one updates its own name and URL only — a stale
+    ``providers.vllm-cpu`` (rebound / leftover 42477) refreshes when CPU
+    starts, not when GPU starts. Chat stays ``provider: custom`` and
+    ``model.base_url`` follows ``selected`` when the current URL is empty
+    or loopback. A remote URL is left alone. Returns the URL that applies
+    to chat.
     """
     from cli import save_config_value
     from hermes_cli.config import load_config, save_config
-    from hermes_cli.vllm_runtime.device import CPU, GPU, normalize_device
-    from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.device import normalize_device
+    from hermes_cli.vllm_runtime.endpoint import _state_endpoint, resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.supervisor import openai_base_url, vllm_settings
 
     cfg = config if config is not None else load_config()
-    settings = vllm_settings(cfg)
     from hermes_cli.local_engines import vllm_device_from_config
 
-    device = normalize_device(vllm_device_from_config(cfg))
-    served = _served_name_for_device(device, settings)
-    sup = get_supervisor(device)
+    selected = normalize_device(vllm_device_from_config(cfg))
+    target = normalize_device(device) if device is not None else selected
+    settings = vllm_settings(cfg, device=target)
+    served = _served_name_for_device(target, settings)
+    sup = get_supervisor(target)
     if sup is not None:
         managed = str(sup.base_url)
     else:
-        state = resolve_vllm_endpoint(cfg, wait_for_boot_s=0)
-        managed = str((state or {}).get("base_url") or openai_base_url(settings, device=device))
+        state = _state_endpoint(target) or (
+            resolve_vllm_endpoint(cfg, wait_for_boot_s=0) if target == selected else None)
+        managed = str((state or {}).get("base_url") or openai_base_url(settings, device=target))
     current = str(_model_section(cfg).get("base_url") or "").strip()
     loopback = _is_loopback_url(current)
-    write_url = managed if loopback else current
-
-    if loopback:
-        # Chat follows the selected device by URL. Provider stays custom.
-        save_config_value("model.provider", "custom")
-        save_config_value("model.default", served)
-        save_config_value("model.base_url", managed.rstrip("/"))
+    write_url = current
+    if target == selected:
+        write_url = managed if loopback else current
+        if loopback:
+            # Chat follows the selected device by URL. Provider stays custom.
+            save_config_value("model.provider", "custom")
+            save_config_value("model.default", served)
+            save_config_value("model.base_url", managed.rstrip("/"))
 
     live = load_config()
     providers = live.get("providers")
     if not isinstance(providers, dict):
         providers = {}
-    _upsert_device_endpoint(providers, device, base_url=managed, model=served)
-    other = CPU if device == GPU else GPU
-    other_url, other_live = _serve_from_state_file(other)
-    if other_url:
-        # Refresh the sibling from its own serve. Do not copy this device's id.
-        other_cfg = dict(cfg)
-        local = other_cfg.get("local_runtime")
-        if not isinstance(local, dict):
-            local = {}
-            other_cfg["local_runtime"] = local
-        vllm = dict(local.get("vllm") or {}) if isinstance(local.get("vllm"), dict) else {}
-        vllm["device"] = other
-        local["vllm"] = vllm
-        other_model = _served_name_for_device(other, vllm_settings(other_cfg))
-        _upsert_device_endpoint(
-            providers, other, base_url=other_url, model=other_model or other_live)
+    # This device only. Do not rewrite the sibling from a stale state file.
+    _upsert_device_endpoint(providers, target, base_url=managed, model=served)
     _retire_shared_vllm_slot(providers)
     live["providers"] = providers
     with suppress(Exception):
@@ -496,16 +477,18 @@ def start_managed_vllm(config: dict | None = None, *, apply_recommend: bool = Tr
     from cli import save_config_value
     from hermes_cli.config import load_config
     from hermes_cli.local_engines import ensure_managed_engine
+    from hermes_cli.vllm_runtime.device import GPU
     from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
+    from hermes_cli.vllm_runtime.settings import persist_device_overlay, persist_selected
 
+    persist_selected(GPU)
     if apply_recommend:
         rec = recommend_vllm()
         if not rec.feasible:
             raise RuntimeError(
                 f"this GPU cannot run managed vLLM at the 64k tool-loop floor ({rec.reason})"
             )
-        for key, value in as_vllm_config(rec).items():
-            save_config_value(f"local_runtime.vllm.{key}", value)
+        persist_device_overlay(GPU, as_vllm_config(rec))
     save_config_value("local_runtime.enabled", True)
     save_config_value("local_runtime.engine", "vllm")
     cfg = load_config() if config is None else config

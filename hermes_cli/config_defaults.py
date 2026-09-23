@@ -2331,8 +2331,9 @@ DEFAULT_CONFIG = {
     "local_runtime": {
         # Off = detection-only (Hermes still finds an external llama-server you run).
         "enabled": False,
-        # llamacpp | vllm. vLLM's device is local_runtime.vllm.device (gpu|cpu).
-        # A legacy engine value vllm-cpu reads as vllm + device cpu.
+        # llamacpp | vllm. vLLM chat/Turn-on device is local_runtime.vllm.selected
+        # (device is a write alias). Serve args live under vllm.devices.<id>.
+        # A legacy engine value vllm-cpu reads as vllm + selected cpu.
         "engine": "llamacpp",
         # Pinned llama.cpp release tag; bumped by Hermes releases after validation.
         "tag": "b10679",
@@ -2349,11 +2350,15 @@ DEFAULT_CONFIG = {
         "vllm": {
             "port": 0,
             "host": "127.0.0.1",
-            # Which supervised server chat uses. gpu and cpu can both be running.
+            # Chat + Turn on follow this id. ``selected`` is written beside
+            # it and is not defaulted here so a user ``device: cpu`` is not
+            # shadowed by a deep-merged ``selected: gpu``.
             "device": "gpu",
-            # GPU shipped id (16 GB AWQ). vllm-cpu does not start this —
-            # empty / this id on the CPU engine becomes recommend_vllm_cpu()
-            # (Qwen/Qwen3-4B-Instruct-2507 BF16). AWQ/FP8 cannot load there.
+            # Last-used serve args per device id. Empty in defaults — GPU/CPU
+            # picks persist under devices.gpu / devices.cpu on Use/start.
+            "devices": {},
+            # Shipped GPU fallback (16 GB AWQ). Migrates onto devices[selected]
+            # when that slot has no pick. CPU default is Qwen3-4B, not this.
             "model": "Qwen/Qwen3-8B-AWQ",
             "served_model_name": "qwen3:8b",
             "max_model_len": 65536,
