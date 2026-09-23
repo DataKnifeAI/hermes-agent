@@ -352,6 +352,11 @@ def _config_api_key_is_env_ref(endpoint_id: str) -> bool:
     return bool(isinstance(raw_key, str) and re.search(r"\$\{[^}]+\}", raw_key))
 
 
+def _endpoint_urls_match(left: str | None, right: str | None) -> bool:
+    return str(left or "").strip().rstrip("/").lower() == str(right or "").strip().rstrip("/").lower() and bool(
+        str(left or "").strip())
+
+
 def _endpoint_row(
     endpoint_id: str, name: str, base_url: str, model: str, models: List[str], context_length,
     discover_models: bool, key_entry: Dict[str, Any], is_current: bool, source: str,
@@ -363,6 +368,16 @@ def _endpoint_row(
         "has_api_key": has_api_key, "api_key_preview": api_key_preview,
         "is_current": is_current, "source": source,
     }
+
+
+def _overlay_managed_vllm_model(endpoint_id: str, base_url: str, current: str = "") -> str:
+    """GPU / CPU endpoint rows use that device's serve — never the sibling's id."""
+    try:
+        from hermes_cli.vllm_runtime.bootstrap import listed_model_for_managed_endpoint
+
+        return listed_model_for_managed_endpoint(endpoint_id, base_url, current)
+    except Exception:
+        return ""
 
 
 def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -380,18 +395,42 @@ def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
             base_url = str(raw_entry.get("base_url") or raw_entry.get("url") or raw_entry.get("api") or "").strip()
             if not base_url:
                 continue
+            from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+            # Legacy shared slot on a managed loopback. Device keys own those URLs.
+            if str(provider_id).strip().lower() == "vllm" and managed_endpoint_name_for_url(base_url):
+                continue
             endpoint_id = str(provider_id)
             models = _models_from_custom_endpoint_entry(raw_entry)
+            saved_name = str(raw_entry.get("name") or endpoint_id)
+            listed_model = str(
+                raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else "")
+            )
+            overlay = _overlay_managed_vllm_model(endpoint_id, base_url, listed_model)
+            if overlay and overlay != listed_model:
+                listed_model = overlay
+                if overlay not in models:
+                    models = [overlay, *[m for m in models if m != overlay]]
+            # ``provider: custom`` points at one device by URL. That record is
+            # current; the other device's record stays listed beside it.
+            is_current = endpoint_id == current_provider or (
+                current_provider.lower() == "custom" and _endpoint_urls_match(base_url, current_base_url))
             endpoints.append(_endpoint_row(
-                endpoint_id, str(raw_entry.get("name") or endpoint_id), base_url,
-                str(raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else "")),
-                models, raw_entry.get("context_length"), bool(raw_entry.get("discover_models", True)),
-                raw_entry, endpoint_id == current_provider, "providers",
+                endpoint_id, managed_endpoint_name_for_url(base_url) or saved_name, base_url,
+                listed_model, models, raw_entry.get("context_length"),
+                bool(raw_entry.get("discover_models", True)),
+                raw_entry, is_current, "providers",
             ))
 
-    if current_provider.lower() == "custom" and current_base_url and not any(e["id"] == "custom" for e in endpoints):
+    already_listed = any(
+        e["id"] == "custom" or _endpoint_urls_match(e.get("base_url"), current_base_url)
+        for e in endpoints)
+    if current_provider.lower() == "custom" and current_base_url and not already_listed:
+        from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
         endpoints.insert(0, _endpoint_row(
-            "custom", "Custom", current_base_url, current_model, [current_model] if current_model else [],
+            "custom", managed_endpoint_name_for_url(current_base_url) or "Custom", current_base_url, current_model,
+            [current_model] if current_model else [],
             model_cfg.get("context_length"), True, model_cfg, True, "direct-config",
         ))
 
@@ -526,7 +565,10 @@ def list_custom_endpoints(profile: Optional[str] = None):
     """
     with http_failure("GET /api/providers/custom-endpoints failed", 500, detail="Failed to list custom endpoints"):
         with _config_profile_scope(profile):
-            return _custom_endpoint_response(load_config())
+            from hermes_cli.vllm_runtime.bootstrap import hide_legacy_managed_vllm_slot
+
+            return _custom_endpoint_response(
+                hide_legacy_managed_vllm_slot(load_config(), persist=True))
 
 
 @router.post("/api/providers/custom-endpoints")

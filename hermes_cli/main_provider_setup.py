@@ -398,7 +398,16 @@ def _prompt_custom_api_mode_selection(base_url: str, current_api_mode: str = "")
 
 def _auto_provider_name(base_url: str) -> str:
     """Display name from a custom endpoint URL, e.g. "Local (localhost:11434)" or
-    "RunPod (xyz.runpod.io)" — the default offered during custom endpoint setup."""
+    "RunPod (xyz.runpod.io)" — the default offered during custom endpoint setup.
+
+    Managed vLLM loopback serves are ``vLLM GPU`` / ``vLLM CPU`` so the two
+    endpoints are not both saved as a raw ``Local (127.0.0.1:port)`` label.
+    """
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+    managed = managed_endpoint_name_for_url(base_url)
+    if managed:
+        return managed
     import re
     name = re.sub(r"/v1/?$", "", _short_url(base_url)).split("/")[0]
     if "localhost" in name or "127.0.0.1" in name:

@@ -41,7 +41,9 @@ def load_picker_context() -> ConfigContext:
     from hermes_cli.config import (
         coerce_provider_id, get_compatible_custom_providers, load_config, stringify_provider_map,
     )
-    cfg = load_config()
+    from hermes_cli.vllm_runtime.bootstrap import hide_legacy_managed_vllm_slot
+
+    cfg = hide_legacy_managed_vllm_slot(load_config(), persist=True)
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         # PyYAML parses unquoted scalars as int (`provider: 2070`); keep strings so picker/options
@@ -97,9 +99,20 @@ def build_models_payload(
     # Managed local runtime: staged GGUFs are selectable like any provider's models, but
     # list_authenticated_providers can't know about them (no credential — reachability is the
     # credential), so inject the row here where every picker surface inherits it.
+    # vLLM GPU / vLLM CPU already have ``providers.vllm-gpu`` / ``providers.vllm-cpu``
+    # rows. The synthetic slug ``vllm`` row repeats whichever device is selected.
     local_row = _local_runtime_row(ctx)
+    if _managed_device_rows_cover(rows, local_row):
+        rows = _without_slug(rows, "llamacpp")
+        local_row = None
     if local_row is not None:
-        rows = _without_slug(rows, "llamacpp") + [local_row]
+        if _slug(local_row) == "vllm":
+            rows = [
+                r for r in rows
+                if _slug(r) != "llamacpp" and not _legacy_managed_vllm_row(r)
+            ] + [local_row]
+        else:
+            rows = _without_slug(_without_slug(rows, "llamacpp"), "vllm") + [local_row]
         # A live session on the managed server reports provider "custom" (raw base_url label), which
         # would materialize a duplicate "Custom endpoint" row with the same staged models stealing the
         # checkmark. The Local row owns the managed server's identity — drop such custom rows.
@@ -122,8 +135,9 @@ def build_models_payload(
         # that one row so the UI shows the saved selection + a re-auth affordance instead of appearing
         # to jump providers. Exception: a "custom" current on the managed local server is already
         # represented by the Local row — the skeleton would resurrect the duplicate removed above.
-        _local_owns_current = bool(local_row and local_row.get("is_current")
-                                   and (ctx.current_provider or "").lower() == "custom")
+        # A "custom" current on a managed serve is already a device row (or the
+        # synthetic local row). The skeleton would resurrect a second endpoint.
+        _local_owns_current = _custom_session_already_listed(rows, ctx, local_row)
         if not _local_owns_current:
             rows = list(rows) + _append_unconfigured_rows(rows, ctx, current_only=True)
 
@@ -663,10 +677,111 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
                 row["unavailable_models"] = []
 
 
+def _custom_session_already_listed(rows: list[dict], ctx: "ConfigContext", local_row: dict | None) -> bool:
+    """True when ``provider: custom`` is already represented in *rows*.
+
+    The unconfigured-current skeleton is a second "Custom endpoint" group for
+    the same managed URL the device row already lists.
+    """
+    if (ctx.current_provider or "").strip().lower() != "custom":
+        return False
+    if local_row is not None and local_row.get("is_current"):
+        return True
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+    if managed_endpoint_name_for_url(ctx.current_base_url) is None:
+        return False
+    target = str(ctx.current_base_url or "").strip().rstrip("/").lower()
+    return any(
+        str(row.get("api_url") or "").strip().rstrip("/").lower() == target
+        for row in rows
+    )
+
+
+def _managed_device_rows_cover(rows: list[dict], local_row: dict | None) -> bool:
+    """True when a device provider row already is the synthetic vLLM serve.
+
+    ``providers.vllm-gpu`` / ``providers.vllm-cpu`` (or a custom row on that
+    same managed URL) are the endpoint the picker should show. The synthetic
+    slug ``vllm`` row uses the same display name and would list the device twice.
+    """
+    if local_row is None or _slug(local_row) != "vllm":
+        return False
+    device_name = str(local_row.get("name") or "").strip()
+    if not device_name:
+        return False
+    from hermes_cli.vllm_runtime.device import (
+        CPU_ENDPOINT_KEY, GPU_ENDPOINT_KEY, managed_endpoint_name_for_url,
+    )
+
+    keys = {GPU_ENDPOINT_KEY, CPU_ENDPOINT_KEY}
+    for row in rows:
+        slug = _slug(row)
+        url_name = managed_endpoint_name_for_url(str(row.get("api_url") or ""))
+        if url_name == device_name and slug in keys | {"custom"}:
+            return True
+        if slug in keys and str(row.get("name") or "").strip() == device_name:
+            return True
+    return False
+
+
+def _legacy_managed_vllm_row(row: dict) -> bool:
+    """Legacy ``providers.vllm`` whose URL is a managed loopback, not a remote box."""
+    if _slug(row) != "vllm" or row.get("source") == "local-runtime":
+        return False
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+    return managed_endpoint_name_for_url(str(row.get("api_url") or "")) is not None
+
+
+def _vllm_runtime_row(ctx: "ConfigContext") -> dict | None:
+    """Served vLLM id as a selectable row named for the configured device."""
+    from hermes_cli.config import load_config
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    cfg = load_config()
+    settings = vllm_settings(cfg)
+    from hermes_cli.vllm_runtime.bootstrap import listed_model_for_managed_endpoint
+    from hermes_cli.vllm_runtime.device import managed_endpoint_key
+
+    device = vllm_device_from_config(cfg)
+    served = listed_model_for_managed_endpoint(
+        managed_endpoint_key(device), "",
+        str(settings.get("served_model_name") or settings.get("model") or "").strip())
+    if not served:
+        served = str(settings.get("served_model_name") or settings.get("model") or "").strip()
+    if not served:
+        return None
+    current = (ctx.current_provider or "").strip().lower() == "vllm"
+    if not current:
+        try:
+            from hermes_cli.vllm_runtime.endpoint import _state_endpoint
+
+            managed = _state_endpoint()
+            current = bool(managed and (ctx.current_base_url or "").strip().rstrip("/")
+                           == str(managed.get("base_url") or "").rstrip("/"))
+        except Exception:
+            current = False
+    return _row("vllm", managed_endpoint_name(vllm_device_from_config(cfg)), current,
+                models=[served], total_models=1, source="local-runtime",
+                authenticated=True, auth_type="local", warning=None)
+
+
 def _local_runtime_row(ctx: "ConfigContext") -> dict | None:
-    """The ``llamacpp`` row from staged GGUFs (``None`` when none) — downloaded models must be selectable
-    before the server runs (selection starts it via the runtime_provider seam)."""
+    """Active-engine Local row: staged GGUFs for llama.cpp, served id for vLLM.
+
+    Downloaded / configured models must be selectable before the server runs
+    (selection starts it via the runtime_provider seam).
+    """
     try:
+        from hermes_cli.config import load_config
+        from hermes_cli.local_engines import engine_from_config
+
+        if engine_from_config(load_config()) == "vllm":
+            return _vllm_runtime_row(ctx)
+
         from hermes_cli.local_runtime.bootstrap import staged_model_ids
 
         staged = staged_model_ids()

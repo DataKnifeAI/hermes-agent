@@ -1824,17 +1824,19 @@ def check_compression_model_feasibility(agent: Any) -> None:
             config_context_length=getattr(agent, "_aux_compression_context_length_config", None),
             provider=_aux_provider, custom_providers=agent._custom_providers,
         )
-        # Aux model must meet MINIMUM_CONTEXT_LENGTH like the main model, else it cannot summarise a full window.
+        # Aux must meet MINIMUM_CONTEXT_LENGTH; it has to summarise a full window.
+        # Main managed GPU 14B may init at native 40k; compression still needs >=64k.
         if aux_context and aux_context < MINIMUM_CONTEXT_LENGTH:
             raise ValueError(
                 f"Auxiliary compression model {aux_model} has a context "
                 f"window of {aux_context:,} tokens, which is below the "
-                f"minimum {MINIMUM_CONTEXT_LENGTH:,} required by Hermes "
-                f"Agent.  Choose a compression model with at least "
+                f"minimum {MINIMUM_CONTEXT_LENGTH:,} required for "
+                f"compression.  Choose a compression model with at least "
                 f"{MINIMUM_CONTEXT_LENGTH // 1000}K context (set "
-                f"auxiliary.compression.model in config.yaml), or set "
-                f"auxiliary.compression.context_length to override the "
-                f"detected value if it is wrong."
+                f"auxiliary.compression.model in config.yaml).  "
+                f"If the server already reported this window, do not set "
+                f"auxiliary.compression.context_length above it — turn on "
+                f"the CPU 4B serve as aux instead."
             )
         if aux_context < agent.context_compressor.threshold_tokens:
             _lower_threshold_to_aux_context(

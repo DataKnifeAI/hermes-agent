@@ -76,6 +76,55 @@ function cleanErrorText(value: string) {
   return value.replace(/^Error:\s*/, '').trim()
 }
 
+function isGenericHttpStatusText(value: string): boolean {
+  return /^(?:(?:\d{3}:\s*)|(?:HTTP Error \d{3}:\s*))?(Bad Request|Unauthorized|Forbidden|Not Found|Internal Server Error)$/i.test(
+    value.trim()
+  )
+}
+
+/** FastAPI/Starlette ``{"detail": "..."}`` (or a validation list) from an IPC error. */
+function httpErrorDetail(message: string): string {
+  const unwrapped = message.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? message
+  const cleaned = cleanErrorText(unwrapped)
+  const body = cleaned.replace(/^\d{3}:\s*/, '').trim()
+  const jsonBlob = body.match(/\{[\s\S]*\}/)?.[0]
+
+  if (jsonBlob) {
+    try {
+      const parsed = JSON.parse(jsonBlob) as { detail?: unknown }
+      const detail = parsed.detail
+
+      if (typeof detail === 'string' && detail.trim()) {
+        return detail.trim()
+      }
+
+      if (Array.isArray(detail)) {
+        const parts = detail
+          .map(item => (typeof item === 'string' ? item : (item as { msg?: string })?.msg))
+          .filter((part): part is string => Boolean(part?.trim()))
+
+        if (parts.length > 0) {
+          return parts.join('; ')
+        }
+      }
+    } catch {
+      // Fall through to the quoted-detail regex / raw text.
+    }
+  }
+
+  const quoted = cleaned.match(/"detail"\s*:\s*"((?:\\.|[^"\\])*)"/)?.[1]
+
+  if (quoted) {
+    try {
+      return JSON.parse(`"${quoted}"`) as string
+    } catch {
+      return quoted
+    }
+  }
+
+  return body || cleaned
+}
+
 /** True when an error string is a disk-full / ENOSPC / SQLITE_FULL failure. */
 export function isDiskFullErrorMessage(message: string): boolean {
   return (
@@ -150,12 +199,11 @@ function summarizeErrorMessage(message: string, fallback: string) {
 // rethrow) can reuse the same IPC-unwrapping + summarizing as notifyError.
 export function readableError(error: unknown, fallback: string): { message: string; detail?: string } {
   const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
-  const unwrapped = raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw
-  const cleaned = cleanErrorText(unwrapped)
-  const detail = cleaned.match(/"detail"\s*:\s*"([^"]+)"/)?.[1] ?? cleaned
-  const summary = summarizeErrorMessage(detail, fallback)
+  const detail = httpErrorDetail(raw)
+  const usable = isGenericHttpStatusText(detail) ? fallback : detail
+  const summary = summarizeErrorMessage(usable, fallback)
 
-  return { message: summary, detail: detail === summary ? undefined : detail }
+  return { message: summary, detail: detail === summary || isGenericHttpStatusText(detail) ? undefined : detail }
 }
 
 export function notify(input: NotificationInput): string {

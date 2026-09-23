@@ -60,6 +60,10 @@ describe('localSetupEligible', () => {
     expect(localSetupEligible('local', null, [fittingModel()])).toBe(false)
     expect(localSetupEligible('local', status(), null)).toBe(false)
   })
+
+  it('does not offer the GGUF setup tip when the engine is vLLM', () => {
+    expect(localSetupEligible('local', status({ engine: 'vllm' }), [fittingModel()])).toBe(false)
+  })
 })
 
 describe('localSetupDue', () => {

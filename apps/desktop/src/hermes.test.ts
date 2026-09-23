@@ -31,7 +31,10 @@ import {
   setApiRequestProfile,
   speakText,
   transcribeAudio,
-  triggerCronJob
+  triggerCronJob,
+  setLocalServer,
+  useVllm,
+  VLLM_START_REQUEST_TIMEOUT_MS
 } from './hermes'
 import { refreshActiveProfile } from './store/profile'
 import { $transcriptTailBySessionId, transcriptTailState } from './store/transcript-tail'
@@ -494,6 +497,33 @@ describe('Hermes REST helpers', () => {
     const call = api.mock.calls[0]?.[0] as { path: string; timeoutMs?: number }
     expect(call.path).toBe('/api/status')
     expect(call.timeoutMs).toBeUndefined()
+  })
+
+  it('waits through vLLM CUDA-graph cold start on Use and server start', async () => {
+    api.mockResolvedValue({ ok: true })
+
+    await useVllm('acme/nemotron-awq')
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/local-models/vllm/use',
+        timeoutMs: VLLM_START_REQUEST_TIMEOUT_MS
+      })
+    )
+    expect(VLLM_START_REQUEST_TIMEOUT_MS).toBeGreaterThanOrEqual(180_000)
+
+    api.mockClear()
+    await setLocalServer('start')
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/local-models/server',
+        timeoutMs: VLLM_START_REQUEST_TIMEOUT_MS
+      })
+    )
+
+    api.mockClear()
+    await setLocalServer('stop')
+    const stop = api.mock.calls[0]?.[0] as { timeoutMs?: number }
+    expect(stop.timeoutMs).toBeUndefined()
   })
 
   it('tags cross-profile message reads for Electron routing and backend lookup', async () => {

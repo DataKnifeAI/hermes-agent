@@ -8,6 +8,7 @@ import { modelSearchText } from '@/lib/model-search-text'
 import { currentPickerSelection } from '@/lib/model-status-label'
 import { foldIncludes, normalize } from '@/lib/text'
 import { useStoreSelector } from '@/lib/use-session-slice'
+import { isLocalProviderSlug, pickerHeaderProviderLabel, providerGroupLabel } from '@/lib/local-provider'
 import { $localModelsEnabled } from '@/store/local-models-flag'
 import { $localRuntimeJobs, runningModelDownloads, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
 import type { LocalModelLoadProgress, ModelOptionProvider, ModelPricing } from '@/types/hermes'
@@ -185,7 +186,13 @@ export function ModelPickerDialog({
           <DialogTitle>{copy.title}</DialogTitle>
           <DialogDescription className="font-mono text-xs leading-relaxed">
             {copy.current} {optionsModel || currentModel || copy.unknown}
-            {optionsProvider || currentProvider ? ` · ${optionsProvider || currentProvider}` : ''}
+            {optionsProvider || currentProvider
+              ? ` · ${pickerHeaderProviderLabel(
+                  providers.find(provider => provider.slug === (optionsProvider || currentProvider)),
+                  optionsProvider || currentProvider,
+                  copy.localDownloadsHeading
+                )}`
+              : ''}
           </DialogDescription>
         </DialogHeader>
 
@@ -276,21 +283,21 @@ function ModelResults({
   const localModelsShown = $localModelsEnabled.get()
 
   const configured = providers.filter(
-    p => (p.models ?? []).length > 0 && (localModelsShown || p.slug !== LOCAL_PROVIDER_SLUG)
+    p => (p.models ?? []).length > 0 && (localModelsShown || !isLocalProviderSlug(p.slug))
   )
 
   // In-flight local downloads render as disabled progress rows: inside the
   // Local group when it exists, else as their own group (first download —
   // nothing staged yet, so the backend reports no Local provider at all).
   const visibleDownloads = downloads.filter(job => !q || foldIncludes(job.target || '', q))
-  const hasLocalGroup = configured.some(p => p.slug === LOCAL_PROVIDER_SLUG)
+  const hasLocalGroup = configured.some(p => isLocalProviderSlug(p.slug))
 
   return (
     <>
       {configured.map(provider => {
         // Preserve the backend's curated order — filter in place, no re-sort.
         const models = (provider.models ?? []).filter(m => matches(provider, m))
-        const groupDownloads = provider.slug === LOCAL_PROVIDER_SLUG ? visibleDownloads : []
+        const groupDownloads = isLocalProviderSlug(provider.slug) ? visibleDownloads : []
 
         if (models.length === 0 && groupDownloads.length === 0) {
           return null
@@ -375,10 +382,6 @@ function ModelResults({
     </>
   )
 }
-
-// The backend's provider row for staged local models (inventory.py's
-// _local_runtime_row). Downloads-in-flight attach to this group.
-const LOCAL_PROVIDER_SLUG = 'llamacpp'
 
 // A model still downloading: visible so the user knows it's coming (and
 // where it will land), disabled so it can't be selected early, with the
@@ -510,9 +513,9 @@ function ProviderHeading({ provider }: { provider: ModelOptionProvider }) {
 
   return (
     <span className="flex min-w-0 items-center gap-2">
-      <span className="truncate">{provider.name}</span>
+      <span className="truncate">{providerGroupLabel(provider, copy.localDownloadsHeading)}</span>
       <span className="font-mono text-xs font-normal normal-case tracking-normal text-muted-foreground">
-        {provider.slug} · {provider.total_models ?? provider.models?.length ?? 0}
+        {isLocalProviderSlug(provider.slug) ? 'local' : provider.slug} · {provider.total_models ?? provider.models?.length ?? 0}
       </span>
       {tierBadge}
     </span>

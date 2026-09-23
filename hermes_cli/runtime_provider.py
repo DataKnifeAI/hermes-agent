@@ -727,6 +727,24 @@ _VERTEX_NAMES = ("vertex", "google-vertex", "vertex-ai", "gcp-vertex", "vertexai
 _LOCAL_BYPASS_CLOUD_HOSTS = ("openrouter.ai", "anthropic.com", "openai.com")
 
 
+def _hidden_legacy_vllm_slot(requested_provider: str, block: dict) -> bool:
+    """Retired managed ``providers.vllm`` (empty URL, or a managed loopback).
+
+    Chat stays ``provider: custom`` on the selected device URL. The slot is
+    hidden so the picker does not list it twice; that ``enabled: false`` is
+    not Turn off. A remote ``providers.vllm`` the user disabled still raises.
+    Turn on / Turn off is ``local_runtime.enabled``.
+    """
+    if str(requested_provider or "").strip().lower() != "vllm":
+        return False
+    url = str(block.get("base_url") or block.get("url") or block.get("api") or "").strip()
+    if not url:
+        return True
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+
+    return managed_endpoint_name_for_url(url) is not None
+
+
 def _raise_if_provider_disabled(requested_provider: str) -> None:
     """Honour ``providers.<name>.enabled: false`` for built-ins too (the custom lookup gate only
     covers custom blocks); a typed error lets the fallback chain advance."""
@@ -734,6 +752,8 @@ def _raise_if_provider_disabled(requested_provider: str) -> None:
     provs_cfg = full_cfg.get("providers") if isinstance(full_cfg, dict) else None
     block = provs_cfg.get(requested_provider) if isinstance(provs_cfg, dict) else None
     if isinstance(block, dict) and not _config_mod.is_provider_enabled(block):
+        if _hidden_legacy_vllm_slot(requested_provider, block):
+            return
         raise ValueError(f"provider {requested_provider!r} is disabled in config "
                          f"(providers.{requested_provider}.enabled: false)")
 
