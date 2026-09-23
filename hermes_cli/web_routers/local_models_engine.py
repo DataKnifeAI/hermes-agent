@@ -1012,11 +1012,6 @@ def delete_vllm_model(hf_id: str) -> dict[str, Any]:
         from hermes_cli.vllm_runtime.settings import persist_device_overlay
 
         persist_device_overlay(device, {"model": "", "served_model_name": ""})
-        shared = (cfg.get("local_runtime") or {}).get("vllm")
-        shared = shared if isinstance(shared, dict) else {}
-        if str(shared.get("model") or "").strip() == hid:
-            save_config_value("local_runtime.vllm.model", "")
-            save_config_value("local_runtime.vllm.served_model_name", "")
         write_last_error(MODEL_REMOVED_MSG)
     return {"ok": True}
 

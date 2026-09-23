@@ -6,16 +6,21 @@ One public engine (``vllm``). Chat and Turn on follow ``selected``
 not more engines.
 
 Old shared ``vllm.model`` / ``served_model_name`` / serve knobs migrate
-on read onto the selected device only. A nested ``vllm.cpu`` block
+on read onto the selected device only and are dropped from the saved
+block once ``devices.<id>`` holds a pick. A nested ``vllm.cpu`` block
 (intermediate schema) becomes ``devices.cpu``; the leftover top-level
 model is the GPU checkpoint, not a second copy of the CPU pick.
 """
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from hermes_cli.vllm_runtime.device import CPU, ENGINE_CPU, GPU, normalize_device
+
+_PERSIST_LOCK = threading.Lock()
+_PERSISTING = False
 
 DEVICE_SERVE_KEYS = (
     "model",
@@ -74,7 +79,7 @@ def selected_device(config: dict | None) -> str:
 
 
 def migrate_vllm_devices(vllm: dict | None, *, selected: str) -> dict[str, dict]:
-    """Fold shared / legacy keys into ``devices``. In-memory; does not persist.
+    """Fold shared / legacy keys into ``devices``.
 
     * An existing ``devices.<id>.model`` wins for that id.
     * Legacy ``vllm.cpu.model`` becomes ``devices.cpu``.
@@ -85,6 +90,9 @@ def migrate_vllm_devices(vllm: dict | None, *, selected: str) -> dict[str, dict]
       - otherwise attach to ``selected`` only, never both;
       - shipped GPU AWQ on a CPU-selected config is not an explicit CPU
         pick (CPU default stays Qwen3-4B).
+
+    ``apply_migrated_vllm`` / ``persist_migrated_vllm`` write this fold
+    and drop leftover shared keys so the next start cannot resurrect them.
     """
     raw = _as_dict(vllm)
     out: dict[str, dict] = {}
@@ -94,7 +102,9 @@ def migrate_vllm_devices(vllm: dict | None, *, selected: str) -> dict[str, dict]
             out[name] = dict(block)
 
     legacy_cpu = _as_dict(raw.get("cpu"))
-    if _has_model(legacy_cpu) and not _has_model(out.get(CPU)):
+    # A devices.cpu.model key (including "") is an explicit slot. Do not
+    # refill it from the leftover nest after the user cleared the pick.
+    if _has_model(legacy_cpu) and "model" not in (out.get(CPU) or {}):
         merged = dict(out.get(CPU) or {})
         merged.update(_serve_subset(legacy_cpu))
         out[CPU] = merged
@@ -115,11 +125,83 @@ def migrate_vllm_devices(vllm: dict | None, *, selected: str) -> dict[str, dict]
         target = None
     else:
         target = selected
-    if target and not _has_model(out.get(target)):
+    if target and "model" not in (out.get(target) or {}):
         merged = dict(out.get(target) or {})
         merged.update(shared)
         out[target] = merged
     return out
+
+
+def apply_migrated_vllm(config: dict | None) -> bool:
+    """Fold leftovers into ``devices`` and drop them. True if *config* changed.
+
+    Once any ``devices.<id>`` has a model, shared ``vllm.model`` /
+    ``served_model_name`` / other serve knobs are removed. The nested
+    ``vllm.cpu`` block is removed once ``devices.cpu`` has a model.
+    Process keys (``port`` / ``host`` / ``python``) and ``selected`` stay.
+    """
+    if not isinstance(config, dict):
+        return False
+    local = config.get("local_runtime")
+    if not isinstance(local, dict):
+        return False
+    vllm = local.get("vllm")
+    if not isinstance(vllm, dict):
+        return False
+    devices = migrate_vllm_devices(vllm, selected=selected_device(config))
+    changed = False
+    existing = _as_dict(vllm.get("devices"))
+    for name, block in devices.items():
+        if not _has_model(block):
+            continue
+        if existing.get(name) != block:
+            existing[name] = dict(block)
+            changed = True
+    if any(_has_model(block) for block in existing.values()):
+        if vllm.get("devices") != existing:
+            vllm["devices"] = existing
+            changed = True
+        for key in DEVICE_SERVE_KEYS:
+            if key in vllm:
+                del vllm[key]
+                changed = True
+        if _has_model(existing.get(CPU)) and "cpu" in vllm:
+            del vllm["cpu"]
+            changed = True
+    return changed
+
+
+def persist_migrated_vllm() -> bool:
+    """Write migrated devices and drop leftover keys from the live config.
+
+    Uses ``save_config`` without ``merge_existing`` so deletions stick.
+    No-op when the on-disk block is already clean. True if the file changed.
+    """
+    global _PERSISTING
+    from hermes_cli.config import is_managed, read_raw_config, save_config
+
+    if is_managed():
+        return False
+    with _PERSIST_LOCK:
+        if _PERSISTING:
+            return False
+        _PERSISTING = True
+        try:
+            raw = read_raw_config()
+            if not isinstance(raw, dict) or not raw:
+                return False
+            if not apply_migrated_vllm(raw):
+                return False
+            save_config(raw)
+            return True
+        except Exception:
+            return False
+        finally:
+            _PERSISTING = False
+
+
+def _maybe_persist_migrated_vllm() -> None:
+    persist_migrated_vllm()
 
 
 def _default_gpu_serve() -> dict:
@@ -158,6 +240,7 @@ def vllm_settings(config: dict | None = None, device: str | None = None) -> dict
             out[key] = block[key]
         elif key in defaults and key not in out:
             out[key] = defaults[key]
+    _maybe_persist_migrated_vllm()
     return out
 
 
@@ -168,6 +251,7 @@ def persist_selected(device: str | None) -> None:
     chosen = normalize_device(device)
     save_config_value("local_runtime.vllm.selected", chosen)
     save_config_value("local_runtime.vllm.device", chosen)
+    persist_migrated_vllm()
 
 
 def persist_device_overlay(device: str | None, overlay: dict | None) -> None:
@@ -178,6 +262,7 @@ def persist_device_overlay(device: str | None, overlay: dict | None) -> None:
     for key, value in _as_dict(overlay).items():
         if key in DEVICE_SERVE_KEYS:
             save_config_value(f"{prefix}.{key}", value)
+    persist_migrated_vllm()
 
 
 def ensure_device_model(config: dict | None, device: str | None) -> dict:

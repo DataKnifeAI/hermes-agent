@@ -2106,11 +2106,12 @@ def test_apply_smolm3_writes_native_65536_not_leftover_128k(tmp_path, monkeypatc
     assert settings["served_model_name"] == "SmolLM3-3B"
     assert int(settings["max_model_len"]) == 65536
     assert int(settings["max_model_len"]) != 131072
-    # Shared leftover is not rewritten; GPU slot is not the CPU pick.
-    assert vllm["model"] == "Qwen/Qwen3-4B-Instruct-2507"
-    assert vllm["served_model_name"] == "qwen3:4b"
     gpu = ((vllm.get("devices") or {}).get("gpu") or {})
     assert gpu.get("model") != hid
+    raw = yaml.safe_load((home / "config.yaml").read_text())
+    leftover = ((raw.get("local_runtime") or {}).get("vllm") or {})
+    assert "model" not in leftover
+    assert "served_model_name" not in leftover
 
 
 def test_cpu_use_smol_writes_model_and_does_not_restore_qwen(tmp_path, monkeypatch):
@@ -2167,10 +2168,13 @@ def test_cpu_use_smol_writes_model_and_does_not_restore_qwen(tmp_path, monkeypat
     vllm = cfg["local_runtime"]["vllm"]
     cpu = ((vllm.get("devices") or {}).get("cpu") or {})
     assert cpu.get("model") == hid
-    assert vllm["model"] == previous
     assert vllm_settings(cfg)["model"] == hid
     assert vllm_settings(cfg)["model"] != previous
     assert ((vllm.get("devices") or {}).get("gpu") or {}).get("model") != hid
+    raw = yaml.safe_load((home / "config.yaml").read_text())
+    leftover = ((raw.get("local_runtime") or {}).get("vllm") or {})
+    assert leftover.get("devices", {}).get("cpu", {}).get("model") == hid
+    assert "model" not in leftover
     assert started == [hid]
 
 
@@ -2216,7 +2220,6 @@ def test_cpu_use_failed_start_surfaces_error_keeps_smol(tmp_path, monkeypatch):
     cfg = load_config()
     cpu = ((cfg["local_runtime"]["vllm"].get("devices") or {}).get("cpu") or {})
     assert cpu.get("model") == hid
-    assert cfg["local_runtime"]["vllm"]["model"] == previous
     assert vllm_settings(cfg)["model"] == hid
     assert vllm_settings(cfg)["model"] != previous
     assert "SIGKILL" in (read_last_error("cpu") or read_last_error() or "")

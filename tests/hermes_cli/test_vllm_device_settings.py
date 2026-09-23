@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 import yaml
 from fastapi.testclient import TestClient
 
 from hermes_cli.vllm_runtime.recommend import as_vllm_config, recommend_vllm
-from hermes_cli.vllm_runtime.settings import migrate_vllm_devices, vllm_settings
+from hermes_cli.vllm_runtime.settings import (
+    migrate_vllm_devices, persist_migrated_vllm, vllm_settings,
+)
 
 
 _GIB = 1 << 30
@@ -275,3 +279,113 @@ def test_cpu_activate_refreshes_stale_provider_url(tmp_path, monkeypatch):
     after = load_config()["providers"]["vllm-cpu"]["base_url"]
     assert after.rstrip("/") == "http://127.0.0.1:18436/v1"
     assert "42477" not in after
+
+
+def test_migrate_save_persists_devices_and_cpu_url_follows_server_json(
+        tmp_path, monkeypatch):
+    """migrate+save keeps both devices, drops leftover nest/shared keys,
+    and CPU start rewrites providers.vllm-cpu from that device's server.json.
+    GPU start must not write the CPU URL.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("cli._hermes_home", home)
+    import hermes_constants
+
+    hermes_constants._default_hermes_root_memo = None
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home)
+
+    cpu_live = "http://127.0.0.1:52269/v1"
+    gpu_live = "http://127.0.0.1:18435/v1"
+    stale_cpu = "http://127.0.0.1:18436/v1"
+    _write_cfg(home, {
+        "model": {
+            "provider": "custom",
+            "base_url": gpu_live,
+            "default": "qwen3:14b",
+        },
+        "providers": {
+            "vllm": {"name": "vLLM CPU", "base_url": "", "enabled": False},
+            "vllm-gpu": {
+                "name": "vLLM GPU",
+                "base_url": gpu_live,
+                "model": "qwen3:14b",
+            },
+            "vllm-cpu": {
+                "name": "vLLM CPU",
+                "base_url": stale_cpu,
+                "model": "SmolLM3-3B",
+            },
+        },
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {
+                "selected": "gpu",
+                "device": "gpu",
+                "devices": {
+                    "gpu": {
+                        "model": _GPU_14B,
+                        "served_model_name": "qwen3:14b",
+                        "max_model_len": 65536,
+                    },
+                },
+                "model": _SMOL,
+                "served_model_name": "SmolLM3-3B",
+                "max_model_len": 65536,
+                "cpu": {
+                    "model": _SMOL,
+                    "served_model_name": "SmolLM3-3B",
+                    "max_model_len": 65536,
+                },
+            },
+        },
+    })
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    for device, port, served in (
+        ("gpu", 18435, "qwen3:14b"),
+        ("cpu", 52269, "SmolLM3-3B"),
+    ):
+        path = state_path(device)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "base_url": f"http://127.0.0.1:{port}/v1",
+            "pid": 1,
+            "served_model_name": served,
+        }), encoding="utf-8")
+
+    from hermes_cli.config import load_config, read_raw_config
+    import hermes_cli.vllm_runtime.bootstrap as boot
+
+    monkeypatch.setattr(boot, "_SUPERVISORS", {"gpu": None, "cpu": None})
+    assert persist_migrated_vllm() is True
+    raw = read_raw_config()
+    vllm = (raw.get("local_runtime") or {}).get("vllm") or {}
+    devices = vllm.get("devices") or {}
+    assert (devices.get("gpu") or {}).get("model") == _GPU_14B
+    assert (devices.get("cpu") or {}).get("model") == _SMOL
+    assert int((devices.get("cpu") or {}).get("max_model_len") or 0) == 65536
+    assert "model" not in vllm
+    assert "served_model_name" not in vllm
+    assert "cpu" not in vllm
+    assert persist_migrated_vllm() is False
+
+    boot.activate_vllm_provider(load_config(), device="cpu")
+    after_cpu = load_config()
+    assert after_cpu["providers"]["vllm-cpu"]["base_url"].rstrip("/") == cpu_live
+    assert after_cpu["providers"]["vllm-cpu"]["model"] == "SmolLM3-3B"
+    assert after_cpu["providers"]["vllm-gpu"]["base_url"].rstrip("/") == gpu_live
+    assert after_cpu["model"]["base_url"].rstrip("/") == gpu_live
+    assert after_cpu["model"]["default"] == "qwen3:14b"
+    leftover = read_raw_config()["local_runtime"]["vllm"]
+    assert "model" not in leftover
+    assert "cpu" not in leftover
+
+    boot.activate_vllm_provider(load_config(), device="gpu")
+    after_gpu = load_config()
+    assert after_gpu["providers"]["vllm-cpu"]["base_url"].rstrip("/") == cpu_live
+    assert after_gpu["providers"]["vllm-gpu"]["base_url"].rstrip("/") == gpu_live
+    assert "18436" not in after_gpu["providers"]["vllm-cpu"]["base_url"]
+    assert after_gpu["model"]["base_url"].rstrip("/") == gpu_live

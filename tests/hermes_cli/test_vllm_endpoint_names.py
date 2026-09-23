@@ -464,10 +464,15 @@ def test_cpu_use_smol_does_not_write_gpu_endpoint(tmp_path, monkeypatch):
     assert cpu["base_url"].rstrip("/") == cpu_url
     assert after["model"]["base_url"].rstrip("/") == cpu_url
     assert after["model"]["default"] == "SmolLM3-3B"
-    assert after["local_runtime"]["vllm"]["model"] == "Qwen/Qwen3-14B-AWQ"
-    assert after["local_runtime"]["vllm"]["served_model_name"] == "qwen3:14b"
-    cpu_block = ((after["local_runtime"]["vllm"].get("devices") or {}).get("cpu") or {})
-    assert cpu_block.get("model") == "HuggingFaceTB/SmolLM3-3B"
+    devices = after["local_runtime"]["vllm"].get("devices") or {}
+    assert (devices.get("gpu") or {}).get("model") == "Qwen/Qwen3-14B-AWQ"
+    assert (devices.get("gpu") or {}).get("served_model_name") == "qwen3:14b"
+    assert (devices.get("cpu") or {}).get("model") == "HuggingFaceTB/SmolLM3-3B"
+    raw = yaml.safe_load((home / "config.yaml").read_text())
+    leftover = (raw.get("local_runtime") or {}).get("vllm") or {}
+    assert "model" not in leftover
+    assert "served_model_name" not in leftover
+    assert not isinstance(leftover.get("cpu"), dict)
 
     listed = {row["id"]: row for row in _custom_endpoint_response(after)["endpoints"]}
     assert listed["vllm-gpu"]["model"] != "SmolLM3-3B"

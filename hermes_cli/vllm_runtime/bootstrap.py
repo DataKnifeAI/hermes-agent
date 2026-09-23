@@ -435,9 +435,14 @@ def activate_vllm_provider(config: dict | None = None, device: str | None = None
     selected = normalize_device(vllm_device_from_config(cfg))
     target = normalize_device(device) if device is not None else selected
     settings = vllm_settings(cfg, device=target)
-    served = _served_name_for_device(target, settings)
+    state_url, state_served = _serve_from_state_file(target)
+    served = state_served or _served_name_for_device(target, settings)
     sup = get_supervisor(target)
-    if sup is not None:
+    # This device's server.json is the URL we persist. Supervisor is the
+    # fallback when the state file is missing (tests / first spawn).
+    if state_url:
+        managed = state_url
+    elif sup is not None:
         managed = str(sup.base_url)
     else:
         state = _state_endpoint(target) or (
@@ -462,8 +467,12 @@ def activate_vllm_provider(config: dict | None = None, device: str | None = None
     _upsert_device_endpoint(providers, target, base_url=managed, model=served)
     _retire_shared_vllm_slot(providers)
     live["providers"] = providers
+    from hermes_cli.vllm_runtime.settings import apply_migrated_vllm, persist_migrated_vllm
+
+    apply_migrated_vllm(live)
     with suppress(Exception):
         save_config(live, merge_existing=True)
+    persist_migrated_vllm()
     return write_url.rstrip("/")
 
 
