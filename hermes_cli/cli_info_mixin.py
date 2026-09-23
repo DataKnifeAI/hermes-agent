@@ -191,7 +191,19 @@ class CLIInfoMixin:
             elif _port == 1234:
                 fix = "LM Studio fix: Set context length in model settings → reload model"
             else:
-                fix = "Fix: Set model.context_length in config.yaml, or increase your server's context setting"
+                _managed = None
+                try:
+                    from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+                    _managed = managed_endpoint_name_for_url(base_url)
+                except Exception:
+                    _managed = None
+                if _managed:
+                    fix = (
+                        "This is the checkpoint's native window. Do not set "
+                        "model.context_length above it. Turn on CPU 4B as compression aux."
+                    )
+                else:
+                    fix = "Fix: Set model.context_length in config.yaml, or increase your server's context setting"
             self._console_print(f"[dim]   {fix}[/]")
 
         from hermes_cli.model_switch import is_nous_hermes_non_agentic

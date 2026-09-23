@@ -580,7 +580,7 @@ def _reconcile_local_cached_context_length(model: str, base_url: str, cached: in
     if not (live_ctx and live_ctx > 0 and live_ctx != cached):
         return cached
     if live_ctx < MINIMUM_CONTEXT_LENGTH:
-        logger.info("Live local probe for %s@%s reports %s (< minimum %s); invalidating stale cache — agent init should reject", model, base_url, f"{live_ctx:,}", f"{MINIMUM_CONTEXT_LENGTH:,}")
+        logger.info("Live local probe for %s@%s reports %s (< minimum %s); invalidating stale cache", model, base_url, f"{live_ctx:,}", f"{MINIMUM_CONTEXT_LENGTH:,}")
     else:
         logger.info("Reconciling stale local cache entry %s@%s: %s -> %s (live probe)", model, base_url, f"{cached:,}", f"{live_ctx:,}")
     _invalidate_cached_context_length(model, base_url)

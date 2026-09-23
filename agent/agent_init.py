@@ -1889,9 +1889,72 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
     agent.compression_idle_compact_after_seconds = cs.idle_compact_after_seconds
 
 
+def _managed_vllm_endpoint_label(base_url: str) -> str | None:
+    """``vLLM GPU`` / ``vLLM CPU`` when *base_url* is a managed serve, else None."""
+    with suppress(Exception):
+        from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
+        return managed_endpoint_name_for_url(base_url)
+    return None
+
+
+def _maybe_bind_live_cpu_compression(agent) -> None:
+    """Point ``auxiliary.compression`` at a live CPU serve when the user has not.
+
+    GPU 14B native is 40k — compression still needs >=64k. The CPU 4B serve
+    is that aux. Never rewrite the selected main model.
+    """
+    if not _managed_vllm_endpoint_label(getattr(agent, "base_url", "") or ""):
+        return
+    with suppress(Exception):
+        from hermes_cli.local_engines import maybe_bind_cpu_compression
+        from hermes_cli.vllm_runtime.device import CPU
+        from hermes_cli.vllm_runtime.endpoint import _state_endpoint
+        live = _state_endpoint(CPU)
+        if not live:
+            return
+        maybe_bind_cpu_compression(
+            str(live.get("base_url") or ""),
+            str(live.get("served_model_name") or ""),
+        )
+
+
+def _below_minimum_context_error(model: str, ctx: int, *, native_reported: bool) -> str:
+    """User-facing reject for a window below the 64k floor.
+
+    When the server already reported the native window, do not tell the user
+    to set ``model.context_length`` to 64k — that lie CUDA-OOBs on Qwen3-14B-AWQ.
+    """
+    msg = (
+        f"Model {model} has a context window of {ctx:,} tokens, "
+        f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "
+        f"by Hermes Agent.  Choose a model with at least "
+        f"{MINIMUM_CONTEXT_LENGTH // 1000}K context."
+    )
+    if native_reported:
+        msg += (
+            "  The server already reported this as the model's native window; "
+            "do not set model.context_length above that value."
+        )
+        if ctx == 40960:
+            msg += (
+                "  Official GPU Qwen3-14B-AWQ is native 40,960 — keep it as the "
+                "chat model, turn on the CPU 4B serve as compression aux, and "
+                "start a new chat."
+            )
+        return msg
+    return (
+        msg
+        + "  If your server reports a window smaller than the model's true "
+        "window, set model.context_length in config.yaml to the real value."
+    )
+
+
 def _enforce_minimum_context(agent):
-    # Reject windows below the 64K floor needed for reliable tool-calling; an explicit
-    # positive model.context_length on LM Studio is allowed below the floor.
+    # Reject windows below the 64K floor needed for reliable tool-calling, except:
+    # an explicit positive model.context_length on LM Studio, and a managed vLLM
+    # serve whose reported window is the checkpoint-native value (GPU 14B/8B
+    # AWQ is 40960 — faking 64k CUDA-OOBs). Compression/aux still requires 64k.
+    _maybe_bind_live_cpu_compression(agent)
     _ctx = getattr(agent.context_compressor, "context_length", 0)
     _allow_lmstudio_explicit_below_floor = (
         str(agent.provider or "").strip().lower() == "lmstudio"
@@ -1899,16 +1962,23 @@ def _enforce_minimum_context(agent):
         and not isinstance(agent._config_context_length, bool)
         and agent._config_context_length > 0
     )
-    if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH and not _allow_lmstudio_explicit_below_floor:
-        raise ValueError(
-            f"Model {agent.model} has a context window of {_ctx:,} tokens, "
-            f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "
-            f"by Hermes Agent.  Choose a model with at least "
-            f"{MINIMUM_CONTEXT_LENGTH // 1000}K context.  If your server "
-            f"reports a window smaller than the model's true window, set "
-            f"model.context_length in config.yaml to the real value "
-            f"(this must be at least {MINIMUM_CONTEXT_LENGTH // 1000}K)."
+    if not (_ctx and _ctx < MINIMUM_CONTEXT_LENGTH):
+        return
+    if _allow_lmstudio_explicit_below_floor:
+        return
+    if _managed_vllm_endpoint_label(getattr(agent, "base_url", "") or ""):
+        logger.info(
+            "Managed vLLM model %s reports native context %s "
+            "(below the 64k compression floor); chat init allowed",
+            getattr(agent, "model", ""), f"{_ctx:,}",
         )
+        return
+    raise ValueError(
+        _below_minimum_context_error(
+            agent.model, _ctx,
+            native_reported=is_local_endpoint(getattr(agent, "base_url", "") or ""),
+        )
+    )
 
 
 def _warn_nonagentic_hermes_model(agent):
