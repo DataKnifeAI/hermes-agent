@@ -253,3 +253,131 @@ def test_starting_one_device_does_not_overwrite_the_other_endpoint(tmp_path, mon
     assert after_gpu["model"]["provider"] == "custom"
     assert after_gpu["model"]["base_url"] == "http://127.0.0.1:18435/v1"
     assert after_gpu["auxiliary"]["compression"]["base_url"] == "http://127.0.0.1:18436/v1"
+
+
+def _picker_rows(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    from hermes_cli.inventory import build_models_payload, load_picker_context
+
+    return build_models_payload(
+        load_picker_context(), explicit_only=True,
+        probe_custom_providers=False, probe_current_custom_provider=False,
+    )["providers"]
+
+
+def test_picker_lists_each_managed_device_once(tmp_path, monkeypatch):
+    """A managed loopback in ``providers.vllm`` is hidden, and the synthetic
+    runtime row does not repeat ``providers.vllm-gpu`` / ``providers.vllm-cpu``.
+
+    Chat stays ``provider: custom``. The same URL is not also a ``custom`` row.
+    """
+    home = _isolate_home(tmp_path, monkeypatch)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "model": {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:18435/v1",
+            "default": "qwen3:14b",
+        },
+        "providers": {
+            "vllm": {
+                "name": "vLLM CPU",
+                "base_url": "http://127.0.0.1:18436/v1",
+                "model": "qwen3:4b",
+            },
+            "vllm-gpu": {
+                "name": "vLLM GPU",
+                "base_url": "http://127.0.0.1:18435/v1",
+                "model": "qwen3:14b",
+            },
+            "vllm-cpu": {
+                "name": "vLLM CPU",
+                "base_url": "http://127.0.0.1:18436/v1",
+                "model": "qwen3:4b",
+            },
+        },
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {"device": "gpu", "served_model_name": "qwen3:14b"},
+        },
+    }), encoding="utf-8")
+
+    from hermes_cli.config import load_config
+    from hermes_cli.web_routers.config_env import _custom_endpoint_response
+
+    rows = _picker_rows(monkeypatch)
+    saved = load_config()
+    legacy = saved["providers"]["vllm"]
+    assert str(legacy.get("base_url") or legacy.get("url") or "") == ""
+    assert legacy.get("enabled") is False
+    assert saved["providers"]["vllm-gpu"]["base_url"] == "http://127.0.0.1:18435/v1"
+    assert saved["providers"]["vllm-cpu"]["base_url"] == "http://127.0.0.1:18436/v1"
+    assert saved["model"]["provider"] == "custom"
+
+    names = [row["name"] for row in rows]
+    assert names.count("vLLM GPU") == 1
+    assert names.count("vLLM CPU") == 1
+    assert "Custom endpoint" not in names
+    assert "vllm" not in {row["slug"] for row in rows}
+    assert "custom" not in {row["slug"] for row in rows}
+    gpu = "http://127.0.0.1:18435/v1"
+    cpu = "http://127.0.0.1:18436/v1"
+
+    def _url(row: dict) -> str:
+        return str(row.get("api_url") or "").rstrip("/")
+
+    assert [row["slug"] for row in rows if _url(row) == gpu] == ["vllm-gpu"]
+    assert [row["slug"] for row in rows if _url(row) == cpu] == ["vllm-cpu"]
+    by_slug = {row["slug"]: row for row in rows}
+    assert by_slug["vllm-gpu"]["is_current"] is True
+    assert by_slug["vllm-cpu"]["is_current"] is False
+
+    ids = [endpoint["id"] for endpoint in _custom_endpoint_response(saved)["endpoints"]]
+    assert ids.count("vllm-gpu") == 1
+    assert ids.count("vllm-cpu") == 1
+    assert "vllm" not in ids
+    assert "custom" not in ids
+
+
+def test_picker_keeps_a_remote_vllm_endpoint(tmp_path, monkeypatch):
+    """A non-loopback ``providers.vllm`` stays beside the two device endpoints."""
+    home = _isolate_home(tmp_path, monkeypatch)
+    remote = "http://gpu-box.example:8000/v1"
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "model": {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:18435/v1",
+            "default": "qwen3:14b",
+        },
+        "providers": {
+            "vllm": {"name": "GPU box", "base_url": remote},
+            "vllm-gpu": {
+                "name": "vLLM GPU",
+                "base_url": "http://127.0.0.1:18435/v1",
+                "model": "qwen3:14b",
+            },
+            "vllm-cpu": {
+                "name": "vLLM CPU",
+                "base_url": "http://127.0.0.1:18436/v1",
+                "model": "qwen3:4b",
+            },
+        },
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {"device": "gpu", "served_model_name": "qwen3:14b"},
+        },
+    }), encoding="utf-8")
+
+    from hermes_cli.config import load_config
+
+    rows = _picker_rows(monkeypatch)
+    assert load_config()["providers"]["vllm"]["base_url"] == remote
+    remote_rows = [row for row in rows if row["slug"] == "vllm"]
+    assert len(remote_rows) == 1
+    assert remote_rows[0]["name"] == "GPU box"
+    assert remote_rows[0]["api_url"].rstrip("/") == remote
+    names = [row["name"] for row in rows]
+    assert names.count("vLLM GPU") == 1
+    assert names.count("vLLM CPU") == 1
+    assert "Custom endpoint" not in names

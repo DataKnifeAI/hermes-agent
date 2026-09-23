@@ -385,10 +385,13 @@ def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
             base_url = str(raw_entry.get("base_url") or raw_entry.get("url") or raw_entry.get("api") or "").strip()
             if not base_url:
                 continue
-            endpoint_id = str(provider_id)
-            models = _models_from_custom_endpoint_entry(raw_entry)
             from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
 
+            # Legacy shared slot on a managed loopback. Device keys own those URLs.
+            if str(provider_id).strip().lower() == "vllm" and managed_endpoint_name_for_url(base_url):
+                continue
+            endpoint_id = str(provider_id)
+            models = _models_from_custom_endpoint_entry(raw_entry)
             saved_name = str(raw_entry.get("name") or endpoint_id)
             # ``provider: custom`` points at one device by URL. That record is
             # current; the other device's record stays listed beside it.
@@ -544,7 +547,10 @@ def list_custom_endpoints(profile: Optional[str] = None):
     """
     with http_failure("GET /api/providers/custom-endpoints failed", 500, detail="Failed to list custom endpoints"):
         with _config_profile_scope(profile):
-            return _custom_endpoint_response(load_config())
+            from hermes_cli.vllm_runtime.bootstrap import hide_legacy_managed_vllm_slot
+
+            return _custom_endpoint_response(
+                hide_legacy_managed_vllm_slot(load_config(), persist=True))
 
 
 @router.post("/api/providers/custom-endpoints")

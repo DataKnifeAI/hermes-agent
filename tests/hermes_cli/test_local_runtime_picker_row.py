@@ -103,7 +103,8 @@ def test_vllm_engine_row_uses_served_id_not_gguf(hermes_home):
         "model": {"provider": "vllm"},
     }), encoding="utf-8")
     from hermes_cli.inventory import (
-        _filter_explicit_provider_rows, _local_runtime_row, load_picker_context,
+        _filter_explicit_provider_rows, _local_runtime_row, build_models_payload,
+        load_picker_context,
     )
 
     ctx = load_picker_context()
@@ -115,3 +116,9 @@ def test_vllm_engine_row_uses_served_id_not_gguf(hermes_home):
     assert row["is_current"] is True
     kept = _filter_explicit_provider_rows([row], ctx)
     assert kept and kept[0]["slug"] == "vllm"
+    # No device provider records yet: the served id is still one picker row.
+    payload = build_models_payload(
+        ctx, explicit_only=True, probe_custom_providers=False,
+        probe_current_custom_provider=False,
+    )
+    assert [p["slug"] for p in payload["providers"]].count("vllm") == 1

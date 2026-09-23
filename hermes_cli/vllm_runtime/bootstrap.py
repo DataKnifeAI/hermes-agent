@@ -296,9 +296,46 @@ def _retire_shared_vllm_slot(providers: dict) -> None:
         copied.pop("enabled", None)
         providers[key] = copied
     retired = dict(legacy)
+    # Blank every URL alias. The endpoint list reads base_url, then url, then api.
     retired["base_url"] = ""
+    retired["url"] = ""
+    retired["api"] = ""
     retired["enabled"] = False
     providers["vllm"] = retired
+
+
+def hide_legacy_managed_vllm_slot(config: dict | None = None, *, persist: bool = False) -> dict:
+    """Hide ``providers.vllm`` when its URL is a managed loopback.
+
+    Listing and the next process start both call this so a stale shared slot
+    does not sit beside ``vllm-gpu`` / ``vllm-cpu``. A remote URL is left
+    alone. Persists only when the slot actually changes.
+    """
+    from hermes_cli.config import load_config, save_config
+
+    cfg = config if config is not None else load_config()
+    providers = cfg.get("providers")
+    if not isinstance(providers, dict):
+        return cfg
+    legacy = providers.get("vllm")
+    if not isinstance(legacy, dict):
+        return cfg
+    before = (
+        str(legacy.get("base_url") or legacy.get("url") or legacy.get("api") or "").strip(),
+        legacy.get("enabled", True),
+    )
+    _retire_shared_vllm_slot(providers)
+    after_entry = providers.get("vllm")
+    after_entry = after_entry if isinstance(after_entry, dict) else {}
+    after = (
+        str(after_entry.get("base_url") or after_entry.get("url") or after_entry.get("api") or "").strip(),
+        after_entry.get("enabled", True),
+    )
+    if after != before and persist:
+        cfg["providers"] = providers
+        with suppress(Exception):
+            save_config(cfg, merge_existing=True)
+    return cfg
 
 
 def activate_vllm_provider(config: dict | None = None) -> str:

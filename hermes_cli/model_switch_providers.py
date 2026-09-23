@@ -832,12 +832,17 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
     key_env/api_mode/headers keeps distinct rows since the wire protocol or tenant differs."""
     from hermes_cli.model_switch import _extra_headers_from_config, _scoped_key_env
     from hermes_cli.config import coerce_provider_id, is_provider_enabled
+    from hermes_cli.vllm_runtime.device import managed_endpoint_name_for_url
     ep_groups: dict[tuple, dict] = {}
     for ep_name, ep_cfg in user_providers.items():
         if not isinstance(ep_cfg, dict) or not is_provider_enabled(ep_cfg) or ep_name.lower() in b.seen_slugs:
             continue
         display_name = coerce_provider_id(ep_cfg.get("name")) or ep_name
         api_url = _entry_base_url(ep_cfg, ("base_url", "api", "url"))
+        # The old shared slot duplicates vllm-gpu / vllm-cpu once its URL is a
+        # managed loopback. A remote ``providers.vllm`` URL stays listed.
+        if str(ep_name).strip().lower() == "vllm" and managed_endpoint_name_for_url(api_url):
+            continue
         inline_api_key, key_env, cred_identity = _entry_credentials(ep_cfg, "key_env", "api_key_env")
         headers = _extra_headers_from_config(ep_cfg)
         group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())))
@@ -893,6 +898,11 @@ def _lap_bare_custom_row(b: _PickerBuild, custom_providers: list | None) -> None
     if any(
         isinstance(cp, dict) and _norm_url(_entry_base_url(cp)) == _norm_url(b.current_base_url)
         for cp in (custom_providers or [])):
+        return
+    # ``providers.vllm-gpu`` / ``providers.vllm-cpu`` already represent this URL.
+    # A second slug ``custom`` row would list the same endpoint again.
+    target = _norm_url(b.current_base_url)
+    if any(_norm_url(row.get("api_url")) == target for row in b.results):
         return
     api_url = str(b.current_base_url).strip().rstrip("/")
     models = [b.current_model] if b.current_model else []
