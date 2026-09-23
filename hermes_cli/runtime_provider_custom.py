@@ -244,6 +244,11 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
         return None
 
     def _entry_serves_model(entry: Dict[str, Any]) -> bool:
+        # Hidden legacy ``providers.vllm`` keeps a leftover models catalog
+        # (14B and 4B) with an empty URL. Matching it here heals chat to
+        # ``custom:vllm`` and then to whichever managed server is selected.
+        if not str(_entry_url(entry) or "").strip():
+            return False
         if any(_model_id_matches(entry.get(key), target) for key in ("model", "default_model")):
             return True
         models = entry.get("models")
@@ -481,8 +486,10 @@ def _resolve_vllm_runtime(requested_provider: str, explicit_api_key: Optional[st
     ``local_runtime.enabled: false`` is Turn off — leave the server down.
     """
     from hermes_cli.local_engines import vllm_device_from_config
-    from hermes_cli.vllm_runtime.device import CPU
-    from hermes_cli.vllm_runtime.endpoint import is_loopback_url, resolve_vllm_endpoint
+    from hermes_cli.vllm_runtime.device import CPU, normalize_device
+    from hermes_cli.vllm_runtime.endpoint import (
+        _device_for_managed_pin, _state_endpoint, is_loopback_url, resolve_vllm_endpoint,
+    )
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
     from hermes_cli.vllm_runtime.supervisor import READY_TIMEOUT_S
 
@@ -496,6 +503,22 @@ def _resolve_vllm_runtime(requested_provider: str, explicit_api_key: Optional[st
             "custom", "chat_completions", configured.rstrip("/"),
             (explicit_api_key or "").strip() or "no-key-required",
             source="custom_provider:vllm", requested_provider=requested_provider)
+
+    # A pin on the sibling device (GPU 18435 while device=cpu) is that chat,
+    # not a stale selected-device URL. Do not start or adopt the other serve.
+    try:
+        selected = normalize_device(vllm_device_from_config(rp.load_config()))
+    except Exception:  # noqa: BLE001
+        selected = "gpu"
+    pin_device = _device_for_managed_pin(configured) if configured else None
+    if pin_device and pin_device != selected:
+        sibling = _state_endpoint(pin_device)
+        url = str((sibling or {}).get("base_url") or configured).rstrip("/")
+        return rp._runtime(
+            "custom", "chat_completions", url,
+            (explicit_api_key or "").strip()
+            or (sibling or {}).get("api_key") or "no-key-required",
+            source="local-runtime", requested_provider=requested_provider)
 
     endpoint = resolve_vllm_endpoint(wait_for_boot_s=READY_TIMEOUT_S)
     if endpoint:
@@ -581,7 +604,9 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
         from hermes_cli.vllm_runtime.endpoint import is_loopback_url
 
         if not explicit_base_url or is_loopback_url(explicit_base_url):
-            return _resolve_vllm_runtime(requested_provider, explicit_api_key)
+            return _resolve_vllm_runtime(
+                requested_provider, explicit_api_key,
+                chat_url=explicit_base_url or "")
     # Chat on custom pointed at the selected device. An already-live serve
     # falls through so a stale pin can follow server.json. Down + Turn off
     # raises here instead of "provider vllm disabled".
@@ -597,9 +622,16 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     if requested_norm == "custom" and explicit_base_url:
         from hermes_cli.vllm_runtime.endpoint import follow_live_managed_vllm, is_loopback_url
 
-        if is_loopback_url(explicit_base_url) and follow_live_managed_vllm(
-                explicit_base_url, target_model or ""):
-            return _resolve_vllm_runtime(requested_provider or "vllm", explicit_api_key)
+        followed = (
+            follow_live_managed_vllm(explicit_base_url, target_model or "")
+            if is_loopback_url(explicit_base_url) else None)
+        # Same-device ephemeral rebind only. Do not re-resolve the selected
+        # device — that replaced a GPU 14B pin with a live CPU 4B serve.
+        if followed and followed.get("base_url"):
+            runtime = _resolve_direct_alias_runtime(
+                requested_provider, explicit_api_key, str(followed["base_url"]))
+            runtime["source"] = "local-runtime"
+            return runtime
         return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
     custom_provider = rp._get_named_custom_provider(requested_provider)
     if not custom_provider:

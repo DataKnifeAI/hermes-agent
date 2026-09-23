@@ -2226,11 +2226,18 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
     except Exception:
         followed = None
     if followed:
-        resolution.runtime["base_url"] = followed["base_url"]
-        if followed.get("api_key") and not resolution.runtime.get("api_key"):
-            resolution.runtime["api_key"] = followed["api_key"]
-        if served := followed.get("served_model_name"):
-            model = served
+        from hermes_cli.vllm_runtime.endpoint import _device_for_managed_pin
+
+        # Same-device ephemeral rebind only. A GPU pin must not adopt CPU 4B.
+        followed_url = str(followed.get("base_url") or "")
+        pin_dev = _device_for_managed_pin(pinned_url)
+        followed_dev = _device_for_managed_pin(followed_url)
+        if pin_dev is None or followed_dev is None or pin_dev == followed_dev:
+            resolution.runtime["base_url"] = followed_url
+            if followed.get("api_key") and not resolution.runtime.get("api_key"):
+                resolution.runtime["api_key"] = followed["api_key"]
+            if served := followed.get("served_model_name"):
+                model = served
     return model, resolution.runtime
 
 

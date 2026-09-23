@@ -426,6 +426,83 @@ def test_other_managed_device_url_does_not_spawn(tmp_path, monkeypatch):
     assert started == []
 
 
+def _write_device_state(device: str, *, port: int, served: str) -> None:
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    path = state_path(device)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "base_url": f"http://127.0.0.1:{port}/v1",
+        "pid": os.getpid(),
+        "served_model_name": served,
+    }), encoding="utf-8")
+
+
+def test_gpu_chat_keeps_14b_when_cpu_4b_is_live(tmp_path, monkeypatch):
+    """device=gpu + GPU pin must stay on 14b even when CPU 4B is healthy.
+
+    The send-time writer was ``follow_live_managed_vllm`` (and
+    ``_resolve_agent_model_runtime`` applying its served name): it followed
+    whichever managed serve ``resolve_vllm_endpoint`` returned — the selected
+    device, or a last-ready CPU record — and replaced qwen3:14b @ 18435.
+    """
+    home = _home(tmp_path, monkeypatch)
+    _write_device_state("gpu", port=18435, served="qwen3:14b")
+    _write_device_state("cpu", port=18436, served="qwen3:4b")
+    cfg = _managed_chat_config(
+        device="gpu", enabled=True, base_url="http://127.0.0.1:18435/v1")
+    cfg["model"]["default"] = "qwen3:14b"
+    (home / "config.yaml").write_text(yaml.dump(cfg), encoding="utf-8")
+    monkeypatch.setattr("hermes_cli.runtime_provider.load_config", lambda: cfg)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+    started = _install_managed_chat(home, monkeypatch, cfg)
+
+    from hermes_cli.runtime_provider import (
+        _resolve_named_custom_runtime, resolve_runtime_provider,
+    )
+    from hermes_cli.vllm_runtime import endpoint as ep
+
+    # Even if resolution claims the CPU serve is the live managed endpoint,
+    # a GPU pin must not follow it.
+    real_resolve = ep.resolve_vllm_endpoint
+    monkeypatch.setattr(
+        ep, "resolve_vllm_endpoint",
+        lambda *a, **k: {
+            "base_url": "http://127.0.0.1:18436/v1",
+            "served_model_name": "qwen3:4b",
+            "api_key": "",
+            "pid": os.getpid(),
+        })
+    assert ep.follow_live_managed_vllm(
+        "http://127.0.0.1:18435/v1", "qwen3:14b") is None
+    monkeypatch.setattr(ep, "resolve_vllm_endpoint", real_resolve)
+
+    runtime = resolve_runtime_provider(requested="custom")
+    assert runtime["provider"] == "custom"
+    assert "18435" in runtime["base_url"]
+    assert "18436" not in runtime["base_url"]
+
+    named = _resolve_named_custom_runtime(
+        requested_provider="custom",
+        explicit_base_url="http://127.0.0.1:18435/v1",
+        target_model="qwen3:14b")
+    assert named is not None
+    assert "18435" in named["base_url"]
+    assert "18436" not in named["base_url"]
+
+    from tui_gateway.server import _resolve_agent_model_runtime
+
+    model, resolved = _resolve_agent_model_runtime(
+        {"model": "qwen3:14b", "provider": "custom",
+         "base_url": "http://127.0.0.1:18435/v1"},
+        None)
+    assert model == "qwen3:14b"
+    assert "18435" in resolved["base_url"]
+    assert "18436" not in resolved["base_url"]
+    assert started == [] or started == ["gpu"]
+    assert home
+
+
 def test_disabled_remote_vllm_still_raises(tmp_path, monkeypatch):
     """A remote ``providers.vllm`` the user turned off stays disabled."""
     home = _home(tmp_path, monkeypatch)

@@ -146,41 +146,66 @@ def _engine_is_vllm(config: dict | None = None) -> bool:
     return False
 
 
+def _device_for_managed_pin(url: str) -> str | None:
+    """gpu / cpu when *url* is that device's managed loopback, else None.
+
+    Default ports win. An ephemeral pin matches the live state of one device
+    only — never the sibling — so a GPU chat does not follow CPU 4B.
+    """
+    from hermes_cli.vllm_runtime.device import (
+        CPU, CPU_ENDPOINT_NAME, GPU, GPU_ENDPOINT_NAME,
+        managed_endpoint_name_for_url,
+    )
+
+    label = managed_endpoint_name_for_url(url)
+    if label == GPU_ENDPOINT_NAME:
+        return GPU
+    if label == CPU_ENDPOINT_NAME:
+        return CPU
+    return None
+
+
 def follow_live_managed_vllm(
     base_url: str,
     model: str = "",
     config: dict | None = None,
 ) -> dict | None:
-    """Rewrite a stale loopback pin to the live managed serve.
+    """Rewrite a stale loopback pin to the live serve of that same device.
 
     Sessions persist ``provider: custom`` + the port from first Use. After an
     ephemeral rebind (18435 busy → 53351) that pin connection-refuses. Follow
-    ``server.json`` when the pin is loopback, not llama.cpp/Ollama, and either
-    the default managed port or the active engine is vLLM.
+    that device's ``server.json`` when the pin is loopback, not llama.cpp/Ollama.
+    Never adopt the sibling (GPU 14B pin must not become CPU 4B just because
+    the CPU serve is healthy or ``local_runtime.vllm.device`` flipped).
     """
     pinned = (base_url or "").strip().rstrip("/")
     if not pinned or not is_loopback_url(pinned):
         return None
-    live = resolve_vllm_endpoint(config, wait_for_boot_s=0)
+    port = _url_port(pinned)
+    if port in _FOREIGN_LOOPBACK_PORTS:
+        return None
+    pin_device = _device_for_managed_pin(pinned)
+    if pin_device is None:
+        if not _engine_is_vllm(config):
+            return None
+        live = resolve_vllm_endpoint(config, wait_for_boot_s=0)
+    else:
+        live = _state_endpoint(pin_device, config)
     if not live:
         return None
     live_url = str(live.get("base_url") or "").strip().rstrip("/")
     if not live_url:
         return None
-    port = _url_port(pinned)
-    if port in _FOREIGN_LOOPBACK_PORTS:
-        return None
-    from hermes_cli.vllm_runtime.device import CPU_LISTEN_PORT, GPU_LISTEN_PORT
-
-    if port not in (GPU_LISTEN_PORT, CPU_LISTEN_PORT) and not _engine_is_vllm(config):
-        return None
     served = str(live.get("served_model_name") or "").strip()
     if not served:
         from hermes_cli.vllm_runtime.supervisor import state_served_model_name
 
-        served = state_served_model_name()
+        served = state_served_model_name(pin_device or "gpu")
     if pinned.lower() == live_url.lower() and (not served or served == (model or "").strip()):
         return None
+    logger.info(
+        "follow_live_managed_vllm: pin %s model=%s -> %s served=%s device=%s",
+        pinned, model or "", live_url, served, pin_device or "selected")
     return {
         "base_url": live_url,
         "api_key": live.get("api_key") or "",
