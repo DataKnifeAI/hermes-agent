@@ -292,6 +292,17 @@ def test_cpu_compression_base_url_is_written_unless_user_set(tmp_path, monkeypat
     assert kept["base_url"] == "http://aux.example/v1"
     assert kept["model"] == "other-model"
 
+    save_config_value("auxiliary.compression.base_url", url)
+    save_config_value("auxiliary.compression.model", "qwen3:4b")
+    save_config_value("providers.vllm-cpu.base_url", url)
+    save_config_value("providers.vllm-cpu.model", "qwen3:4b")
+    new_url = "http://127.0.0.1:42477/v1"
+    assert maybe_bind_cpu_compression(new_url, "SmolLM3-3B") is True
+    followed = load_config()["auxiliary"]["compression"]
+    assert followed["base_url"] == new_url
+    assert followed["model"] == "SmolLM3-3B"
+    assert followed["provider"] == "custom"
+
 
 def test_cpu_compression_skips_when_only_model_is_set(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"

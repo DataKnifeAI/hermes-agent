@@ -2053,6 +2053,145 @@ def test_apply_hermes4_overwrites_leftover_llama3_parser(tmp_path, monkeypatch):
     assert not (vllm.get("quantization") or "").strip()
 
 
+def _seed_smol_cpu_cache(tmp_path, monkeypatch, *repos):
+    hub = tmp_path / "hf-hub"
+    for repo in repos:
+        root = hub / ("models--" + repo.replace("/", "--"))
+        snap = root / "snapshots" / "main"
+        snap.mkdir(parents=True, exist_ok=True)
+        (root / "refs").mkdir(parents=True, exist_ok=True)
+        (root / "refs" / "main").write_text("main", encoding="utf-8")
+        (snap / "config.json").write_text(
+            '{"max_position_embeddings": 65536, "torch_dtype": "bfloat16"}',
+            encoding="utf-8",
+        )
+        (snap / "w.bin").write_bytes(b"y" * 32)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    return hub
+
+
+def test_apply_smolm3_writes_native_65536_not_leftover_128k(tmp_path, monkeypatch):
+    """CPU-legal BF16 Use must persist native 64k, not a leftover 128k serve cap."""
+    _, home = _client(tmp_path, monkeypatch)
+    hid = "HuggingFaceTB/SmolLM3-3B"
+    _write_engine(home, "vllm", extra={"vllm": {
+        "device": "cpu",
+        "model": "Qwen/Qwen3-4B-Instruct-2507",
+        "served_model_name": "qwen3:4b",
+        "max_model_len": 131072,
+        "kv_cache_dtype": "fp8",
+    }})
+    _seed_smol_cpu_cache(tmp_path, monkeypatch, hid)
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.inventory import apply_vllm_model
+
+    apply_vllm_model(hid)
+    vllm = load_config()["local_runtime"]["vllm"]
+    assert vllm["model"] == hid
+    assert vllm["served_model_name"] == "SmolLM3-3B"
+    assert int(vllm["max_model_len"]) == 65536
+    assert int(vllm["max_model_len"]) != 131072
+
+
+def test_cpu_use_smol_writes_model_and_does_not_restore_qwen(tmp_path, monkeypatch):
+    """CPU Use of SmolLM3-3B must start that id — not silently serve Qwen 4B."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "HuggingFaceTB/SmolLM3-3B"
+    previous = "Qwen/Qwen3-4B-Instruct-2507"
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "device": "cpu",
+        "model": previous,
+        "served_model_name": "qwen3:4b",
+        "max_model_len": 65536,
+    }})
+    _seed_smol_cpu_cache(tmp_path, monkeypatch, hid, previous)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:42477/v1", "pid": 1})
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_device", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    started: list[str] = []
+
+    class _Sup:
+        base_url = "http://127.0.0.1:42477/v1"
+
+    def _ensure(*_a, **_k):
+        from hermes_cli.config import load_config
+        from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+        settings = vllm_settings(load_config())
+        started.append(settings["model"])
+        if settings["model"] != hid:
+            raise AssertionError(f"start used {settings['model']}, not {hid}")
+        return _Sup()
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.activate_vllm_provider",
+        lambda cfg=None: "http://127.0.0.1:42477/v1")
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bench.verify_tool_calls",
+        lambda *a, **k: {"ok": True, "tool_calls": True})
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.hardware._ram_stats",
+        lambda: (128 * (1 << 30), 16 * (1 << 30), 96 * (1 << 30)),
+    )
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 200, used.text
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    cfg = load_config()
+    assert cfg["local_runtime"]["vllm"]["model"] == hid
+    assert vllm_settings(cfg)["model"] == hid
+    assert vllm_settings(cfg)["model"] != previous
+    assert started == [hid]
+
+
+def test_cpu_use_failed_start_surfaces_error_keeps_smol(tmp_path, monkeypatch):
+    """Failed CPU Use must keep Smol selected and return the real start error."""
+    client, home = _client(tmp_path, monkeypatch)
+    hid = "HuggingFaceTB/SmolLM3-3B"
+    previous = "Qwen/Qwen3-4B-Instruct-2507"
+    _write_engine(home, "vllm", extra={"enabled": True, "vllm": {
+        "device": "cpu",
+        "model": previous,
+        "served_model_name": "qwen3:4b",
+    }})
+    _seed_smol_cpu_cache(tmp_path, monkeypatch, hid, previous)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.endpoint.resolve_vllm_endpoint",
+        lambda *a, **k: {"base_url": "http://127.0.0.1:42477/v1", "pid": 1})
+    monkeypatch.setattr("hermes_cli.local_engines.stop_vllm_device", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.local_engines.stop_llama_engine", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.hardware._ram_stats",
+        lambda: (128 * (1 << 30), 16 * (1 << 30), 96 * (1 << 30)),
+    )
+
+    def _ensure(*_a, **_k):
+        from hermes_cli.vllm_runtime.supervisor import disable_auto_start, write_last_error
+
+        write_last_error(f"vllm serve was killed (SIGKILL) starting {hid}", "cpu")
+        disable_auto_start()
+        raise RuntimeError(f"vllm serve was killed (SIGKILL) starting {hid}")
+
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.bootstrap.ensure_vllm_runtime", _ensure)
+
+    used = client.post("/api/local-models/vllm/use", json={"model": hid})
+    assert used.status_code == 400, used.text
+    assert "SIGKILL" in used.json()["detail"]
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import read_last_error
+
+    assert load_config()["local_runtime"]["vllm"]["model"] == hid
+    assert load_config()["local_runtime"]["vllm"]["model"] != previous
+    assert "SIGKILL" in (read_last_error("cpu") or read_last_error() or "")
+
+
 def test_vllm_job_timeout_covers_supervisor_ready_wait():
     """Use / quickstart / server-start must not 60–90s-fail while CUDA graphs capture."""
     from hermes_cli.vllm_runtime.supervisor import READY_TIMEOUT_S

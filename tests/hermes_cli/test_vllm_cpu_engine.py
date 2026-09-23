@@ -455,6 +455,24 @@ def test_cpu_default_is_bf16_qwen3_4b_not_gpu_awq(tmp_path, monkeypatch):
         },
     })
     assert explicit["model"] == "org/custom-bf16"
+    # engine: vllm + device: cpu is the live Local Models path. An explicit
+    # BF16 pick must not be overwritten by the Qwen 4B CPU default.
+    smol = "HuggingFaceTB/SmolLM3-3B"
+    on_device = vllm_settings({
+        "local_runtime": {
+            "engine": "vllm",
+            "vllm": {
+                "device": "cpu",
+                "model": smol,
+                "served_model_name": "SmolLM3-3B",
+                "max_model_len": 65536,
+            },
+        },
+    })
+    assert on_device["model"] == smol
+    assert on_device["served_model_name"] == "SmolLM3-3B"
+    assert on_device["model"] != overlay["model"]
+    assert int(on_device["max_model_len"]) == 65536
 
     hid = overlay["model"]
     hub = tmp_path / "hf-hub"
@@ -850,6 +868,10 @@ def test_cuda_quants_are_cpu_incompatible_and_gpu_servable():
     assert incompatible_with_device(awq, "gpu") is None
     assert incompatible_with_device(bf16, "cpu") is None
     assert incompatible_with_device(bf16, "gpu") is None
+    smol = "HuggingFaceTB/SmolLM3-3B"
+    smol_cfg = {"torch_dtype": "bfloat16", "max_position_embeddings": 65536}
+    assert incompatible_with_device(smol, "cpu", config=smol_cfg) is None
+    assert incompatible_with_device(smol, "gpu", config=smol_cfg) is None
     packed = {
         "quantization_config": {
             "quant_method": "compressed-tensors",

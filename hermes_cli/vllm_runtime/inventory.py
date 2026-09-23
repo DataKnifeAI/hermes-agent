@@ -1803,6 +1803,11 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
             # Native 262144 leftover must not ride onto 30B-A3B-2507.
             save_config_value("local_runtime.vllm.max_model_len", cap)
             save_config_value("local_runtime.vllm.kv_cache_dtype", "fp8")
+        else:
+            native = native_max_model_len(cached_model_config(hid))
+            if native is not None:
+                # Leftover 128k / 262144 must not ride onto a 64k-native BF16.
+                save_config_value("local_runtime.vllm.max_model_len", native)
     return {"ok": True, "model": hid, "served_model_name": served_name_for(hid)}
 
 

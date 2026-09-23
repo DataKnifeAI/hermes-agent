@@ -886,8 +886,9 @@ def use_cached_vllm(hf_id: str) -> dict[str, Any]:
             start_active_engine(recover=False)
             result = activate_vllm()
         except Exception:
-            recover_vllm_after_failed_start(
-                failed_id=hid, previous=previous, was_running=running)
+            if device != CPU:
+                recover_vllm_after_failed_start(
+                    failed_id=hid, previous=previous, was_running=running)
             raise
         result["model"] = hid
         result["needs_download"] = False

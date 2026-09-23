@@ -166,7 +166,8 @@ def maybe_bind_cpu_compression(base_url: str, model: str = "") -> bool:
     """Point ``auxiliary.compression`` at the CPU serve when the user has not.
 
     Writes ``config.yaml`` only. A compression block that already names a
-    base_url, a model, or a provider other than ``auto`` is left alone.
+    remote / user-chosen target is left alone. A pin that still points at
+    the previous managed CPU URL or served name follows the new CPU serve.
     Returns True when the file changed.
     """
     url = str(base_url or "").strip().rstrip("/")
@@ -178,7 +179,8 @@ def maybe_bind_cpu_compression(base_url: str, model: str = "") -> bool:
     aux = raw.get("auxiliary") if isinstance(raw, dict) else None
     comp = aux.get("compression") if isinstance(aux, dict) else None
     if isinstance(comp, dict) and _compression_target_set(comp):
-        return False
+        if not _cpu_compression_should_follow(comp, raw if isinstance(raw, dict) else {}):
+            return False
     from cli import save_config_value
 
     # provider auto drops a bare base_url. custom keeps the CPU endpoint.
@@ -197,6 +199,29 @@ def _compression_target_set(comp: dict) -> bool:
         return True
     provider = str(comp.get("provider") or "").strip().lower()
     return bool(provider and provider != "auto")
+
+
+def _cpu_compression_should_follow(comp: dict, raw: dict) -> bool:
+    """True when aux still names the previous managed CPU pin (not a user target)."""
+    from hermes_cli.vllm_runtime.device import (
+        CPU_ENDPOINT_NAME, managed_endpoint_name_for_url,
+    )
+    from hermes_cli.vllm_runtime.endpoint import is_loopback_url
+
+    old_url = str(comp.get("base_url") or "").strip().rstrip("/")
+    if not old_url or not is_loopback_url(old_url):
+        return False
+    label = managed_endpoint_name_for_url(old_url)
+    if label == CPU_ENDPOINT_NAME:
+        return True
+    if label is not None:
+        return False
+    providers = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}
+    slot = providers.get("vllm-cpu") if isinstance(providers, dict) else None
+    slot_url = ""
+    if isinstance(slot, dict):
+        slot_url = str(slot.get("base_url") or "").strip().rstrip("/")
+    return bool(slot_url and old_url == slot_url)
 
 
 def shutdown_managed_engine() -> None:

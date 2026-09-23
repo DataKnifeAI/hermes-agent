@@ -230,13 +230,13 @@ def vllm_settings(config: dict | None) -> dict:
     """``local_runtime.vllm`` merged over DEFAULT_CONFIG so a partial section still serves.
 
     Device ``cpu`` (or a legacy ``engine: vllm-cpu``) serves the BF16 default
-    when the model is empty or still the GPU shipped AWQ id. A legacy
-    ``vllm-cpu`` config with any other id keeps that explicit choice. A nested
-    ``vllm.cpu.model`` is the CPU checkpoint and does not replace the GPU model.
+    when the model is empty or still the GPU shipped AWQ id. Any other
+    explicit id — ``engine: vllm`` + ``device: cpu`` or legacy ``vllm-cpu`` —
+    is kept. A nested ``vllm.cpu.model`` is the CPU checkpoint and does not
+    replace the GPU model.
     """
     from hermes_cli.config_defaults import DEFAULT_CONFIG
     from hermes_cli.local_engines import vllm_device_from_config
-    from hermes_cli.vllm_runtime.device import ENGINE_CPU
 
     defaults = dict(DEFAULT_CONFIG["local_runtime"]["vllm"])
     local = (config or {}).get("local_runtime") or {}
@@ -260,8 +260,7 @@ def vllm_settings(config: dict | None) -> dict:
         defaults.update({k: v for k, v in cpu_block.items() if k != "device"})
         return defaults
     model = str(defaults.get("model") or "").strip()
-    legacy = str(local.get("engine") or "").strip().lower().replace("_", "-") == ENGINE_CPU
-    if legacy and model and model != gpu_shipped_model():
+    if model and model != gpu_shipped_model():
         return defaults
     defaults.update(as_vllm_config(recommend_vllm_cpu()))
     return defaults
