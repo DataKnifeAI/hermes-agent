@@ -338,6 +338,90 @@ def hide_legacy_managed_vllm_slot(config: dict | None = None, *, persist: bool =
     return cfg
 
 
+def listed_model_for_managed_endpoint(
+    endpoint_id: str = "", base_url: str = "", current: str = "",
+) -> str:
+    """Picker / endpoint-list model for one managed vLLM row.
+
+    Replaces a GPU row that still names the live CPU serve (Smol on
+    ``vllm-gpu``). A healthy GPU 14B label is left alone.
+    """
+    from hermes_cli.vllm_runtime.device import (
+        CPU, GPU, GPU_ENDPOINT_KEY, CPU_ENDPOINT_KEY,
+        GPU_ENDPOINT_NAME, CPU_ENDPOINT_NAME, managed_endpoint_name_for_url,
+        normalize_device,
+    )
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    key = str(endpoint_id or "").strip().lower()
+    label = managed_endpoint_name_for_url(base_url)
+    if key == GPU_ENDPOINT_KEY or label == GPU_ENDPOINT_NAME:
+        device = GPU
+    elif key == CPU_ENDPOINT_KEY or label == CPU_ENDPOINT_NAME:
+        device = CPU
+    else:
+        return ""
+    cfg = load_config()
+    local = cfg.get("local_runtime")
+    if not isinstance(local, dict):
+        local = {}
+    vllm = dict(local.get("vllm") or {}) if isinstance(local.get("vllm"), dict) else {}
+    probe = dict(cfg)
+    probe_local = dict(local)
+    probe_vllm = dict(vllm)
+    probe_vllm["device"] = normalize_device(device)
+    probe_local["vllm"] = probe_vllm
+    probe["local_runtime"] = probe_local
+    correct = _served_name_for_device(device, vllm_settings(probe))
+    held = str(current or "").strip()
+    if device == GPU:
+        _cpu_url, cpu_live = _serve_from_state_file(CPU)
+        if held and cpu_live and held == cpu_live:
+            return correct
+        if held:
+            return held
+    elif device == CPU:
+        _url, cpu_live = _serve_from_state_file(CPU)
+        if cpu_live:
+            return cpu_live
+        if held:
+            return held
+    return correct or held
+
+
+def _served_name_for_device(device: str, settings: dict) -> str:
+    """Served id for *device*. Live ``server.json`` wins; else that device's settings.
+
+    Never returns the sibling's live id. A CPU Smol serve must not label the
+    GPU row — even when a leftover GPU process or a shared-slot write still
+    names Smol.
+    """
+    from hermes_cli.vllm_runtime.device import CPU, GPU, normalize_device
+    from hermes_cli.vllm_runtime.recommend import _DEFAULT_SERVED
+
+    device = normalize_device(device)
+    _url, live = _serve_from_state_file(device)
+    other = CPU if device == GPU else GPU
+    _other_url, other_live = _serve_from_state_file(other)
+    configured = str(settings.get("served_model_name") or "").strip()
+    if live and other_live and live == other_live:
+        live = ""
+    if device == GPU and configured and other_live and configured == other_live:
+        configured = ""
+    if live:
+        return live
+    if configured:
+        return configured
+    if device == GPU:
+        from hermes_cli.vllm_runtime.recommend import recommend_vllm
+
+        rec = recommend_vllm()
+        if rec.feasible and rec.served_model_name:
+            return rec.served_model_name
+    return configured or _DEFAULT_SERVED
+
+
 def activate_vllm_provider(config: dict | None = None) -> str:
     """Point chat at the selected device and record that device's endpoint.
 
@@ -355,12 +439,10 @@ def activate_vllm_provider(config: dict | None = None) -> str:
 
     cfg = config if config is not None else load_config()
     settings = vllm_settings(cfg)
-    from hermes_cli.vllm_runtime.recommend import _DEFAULT_SERVED
-
-    served = str(settings.get("served_model_name") or _DEFAULT_SERVED)
     from hermes_cli.local_engines import vllm_device_from_config
 
     device = normalize_device(vllm_device_from_config(cfg))
+    served = _served_name_for_device(device, settings)
     sup = get_supervisor(device)
     if sup is not None:
         managed = str(sup.base_url)
@@ -383,10 +465,20 @@ def activate_vllm_provider(config: dict | None = None) -> str:
         providers = {}
     _upsert_device_endpoint(providers, device, base_url=managed, model=served)
     other = CPU if device == GPU else GPU
-    other_url, other_model = _serve_from_state_file(other)
+    other_url, other_live = _serve_from_state_file(other)
     if other_url:
+        # Refresh the sibling from its own serve. Do not copy this device's id.
+        other_cfg = dict(cfg)
+        local = other_cfg.get("local_runtime")
+        if not isinstance(local, dict):
+            local = {}
+            other_cfg["local_runtime"] = local
+        vllm = dict(local.get("vllm") or {}) if isinstance(local.get("vllm"), dict) else {}
+        vllm["device"] = other
+        local["vllm"] = vllm
+        other_model = _served_name_for_device(other, vllm_settings(other_cfg))
         _upsert_device_endpoint(
-            providers, other, base_url=other_url, model=other_model, only_if_absent=True)
+            providers, other, base_url=other_url, model=other_model or other_live)
     _retire_shared_vllm_slot(providers)
     live["providers"] = providers
     with suppress(Exception):

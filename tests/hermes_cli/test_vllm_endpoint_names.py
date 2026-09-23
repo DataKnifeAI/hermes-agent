@@ -381,3 +381,143 @@ def test_picker_keeps_a_remote_vllm_endpoint(tmp_path, monkeypatch):
     assert names.count("vLLM GPU") == 1
     assert names.count("vLLM CPU") == 1
     assert "Custom endpoint" not in names
+
+
+def _write_device_state(device: str, *, port: int, served: str) -> None:
+    import json
+
+    from hermes_cli.vllm_runtime.supervisor import state_path
+
+    path = state_path(device)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "base_url": f"http://127.0.0.1:{port}/v1",
+        "pid": 1,
+        "served_model_name": served,
+    }), encoding="utf-8")
+
+
+def test_cpu_use_smol_does_not_write_gpu_endpoint(tmp_path, monkeypatch):
+    """CPU Use of SmolLM3-3B must not label the GPU row or GPU chat URL.
+
+    The live bug wrote providers.vllm-gpu.model / model.default = SmolLM3-3B
+    and model.base_url = :18435, so the picker said Smol was running on GPU.
+    """
+    home = _isolate_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.bootstrap.get_supervisor", _supervisor)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.repo_quant_method", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.recommend.parser_for_hf_id", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.recommend.serve_len_cap", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.inventory.cached_model_config", lambda *_a, **_k: {})
+    gpu_url = "http://127.0.0.1:18435/v1"
+    cpu_url = "http://127.0.0.1:18436/v1"
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "model": {
+            "provider": "custom",
+            "base_url": gpu_url,
+            "default": "qwen3:14b",
+        },
+        "providers": {
+            "vllm-gpu": {
+                "name": "vLLM GPU",
+                "base_url": gpu_url,
+                "model": "qwen3:14b",
+                "models": {"qwen3:14b": {}},
+            },
+            "vllm-cpu": {
+                "name": "vLLM CPU",
+                "base_url": cpu_url,
+                "model": "qwen3:4b",
+            },
+        },
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {
+                "device": "cpu",
+                "model": "Qwen/Qwen3-14B-AWQ",
+                "served_model_name": "qwen3:14b",
+            },
+        },
+    }), encoding="utf-8")
+    _write_device_state("gpu", port=18435, served="qwen3:14b")
+    _write_device_state("cpu", port=18436, served="SmolLM3-3B")
+
+    from hermes_cli.config import load_config
+    from hermes_cli.vllm_runtime.bootstrap import activate_vllm_provider
+    from hermes_cli.vllm_runtime.inventory import apply_vllm_model
+    from hermes_cli.web_routers.config_env import _custom_endpoint_response
+
+    apply_vllm_model("HuggingFaceTB/SmolLM3-3B")
+    activate_vllm_provider(load_config())
+    after = load_config()
+    gpu = after["providers"]["vllm-gpu"]
+    cpu = after["providers"]["vllm-cpu"]
+    assert gpu["model"] != "SmolLM3-3B"
+    assert gpu["model"] == "qwen3:14b"
+    assert gpu["base_url"].rstrip("/") == gpu_url
+    assert cpu["model"] == "SmolLM3-3B"
+    assert cpu["base_url"].rstrip("/") == cpu_url
+    assert after["model"]["base_url"].rstrip("/") == cpu_url
+    assert after["model"]["default"] == "SmolLM3-3B"
+    assert after["local_runtime"]["vllm"]["model"] == "Qwen/Qwen3-14B-AWQ"
+    assert after["local_runtime"]["vllm"]["served_model_name"] == "qwen3:14b"
+    cpu_block = after["local_runtime"]["vllm"].get("cpu") or {}
+    assert cpu_block.get("model") == "HuggingFaceTB/SmolLM3-3B"
+
+    listed = {row["id"]: row for row in _custom_endpoint_response(after)["endpoints"]}
+    assert listed["vllm-gpu"]["model"] != "SmolLM3-3B"
+    assert listed["vllm-gpu"]["model"] == "qwen3:14b"
+    assert listed["vllm-cpu"]["model"] == "SmolLM3-3B"
+    assert listed["vllm-gpu"]["name"] == "vLLM GPU"
+    assert listed["vllm-cpu"]["name"] == "vLLM CPU"
+
+
+def test_picker_does_not_show_cpu_smol_as_gpu_model(tmp_path, monkeypatch):
+    """A leftover vllm-gpu.model=SmolLM3-3B must not stay the GPU picker row."""
+    home = _isolate_home(tmp_path, monkeypatch)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "model": {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:18435/v1",
+            "default": "SmolLM3-3B",
+        },
+        "providers": {
+            "vllm-gpu": {
+                "name": "vLLM GPU",
+                "base_url": "http://127.0.0.1:18435/v1",
+                "model": "SmolLM3-3B",
+                "models": {"qwen3:14b": {}, "SmolLM3-3B": {}},
+            },
+            "vllm-cpu": {
+                "name": "vLLM CPU",
+                "base_url": "http://127.0.0.1:18436/v1",
+                "model": "SmolLM3-3B",
+            },
+        },
+        "local_runtime": {
+            "enabled": True,
+            "engine": "vllm",
+            "vllm": {
+                "device": "gpu",
+                "model": "Qwen/Qwen3-14B-AWQ",
+                "served_model_name": "qwen3:14b",
+            },
+        },
+    }), encoding="utf-8")
+    _write_device_state("gpu", port=18435, served="qwen3:14b")
+    _write_device_state("cpu", port=18436, served="SmolLM3-3B")
+
+    rows = _picker_rows(monkeypatch)
+    by_slug = {row["slug"]: row for row in rows}
+    assert by_slug["vllm-gpu"]["name"] == "vLLM GPU"
+    assert by_slug["vllm-cpu"]["name"] == "vLLM CPU"
+    gpu_models = [str(m) for m in (by_slug["vllm-gpu"].get("models") or [])]
+    cpu_models = [str(m) for m in (by_slug["vllm-cpu"].get("models") or [])]
+    assert gpu_models[0] != "SmolLM3-3B"
+    assert "qwen3:14b" in gpu_models
+    assert cpu_models[0] == "SmolLM3-3B"

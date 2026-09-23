@@ -370,6 +370,16 @@ def _endpoint_row(
     }
 
 
+def _overlay_managed_vllm_model(endpoint_id: str, base_url: str, current: str = "") -> str:
+    """GPU / CPU endpoint rows use that device's serve — never the sibling's id."""
+    try:
+        from hermes_cli.vllm_runtime.bootstrap import listed_model_for_managed_endpoint
+
+        return listed_model_for_managed_endpoint(endpoint_id, base_url, current)
+    except Exception:
+        return ""
+
+
 def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
     model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
     current_provider = str(model_cfg.get("provider", "") or "")
@@ -393,14 +403,22 @@ def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
             endpoint_id = str(provider_id)
             models = _models_from_custom_endpoint_entry(raw_entry)
             saved_name = str(raw_entry.get("name") or endpoint_id)
+            listed_model = str(
+                raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else "")
+            )
+            overlay = _overlay_managed_vllm_model(endpoint_id, base_url, listed_model)
+            if overlay and overlay != listed_model:
+                listed_model = overlay
+                if overlay not in models:
+                    models = [overlay, *[m for m in models if m != overlay]]
             # ``provider: custom`` points at one device by URL. That record is
             # current; the other device's record stays listed beside it.
             is_current = endpoint_id == current_provider or (
                 current_provider.lower() == "custom" and _endpoint_urls_match(base_url, current_base_url))
             endpoints.append(_endpoint_row(
                 endpoint_id, managed_endpoint_name_for_url(base_url) or saved_name, base_url,
-                str(raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else "")),
-                models, raw_entry.get("context_length"), bool(raw_entry.get("discover_models", True)),
+                listed_model, models, raw_entry.get("context_length"),
+                bool(raw_entry.get("discover_models", True)),
                 raw_entry, is_current, "providers",
             ))
 

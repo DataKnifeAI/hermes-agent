@@ -482,6 +482,22 @@ def _discover_flag(entry: dict):
     return discover
 
 
+def _overlay_managed_vllm_models(endpoint_id: str, api_url: str, models: list) -> list:
+    """Keep a CPU-served SmolLM3-3B off the GPU picker row."""
+    held = [str(m) for m in models if str(m).strip()]
+    current = held[0] if held else ""
+    try:
+        from hermes_cli.vllm_runtime.bootstrap import listed_model_for_managed_endpoint
+
+        served = listed_model_for_managed_endpoint(endpoint_id, api_url, current)
+    except Exception:
+        return list(models)
+    if not served:
+        return list(models)
+    rest = [m for m in held if m != served]
+    return [served, *rest]
+
+
 def _display_prefix(name: str) -> str:
     """Text before the per-model separator Hermes's own writer uses ("—" / " - ")."""
     return next((name.split(sep)[0].strip() for sep in ("—", " - ") if sep in name), name)
@@ -878,6 +894,7 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
             discovery_allowed=grp["discovery_allowed"], is_current=is_current)
         if discovered is not None:
             models_list = discovered
+        models_list = _overlay_managed_vllm_models(ep_name, api_url, models_list)
 
         b.add_endpoint_row(ep_name, display_name, api_url, models_list, is_current, native_catalog_empty)
         b.seen_slugs.update(ep_aliases)

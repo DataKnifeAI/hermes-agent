@@ -1747,8 +1747,26 @@ def catalog_models(config: dict | None = None, *, with_hf_meta: bool = False) ->
     return rows
 
 
+def _vllm_apply_prefix() -> str:
+    """CPU Use writes ``local_runtime.vllm.cpu.*``. GPU Use keeps the top-level slot.
+
+    A shared ``local_runtime.vllm.model`` write from the CPU page overwrites the
+    GPU checkpoint. ``vllm_settings`` already reads the nested CPU block.
+    """
+    from hermes_cli.config import load_config
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import CPU
+
+    if vllm_device_from_config(load_config()) == CPU:
+        return "local_runtime.vllm.cpu"
+    return "local_runtime.vllm"
+
+
 def apply_vllm_model(hf_id: str) -> dict[str, Any]:
-    """Persist ``local_runtime.vllm.model`` (+ served name). Does not start or stop a server."""
+    """Persist this device's model (+ served name). Does not start or stop a server.
+
+    CPU Use writes the nested ``vllm.cpu`` checkpoint so the GPU id stays put.
+    """
     from cli import save_config_value
     from hermes_cli.vllm_runtime.recommend import (
         as_vllm_config, parser_for_hf_id, recommend_vllm, tier_for_model,
@@ -1760,6 +1778,7 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
     blocked = unservable_reason(hid)
     if blocked:
         raise ValueError(blocked)
+    prefix = _vllm_apply_prefix()
     matched = tier_for_model(hid)
     if matched is not None:
         rec = recommend_vllm()
@@ -1780,34 +1799,34 @@ def apply_vllm_model(hf_id: str) -> dict[str, Any]:
         if rec.tier and rec.tier.model == hid:
             overlay = as_vllm_config(rec)
         for key, value in overlay.items():
-            save_config_value(f"local_runtime.vllm.{key}", value)
+            save_config_value(f"{prefix}.{key}", value)
     else:
-        save_config_value("local_runtime.vllm.model", hid)
-        save_config_value("local_runtime.vllm.served_model_name", served_name_for(hid))
+        save_config_value(f"{prefix}.model", hid)
+        save_config_value(f"{prefix}.served_model_name", served_name_for(hid))
         # Serve flag follows config.json quant_method, not an AWQ token in
         # the id (cyankiwi Hermes-*-AWQ-4bit is compressed-tensors).
         method = repo_quant_method(hid)
         save_config_value(
-            "local_runtime.vllm.quantization",
+            f"{prefix}.quantization",
             method if method in {"awq", "gptq"} else "",
         )
         # Catalog Use writes the tier parser. Search hits must pin Hermes-4
         # to hermes so leftover llama3_json / empty does not ride along.
         parser = parser_for_hf_id(hid)
         if parser:
-            save_config_value("local_runtime.vllm.tool_call_parser", parser)
+            save_config_value(f"{prefix}.tool_call_parser", parser)
         from hermes_cli.vllm_runtime.recommend import serve_len_cap
 
         cap = serve_len_cap(hid)
         if cap is not None:
             # Native 262144 leftover must not ride onto 30B-A3B-2507.
-            save_config_value("local_runtime.vllm.max_model_len", cap)
-            save_config_value("local_runtime.vllm.kv_cache_dtype", "fp8")
+            save_config_value(f"{prefix}.max_model_len", cap)
+            save_config_value(f"{prefix}.kv_cache_dtype", "fp8")
         else:
             native = native_max_model_len(cached_model_config(hid))
             if native is not None:
                 # Leftover 128k / 262144 must not ride onto a 64k-native BF16.
-                save_config_value("local_runtime.vllm.max_model_len", native)
+                save_config_value(f"{prefix}.max_model_len", native)
     return {"ok": True, "model": hid, "served_model_name": served_name_for(hid)}
 
 

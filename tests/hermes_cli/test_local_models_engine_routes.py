@@ -2086,11 +2086,21 @@ def test_apply_smolm3_writes_native_65536_not_leftover_128k(tmp_path, monkeypatc
     from hermes_cli.vllm_runtime.inventory import apply_vllm_model
 
     apply_vllm_model(hid)
-    vllm = load_config()["local_runtime"]["vllm"]
-    assert vllm["model"] == hid
-    assert vllm["served_model_name"] == "SmolLM3-3B"
-    assert int(vllm["max_model_len"]) == 65536
-    assert int(vllm["max_model_len"]) != 131072
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    cfg = load_config()
+    vllm = cfg["local_runtime"]["vllm"]
+    cpu = vllm.get("cpu") if isinstance(vllm.get("cpu"), dict) else {}
+    settings = vllm_settings(cfg)
+    assert cpu.get("model") == hid
+    assert cpu.get("served_model_name") == "SmolLM3-3B"
+    assert settings["model"] == hid
+    assert settings["served_model_name"] == "SmolLM3-3B"
+    assert int(settings["max_model_len"]) == 65536
+    assert int(settings["max_model_len"]) != 131072
+    # GPU checkpoint stays on the leftover 4B slot — CPU Use must not clobber it.
+    assert vllm["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert vllm["served_model_name"] == "qwen3:4b"
 
 
 def test_cpu_use_smol_writes_model_and_does_not_restore_qwen(tmp_path, monkeypatch):
@@ -2144,7 +2154,10 @@ def test_cpu_use_smol_writes_model_and_does_not_restore_qwen(tmp_path, monkeypat
     from hermes_cli.vllm_runtime.supervisor import vllm_settings
 
     cfg = load_config()
-    assert cfg["local_runtime"]["vllm"]["model"] == hid
+    vllm = cfg["local_runtime"]["vllm"]
+    cpu = vllm.get("cpu") if isinstance(vllm.get("cpu"), dict) else {}
+    assert cpu.get("model") == hid
+    assert vllm["model"] == previous
     assert vllm_settings(cfg)["model"] == hid
     assert vllm_settings(cfg)["model"] != previous
     assert started == [hid]
@@ -2187,8 +2200,14 @@ def test_cpu_use_failed_start_surfaces_error_keeps_smol(tmp_path, monkeypatch):
     from hermes_cli.config import load_config
     from hermes_cli.vllm_runtime.supervisor import read_last_error
 
-    assert load_config()["local_runtime"]["vllm"]["model"] == hid
-    assert load_config()["local_runtime"]["vllm"]["model"] != previous
+    from hermes_cli.vllm_runtime.supervisor import vllm_settings
+
+    cfg = load_config()
+    cpu = (cfg["local_runtime"]["vllm"].get("cpu") or {})
+    assert cpu.get("model") == hid
+    assert cfg["local_runtime"]["vllm"]["model"] == previous
+    assert vllm_settings(cfg)["model"] == hid
+    assert vllm_settings(cfg)["model"] != previous
     assert "SIGKILL" in (read_last_error("cpu") or read_last_error() or "")
 
 

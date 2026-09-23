@@ -743,7 +743,15 @@ def _vllm_runtime_row(ctx: "ConfigContext") -> dict | None:
 
     cfg = load_config()
     settings = vllm_settings(cfg)
-    served = str(settings.get("served_model_name") or settings.get("model") or "").strip()
+    from hermes_cli.vllm_runtime.bootstrap import listed_model_for_managed_endpoint
+    from hermes_cli.vllm_runtime.device import managed_endpoint_key
+
+    device = vllm_device_from_config(cfg)
+    served = listed_model_for_managed_endpoint(
+        managed_endpoint_key(device), "",
+        str(settings.get("served_model_name") or settings.get("model") or "").strip())
+    if not served:
+        served = str(settings.get("served_model_name") or settings.get("model") or "").strip()
     if not served:
         return None
     current = (ctx.current_provider or "").strip().lower() == "vllm"
