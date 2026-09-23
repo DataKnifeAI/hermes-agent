@@ -69,35 +69,51 @@ def _state_endpoint(device: str | None = None, config: dict | None = None) -> di
     }
 
 
+def _models_ready(endpoint: dict | None) -> bool:
+    """True when GET /v1/models on this serve returned a model id.
+
+    ``server.json`` is written at spawn, before CUDA/CPU warmup. Chat must
+    not treat that file as ready.
+    """
+    if not endpoint:
+        return False
+    from hermes_cli.vllm_runtime.supervisor import probe_served_model_name
+
+    return bool(probe_served_model_name(str(endpoint.get("base_url") or "")))
+
+
 def resolve_vllm_endpoint(config: dict | None = None,
                           wait_for_boot_s: float = 8.0) -> dict | None:
-    """Managed-first endpoint for ``provider: vllm``.
+    """Managed-first endpoint for the selected vLLM device.
 
-    Status/doctor pass ``wait_for_boot_s=0`` so a poll does not spawn. Chat and
-    gateway resolution use the default wait and kick an on-demand boot when the
-    engine is enabled and the isolated venv is installed.
+    Status/doctor pass ``wait_for_boot_s=0`` so a poll does not spawn. Chat
+    passes the supervisor warmup budget and, when ``local_runtime.enabled``
+    is on and this engine is vLLM, kicks only that device. Readiness is
+    GET /v1/models, not the spawn-time state file. An endpoint that is
+    already up is returned as-is so a stale pin can follow it.
     """
     from hermes_cli.local_engines import vllm_device_from_config
 
     device = vllm_device_from_config(config)
     managed = _state_endpoint(device, config)
-    if managed:
+    if managed or wait_for_boot_s <= 0:
         return managed
 
-    if wait_for_boot_s > 0 and _boot_in_flight(config):
-        from hermes_cli.local_engines import vllm_device_from_config
-        from hermes_cli.vllm_runtime.device import CPU
-        from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+    if not _boot_in_flight(config):
+        return None
 
-        if vllm_device_from_config(config) != CPU:
-            require_gpu_free()
-        _kick_managed_boot(config)
-        deadline = time.monotonic() + wait_for_boot_s
-        while time.monotonic() < deadline:
-            time.sleep(0.25)
-            managed = _state_endpoint(device, config)
-            if managed:
-                return managed
+    from hermes_cli.vllm_runtime.device import CPU
+    from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+
+    if device != CPU:
+        require_gpu_free()
+    _kick_managed_boot(config)
+    deadline = time.monotonic() + wait_for_boot_s
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        managed = _state_endpoint(device, config)
+        if managed and _models_ready(managed):
+            return managed
     return None
 
 

@@ -17,7 +17,13 @@ from utils import base_url_hostname
 logger = logging.getLogger("hermes_cli.runtime_provider")
 
 _LLAMACPP_ALIASES = ("llamacpp", "llama.cpp", "llama-cpp")
-_VLLM_ALIASES = ("vllm",)
+_VLLM_ALIASES = ("vllm", "custom:vllm")
+# ``local_runtime.enabled`` is Turn on / Turn off (and a failed start clears it
+# via disable_auto_start). This is the user-facing text when that flag is off.
+_VLLM_OFFLINE_MSG = (
+    "vLLM is offline and needs to be started. "
+    "Turn on the selected device in Settings → Providers → Local models."
+)
 
 
 def _rp():
@@ -420,43 +426,97 @@ def _configured_vllm_url(rp) -> str:
     return ""
 
 
-def _resolve_vllm_runtime(requested_provider: str, explicit_api_key: Optional[str]) -> Dict[str, Any]:
+def _selected_managed_vllm_url(url: str) -> bool:
+    """True when *url* is the managed serve of the active vLLM device.
+
+    The other device's loopback is not this chat, so resolving it must not
+    start that serve. llama.cpp and Ollama ports are not managed vLLM.
+    """
+    from hermes_cli.local_engines import engine_from_config, vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import (
+        is_vllm_engine, managed_endpoint_name, managed_endpoint_name_for_url,
+    )
+
+    try:
+        cfg = _rp().load_config()
+    except Exception:  # noqa: BLE001
+        return False
+    if not is_vllm_engine(engine_from_config(cfg)):
+        return False
+    label = managed_endpoint_name_for_url(url)
+    if not label:
+        return False
+    return label == managed_endpoint_name(vllm_device_from_config(cfg))
+
+
+def _chat_url_for_managed_resolve(requested_norm: str, explicit_base_url: Optional[str]) -> str:
+    """URL chat is asking to use, for the selected-device auto-start check."""
+    explicit = (explicit_base_url or "").strip()
+    if explicit:
+        return explicit
+    rp = _rp()
+    if requested_norm == "custom":
+        return _configured_vllm_url(rp)
+    if requested_norm in {"custom:vllm-gpu", "custom:vllm-cpu"}:
+        key = requested_norm.split(":", 1)[1]
+        try:
+            providers = rp.load_config().get("providers")
+        except Exception:  # noqa: BLE001
+            return ""
+        entry = providers.get(key) if isinstance(providers, dict) else None
+        if isinstance(entry, dict):
+            return _clean(_entry_url(entry))
+    return ""
+
+
+def _resolve_vllm_runtime(requested_provider: str, explicit_api_key: Optional[str],
+                          chat_url: str = "") -> Dict[str, Any]:
     """Managed vLLM runtime, or a typed occupancy / server-off error — never OpenRouter.
 
     Reachability is the credential (same as llamacpp). ``OccupyingLlmError`` is not
     caught: the chat path must show the detector's stop message. A remote
     ``model.base_url`` / ``providers.vllm`` URL is returned as-is (no local boot).
+    The runtime provider stays ``custom``. Auto-start waits on GET /v1/models
+    for the supervisor warmup budget, and only for the selected device.
+    ``local_runtime.enabled: false`` is Turn off — leave the server down.
     """
+    from hermes_cli.local_engines import vllm_device_from_config
+    from hermes_cli.vllm_runtime.device import CPU
     from hermes_cli.vllm_runtime.endpoint import is_loopback_url, resolve_vllm_endpoint
     from hermes_cli.vllm_runtime.occupancy import require_gpu_free
+    from hermes_cli.vllm_runtime.supervisor import READY_TIMEOUT_S
 
     rp = _rp()
-    configured = _configured_vllm_url(rp)
+    # An explicit managed loopback (this chat's device) wins over a stale
+    # remote ``model.base_url``. The alias path passes no chat_url, so a
+    # remote ``providers.vllm`` / ``model.base_url`` is still left alone.
+    configured = (chat_url or "").strip() or _configured_vllm_url(rp)
     if configured and not is_loopback_url(configured):
         return rp._runtime(
             "custom", "chat_completions", configured.rstrip("/"),
             (explicit_api_key or "").strip() or "no-key-required",
             source="custom_provider:vllm", requested_provider=requested_provider)
 
-    endpoint = resolve_vllm_endpoint()
+    endpoint = resolve_vllm_endpoint(wait_for_boot_s=READY_TIMEOUT_S)
     if endpoint:
         return rp._runtime(
             "custom", "chat_completions", endpoint["base_url"],
             (explicit_api_key or "").strip() or endpoint.get("api_key") or "no-key-required",
             source="local-runtime", requested_provider=requested_provider)
     try:
-        section = rp.load_config().get("local_runtime") or {}
-        enabled = bool(section.get("enabled"))
+        cfg = rp.load_config()
+        enabled = bool((cfg.get("local_runtime") or {}).get("enabled"))
+        device = vllm_device_from_config(cfg)
     except Exception:  # noqa: BLE001
         enabled = False
+        device = "gpu"
     if enabled:
-        require_gpu_free()
+        if device != CPU:
+            require_gpu_free()
         raise ValueError("The local model server isn't running. It may still be "
                          "starting — try again in a moment, or check Settings → "
                          "Providers → Local models.")
-    raise ValueError("The local model server is turned off. Turn it back on in "
-                     "Settings → Providers → Local models, or switch to another "
-                     "model.")
+    raise ValueError(_VLLM_OFFLINE_MSG)
 
 
 def _custom_runtime(rp, base_url: str, api_key: Any, api_mode: Optional[str], **extra: Any) -> Dict[str, Any]:
@@ -522,6 +582,16 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
 
         if not explicit_base_url or is_loopback_url(explicit_base_url):
             return _resolve_vllm_runtime(requested_provider, explicit_api_key)
+    # Chat on custom pointed at the selected device. An already-live serve
+    # falls through so a stale pin can follow server.json. Down + Turn off
+    # raises here instead of "provider vllm disabled".
+    chat_url = _chat_url_for_managed_resolve(requested_norm, explicit_base_url)
+    if chat_url and _selected_managed_vllm_url(chat_url):
+        from hermes_cli.vllm_runtime.endpoint import resolve_vllm_endpoint
+
+        if resolve_vllm_endpoint(wait_for_boot_s=0) is None:
+            return _resolve_vllm_runtime(
+                requested_provider, explicit_api_key, chat_url=chat_url)
     if requested_norm and requested_norm != "custom" and rp._resolves_to_custom(requested_norm):
         requested_norm = "custom"
     if requested_norm == "custom" and explicit_base_url:

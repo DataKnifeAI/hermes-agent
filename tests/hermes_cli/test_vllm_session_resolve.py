@@ -157,6 +157,9 @@ def test_vllm_endpoint_kicks_boot_and_waits(tmp_path, monkeypatch):
         }), encoding="utf-8")
 
     monkeypatch.setattr("hermes_cli.local_engines.ensure_managed_engine", _fake_ensure)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.probe_served_model_name",
+        lambda url, timeout_s=1.5: "qwen3:14b" if url else "")
 
     resolved = ep.resolve_vllm_endpoint(config={"local_runtime": {"enabled": True, "engine": "vllm"}},
                                         wait_for_boot_s=5.0)
@@ -167,7 +170,10 @@ def test_vllm_endpoint_kicks_boot_and_waits(tmp_path, monkeypatch):
 
 def test_vllm_boot_in_flight_real_gate(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch)
+    # Isolate the hub so a developer cache cannot satisfy the weight gate.
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     from hermes_cli.vllm_runtime import endpoint as ep
+    from hermes_cli.vllm_runtime.supervisor import configured_model_id, vllm_settings
     from hermes_cli.vllm_runtime.venv import vllm_executable
 
     enabled = {"local_runtime": {"enabled": True, "engine": "vllm"}}
@@ -175,6 +181,12 @@ def test_vllm_boot_in_flight_real_gate(tmp_path, monkeypatch):
     exe = vllm_executable()
     exe.parent.mkdir(parents=True, exist_ok=True)
     exe.write_text("", encoding="utf-8")
+    # The venv alone does not kick boot when the configured weights are absent.
+    assert ep._boot_in_flight(enabled) is False
+    hid = configured_model_id(vllm_settings(enabled))
+    cache = tmp_path / "hf" / "hub" / ("models--" + hid.replace("/", "--"))
+    cache.mkdir(parents=True)
+    (cache / "model.safetensors").write_bytes(b"x")
     assert ep._boot_in_flight(enabled) is True
     assert ep._boot_in_flight({"local_runtime": {"enabled": False, "engine": "vllm"}}) is False
     assert ep._boot_in_flight({"local_runtime": {"enabled": True, "engine": "llamacpp"}}) is False
@@ -277,3 +289,156 @@ def test_vllm_endpoint_wait_zero_does_not_kick(tmp_path, monkeypatch):
     monkeypatch.setattr(ep, "_kick_managed_boot", lambda config: kicked.append("kick"))
     assert ep.resolve_vllm_endpoint(wait_for_boot_s=0) is None
     assert kicked == []
+
+
+def _managed_chat_config(*, device: str, enabled: bool, base_url: str,
+                         provider: str = "custom", vllm_block: dict | None = None) -> dict:
+    """Chat on custom (or an explicit request) with the hidden legacy vLLM slot."""
+    legacy = {"name": "vLLM", "base_url": "", "enabled": False}
+    if vllm_block is not None:
+        legacy = vllm_block
+    return {
+        "model": {"provider": provider, "default": "qwen3:4b", "base_url": base_url},
+        "providers": {
+            "vllm": legacy,
+            "vllm-gpu": {
+                "name": "vLLM GPU",
+                "base_url": "http://127.0.0.1:18435/v1",
+                "model": "qwen3:14b",
+            },
+            "vllm-cpu": {
+                "name": "vLLM CPU",
+                "base_url": "http://127.0.0.1:18436/v1",
+                "model": "qwen3:4b",
+            },
+        },
+        "local_runtime": {
+            "enabled": enabled,
+            "engine": "vllm",
+            "vllm": {
+                "device": device,
+                "model": "Qwen/Qwen3-4B" if device == "cpu" else "Qwen/Qwen3-14B-AWQ",
+                "served_model_name": "qwen3:4b" if device == "cpu" else "qwen3:14b",
+            },
+        },
+    }
+
+
+def _install_managed_chat(home, monkeypatch, cfg: dict) -> list:
+    """Write *cfg* and record which device an on-demand boot would start.
+
+    The boot gate is real (``local_runtime.enabled`` + engine vllm). The
+    serve itself is fake: it records the device and writes that device's
+    state file so GET /v1/models can succeed without a GPU.
+    """
+    (home / "config.yaml").write_text(yaml.dump(cfg), encoding="utf-8")
+    started: list[str] = []
+
+    def _fake_ensure(config=None, force=False):
+        from hermes_cli.local_engines import vllm_device_from_config
+        from hermes_cli.vllm_runtime.supervisor import state_path
+
+        device = vllm_device_from_config(config)
+        started.append(device)
+        port = 18436 if device == "cpu" else 18435
+        path = state_path(device)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "base_url": f"http://127.0.0.1:{port}/v1",
+            "pid": os.getpid(),
+            "served_model_name": "qwen3:4b" if device == "cpu" else "qwen3:14b",
+        }), encoding="utf-8")
+        return object()
+
+    monkeypatch.setattr("hermes_cli.local_engines.ensure_managed_engine", _fake_ensure)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.venv.venv_ready", lambda device=None: True)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.configured_cache_missing", lambda settings: False)
+    monkeypatch.setattr("hermes_cli.vllm_runtime.occupancy.require_gpu_free", lambda: None)
+    monkeypatch.setattr(
+        "hermes_cli.vllm_runtime.supervisor.probe_served_model_name",
+        lambda url, timeout_s=1.5: "ready" if url else "")
+    return started
+
+
+def test_disabled_legacy_vllm_does_not_fail_custom_managed_chat(tmp_path, monkeypatch):
+    """Hidden ``providers.vllm`` must not fail init when chat is custom on either device URL."""
+    home = _home(tmp_path, monkeypatch)
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    for device, url in (("gpu", "http://127.0.0.1:18435/v1"), ("cpu", "http://127.0.0.1:18436/v1")):
+        started = _install_managed_chat(home, monkeypatch, _managed_chat_config(
+            device=device, enabled=True, base_url=url))
+        runtime = resolve_runtime_provider(requested="custom")
+        assert runtime["provider"] == "custom"
+        assert url.rstrip("/") in runtime["base_url"]
+        assert "openrouter" not in (runtime.get("base_url") or "").lower()
+        assert started == [device]
+
+        started_alias = _install_managed_chat(home, monkeypatch, _managed_chat_config(
+            device=device, enabled=True, base_url=url))
+        # Drop the state file the previous boot wrote so this request starts again.
+        from hermes_cli.vllm_runtime.supervisor import state_path
+        state_path(device).unlink(missing_ok=True)
+        alias = resolve_runtime_provider(requested="vllm")
+        assert alias["provider"] == "custom"
+        assert url.rstrip("/") in alias["base_url"]
+        assert started_alias == [device]
+
+
+def test_explicit_vllm_off_does_not_spawn(tmp_path, monkeypatch):
+    """``local_runtime.enabled: false`` is Turn off — do not start either device."""
+    home = _home(tmp_path, monkeypatch)
+    started = _install_managed_chat(home, monkeypatch, _managed_chat_config(
+        device="cpu", enabled=False, base_url="http://127.0.0.1:18436/v1"))
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    with pytest.raises(ValueError, match="vLLM is offline") as exc:
+        resolve_runtime_provider(requested="custom")
+    assert "Turn on" in str(exc.value)
+    assert "disabled in config" not in str(exc.value)
+    assert started == []
+
+
+def test_selected_device_starts_when_engine_is_on(tmp_path, monkeypatch):
+    """Only the device in ``local_runtime.vllm.device`` starts, and only when enabled."""
+    home = _home(tmp_path, monkeypatch)
+    started = _install_managed_chat(home, monkeypatch, _managed_chat_config(
+        device="gpu", enabled=True, base_url="http://127.0.0.1:18435/v1"))
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    runtime = resolve_runtime_provider()
+    assert runtime["provider"] == "custom"
+    assert "18435" in runtime["base_url"]
+    assert started == ["gpu"]
+
+
+def test_other_managed_device_url_does_not_spawn(tmp_path, monkeypatch):
+    """Chat pinned at the sibling serve must not start the selected device or the sibling."""
+    home = _home(tmp_path, monkeypatch)
+    started = _install_managed_chat(home, monkeypatch, _managed_chat_config(
+        device="cpu", enabled=True, base_url="http://127.0.0.1:18435/v1"))
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    runtime = resolve_runtime_provider(requested="custom")
+    assert runtime["provider"] == "custom"
+    assert "18435" in runtime["base_url"]
+    assert started == []
+
+
+def test_disabled_remote_vllm_still_raises(tmp_path, monkeypatch):
+    """A remote ``providers.vllm`` the user turned off stays disabled."""
+    home = _home(tmp_path, monkeypatch)
+    _install_managed_chat(home, monkeypatch, _managed_chat_config(
+        device="gpu", enabled=True, base_url="http://gpu-box.example:8000/v1",
+        provider="vllm",
+        vllm_block={
+            "name": "GPU box",
+            "base_url": "http://gpu-box.example:8000/v1",
+            "enabled": False,
+        },
+    ))
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    with pytest.raises(ValueError, match="disabled in config"):
+        resolve_runtime_provider(requested="vllm")
